@@ -1,0 +1,832 @@
+import { describe, expect, it } from "vitest";
+import {
+  runBootstrap,
+  runHistoricalSequences,
+  simulatePath,
+  type MonteCarloInputs,
+} from "@/lib/projection/monteCarlo";
+import type { AnnualRealReturns } from "@/lib/data/historicalReturns";
+
+// Deterministic test dataset — simple repeating pattern so tests
+// can hand-check trajectories without needing the real Damodaran
+// numbers. 5 years of fixed returns.
+const TEST_DATASET: readonly AnnualRealReturns[] = [
+  // +10% / +5% / +1% stocks/bonds/cash; alt columns flat so blends
+  // are easy to hand-check.
+  { year: 2000, stocks: 0.10, bonds: 0.05, cash: 0.01, corpBonds: 0.0, realEstate: 0.0, gold: 0.0 },
+  { year: 2001, stocks: -0.20, bonds: 0.0, cash: 0.0, corpBonds: 0.0, realEstate: 0.0, gold: 0.0 },
+  { year: 2002, stocks: 0.10, bonds: 0.05, cash: 0.01, corpBonds: 0.0, realEstate: 0.0, gold: 0.0 },
+  { year: 2003, stocks: 0.10, bonds: 0.05, cash: 0.01, corpBonds: 0.0, realEstate: 0.0, gold: 0.0 },
+  { year: 2004, stocks: 0.10, bonds: 0.05, cash: 0.01, corpBonds: 0.0, realEstate: 0.0, gold: 0.0 },
+];
+
+const ALL_STOCKS: MonteCarloInputs["allocation"] = {
+  stocksFraction: 1,
+  bondsFraction: 0,
+  cashFraction: 0,
+};
+
+describe("simulatePath — single-path deterministic math", () => {
+  it("no contributions, no spend: NW compounds at stock return when 100% stocks", () => {
+    const path = simulatePath(
+      {
+        startingNetWorthUSD: 1_000_000,
+        allocation: ALL_STOCKS,
+        annualSpendUSD: 0,
+        annualContributionUSD: 0,
+        yearsUntilRetirement: 0,
+        retirementHorizonYears: 2,
+      },
+      [0.1, 0.1],
+      [0, 0],
+      [0, 0],
+      [0, 0],
+      [0, 0],
+      "test",
+    );
+    // year 0: 1M → 1.1M (after +10%)
+    // year 1: 1.1M → 1.21M
+    expect(path.trajectory).toEqual([1_000_000, 1_100_000, 1_210_000]);
+    expect(path.survived).toBe(true);
+    expect(path.endingNetWorthUSD).toBeCloseTo(1_210_000, 0);
+  });
+
+  it("60/40 blend applies weighted returns correctly", () => {
+    const path = simulatePath(
+      {
+        startingNetWorthUSD: 1_000_000,
+        allocation: {
+          stocksFraction: 0.6,
+          bondsFraction: 0.4,
+          cashFraction: 0,
+        },
+        annualSpendUSD: 0,
+        retirementHorizonYears: 1,
+      },
+      [0.1],
+      [0.05],
+      [0],
+      [0],
+      [0],
+      "test",
+    );
+    // 600k @ +10% = 660k. 400k @ +5% = 420k. Total = 1.08M.
+    expect(path.trajectory[1]).toBeCloseTo(1_080_000, 0);
+  });
+
+  it("retirement spend draws down portfolio each year", () => {
+    const path = simulatePath(
+      {
+        startingNetWorthUSD: 1_000_000,
+        allocation: ALL_STOCKS,
+        annualSpendUSD: 50_000,
+        retirementHorizonYears: 2,
+      },
+      [0, 0], // 0% returns to isolate spend effect
+      [0, 0],
+      [0, 0],
+      [0, 0],
+      [0, 0],
+      "test",
+    );
+    // year 0: 1M @ 0% = 1M, then -50k spend = 950k
+    // year 1: 950k @ 0% = 950k, then -50k = 900k
+    expect(path.trajectory).toEqual([1_000_000, 950_000, 900_000]);
+  });
+
+  it("contributions accrue pre-retirement, spend hits post-retirement", () => {
+    const path = simulatePath(
+      {
+        startingNetWorthUSD: 100_000,
+        allocation: ALL_STOCKS,
+        annualSpendUSD: 30_000,
+        annualContributionUSD: 20_000,
+        yearsUntilRetirement: 2,
+        retirementHorizonYears: 2,
+      },
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+      "test",
+    );
+    // Pre-retirement years 0,1: +20k contribution each
+    // year 0: 100k → 120k
+    // year 1: 120k → 140k
+    // Retirement years 2,3: -30k spend each
+    // year 2: 140k → 110k
+    // year 3: 110k → 80k
+    expect(path.trajectory).toEqual([
+      100_000, 120_000, 140_000, 110_000, 80_000,
+    ]);
+  });
+
+  it("portfolio failure: NW hits 0 and stays there; failedAtYear is recorded", () => {
+    const path = simulatePath(
+      {
+        startingNetWorthUSD: 50_000,
+        allocation: ALL_STOCKS,
+        annualSpendUSD: 30_000,
+        retirementHorizonYears: 3,
+      },
+      [0, 0, 0],
+      [0, 0, 0],
+      [0, 0, 0],
+      [0, 0, 0],
+      [0, 0, 0],
+      "test",
+    );
+    // year 0: 50k - 30k = 20k
+    // year 1: 20k - 30k = -10k → clamp to 0, failedAtYear=2
+    // year 2: 0 - 30k = -30k → still 0
+    expect(path.survived).toBe(false);
+    expect(path.failedAtYear).toBe(2);
+    expect(path.endingNetWorthUSD).toBe(0);
+  });
+
+  it("'other' allocation folds into stocks by default", () => {
+    const path = simulatePath(
+      {
+        startingNetWorthUSD: 1_000_000,
+        allocation: {
+          stocksFraction: 0.5,
+          bondsFraction: 0,
+          cashFraction: 0,
+          otherFraction: 0.5,
+        },
+        annualSpendUSD: 0,
+        retirementHorizonYears: 1,
+      },
+      [0.1],
+      [0],
+      [0],
+      [0],
+      [0],
+      "test",
+    );
+    // With otherTreatedAsStocks (default), 100% effectively stocks
+    expect(path.trajectory[1]).toBeCloseTo(1_100_000, 0);
+  });
+
+  it("mid-year cash flow convention: spend in a -10% year drops NW by spend × (1 + r/2)", () => {
+    // Mid-year convention: cash flow at mid-year earns half the
+    // year's return on the not-yet-spent portion. In a -10% year,
+    // $40k spent at mid-year drops NW by $40k × (1 - 0.05) = $38k
+    // (not $40k — the spend "avoided" the second half of the drop).
+    // This matches the deterministic engine's monthly behavior.
+    const path = simulatePath(
+      {
+        startingNetWorthUSD: 1_000_000,
+        allocation: ALL_STOCKS,
+        annualSpendUSD: 40_000,
+        retirementHorizonYears: 1,
+      },
+      [-0.1],
+      [0],
+      [0],
+      [0],
+      [0],
+      "test",
+    );
+    // r = -0.10. nw_after_returns = 1M × 0.9 = 900k.
+    // cf = -40k. mid-year-adjusted cf = -40k × (1 + -0.05) = -38k.
+    // nw_eoy = 900k - 38k = 862k.
+    expect(path.trajectory[1]).toBeCloseTo(862_000, 0);
+  });
+
+  it("mid-year cash flow convention: contribution in a +10% year adds contribution × (1 + r/2)", () => {
+    // Symmetric to above: a $20k contribution at mid-year in a +10%
+    // year contributes $20k × 1.05 = $21k to year-end NW. The
+    // contribution earned 5% (half the year's return) on average.
+    const path = simulatePath(
+      {
+        startingNetWorthUSD: 100_000,
+        allocation: ALL_STOCKS,
+        annualSpendUSD: 0,
+        annualContributionUSD: 20_000,
+        yearsUntilRetirement: 1,
+        retirementHorizonYears: 0,
+      },
+      [0.1],
+      [0],
+      [0],
+      [0],
+      [0],
+      "test",
+    );
+    // r = +0.10. nw_after_returns = 100k × 1.1 = 110k.
+    // cf = +20k. mid-year-adjusted cf = 20k × 1.05 = 21k.
+    // nw_eoy = 110k + 21k = 131k.
+    expect(path.trajectory[1]).toBeCloseTo(131_000, 0);
+  });
+
+  it("'other' folds into cash when otherTreatedAsStocks=false", () => {
+    const path = simulatePath(
+      {
+        startingNetWorthUSD: 1_000_000,
+        allocation: {
+          stocksFraction: 0.5,
+          bondsFraction: 0,
+          cashFraction: 0,
+          otherFraction: 0.5,
+        },
+        annualSpendUSD: 0,
+        retirementHorizonYears: 1,
+        otherTreatedAsStocks: false,
+      },
+      [0.1],
+      [0],
+      [0],
+      [0],
+      [0],
+      "test",
+    );
+    // 50% stocks @ +10% = 50k gain. 50% cash @ 0% = 0 gain. Total: 1.05M.
+    expect(path.trajectory[1]).toBeCloseTo(1_050_000, 0);
+  });
+});
+
+describe("simulatePath — dynamic-spending haircut (down-year guardrail)", () => {
+  // The dynamic-haircut feature reduces the variable portion of
+  // each year's withdrawal IF the prior year's stock return was
+  // negative. Pin the in-loop math so the feature can't silently
+  // regress (e.g. someone "fixes" the year-0 special case and
+  // accidentally applies the haircut on the very first year).
+  //
+  // Hand-built dataset for these tests:
+  //   y0: stocks +10%      ← year 0, no prior, never haircut
+  //   y1: stocks -20%      ← prior (y0) was UP → no haircut
+  //   y2: stocks +10%      ← prior (y1) was DOWN → haircut FIRES
+  //   y3: stocks +10%      ← prior (y2) was UP → no haircut
+  //   y4: stocks +10%      ← prior (y3) was UP → no haircut
+  // All bonds/cash flat at 0 so the trajectory is purely
+  // stock-driven.
+  const ALL_CASH: MonteCarloInputs["allocation"] = {
+    stocksFraction: 0,
+    bondsFraction: 0,
+    cashFraction: 1,
+  };
+
+  it("always-apply mode: haircut fires every retirement year", () => {
+    // 5y all-cash, 0% returns, $100k spend, $30k variable, 50% rate.
+    // Always-apply: every year withdraws $100k - $30k × 50% = $85k.
+    // Trajectory: 1M → 915 → 830 → 745 → 660 → 575k.
+    const path = simulatePath(
+      {
+        startingNetWorthUSD: 1_000_000,
+        allocation: ALL_CASH,
+        annualSpendUSD: 100_000,
+        spending: {
+          variableUSD: 30_000,
+          haircut: { rate: 0.5, onlyAfterDownYear: false },
+        },
+        retirementHorizonYears: 5,
+      },
+      [0, 0, 0, 0, 0], // stocks (irrelevant — 0% allocation)
+      [0, 0, 0, 0, 0], // bonds
+      [0, 0, 0, 0, 0], // cash
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      "always-apply",
+    );
+    // Cash flow happens at mid-year with 0% return, so withdrawal
+    // is exactly $85k (no return-adjustment factor).
+    expect(path.trajectory[1]).toBeCloseTo(915_000, 0);
+    expect(path.trajectory[5]).toBeCloseTo(575_000, 0);
+  });
+
+  it("down-year-only mode: skips haircut after up years, applies after down years", () => {
+    // Prior-year stock returns drive the haircut. We pass real
+    // stock returns (the simulator reads stockReturns[y-1]) but
+    // 0% allocation → trajectory math doesn't move with stocks.
+    // This isolates the haircut-application rule from portfolio
+    // math, so the trajectory cleanly reflects which years were
+    // haircut-applied.
+    const path = simulatePath(
+      {
+        startingNetWorthUSD: 1_000_000,
+        allocation: ALL_CASH,
+        annualSpendUSD: 100_000,
+        spending: {
+          variableUSD: 30_000,
+          haircut: { rate: 0.5, onlyAfterDownYear: true },
+        },
+        retirementHorizonYears: 5,
+      },
+      [0.10, -0.20, 0.10, 0.10, 0.10], // stock signal series
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      "down-year",
+    );
+    // y0: no prior   → withdraw 100k. NW: 1.0M → 0.9M
+    // y1: prior +10% → withdraw 100k. NW: 0.9M → 0.8M
+    // y2: prior -20% → withdraw 85k.  NW: 0.8M → 0.715M
+    // y3: prior +10% → withdraw 100k. NW: 0.715M → 0.615M
+    // y4: prior +10% → withdraw 100k. NW: 0.615M → 0.515M
+    expect(path.trajectory[1]).toBeCloseTo(900_000, 0);
+    expect(path.trajectory[2]).toBeCloseTo(800_000, 0);
+    expect(path.trajectory[3]).toBeCloseTo(715_000, 0);
+    expect(path.trajectory[4]).toBeCloseTo(615_000, 0);
+    expect(path.trajectory[5]).toBeCloseTo(515_000, 0);
+  });
+
+  it("year 0 never haircut even when conditional flag is on", () => {
+    // Year 0 has no prior year — the conditional rule has no
+    // signal to read. Decision: don't fire. Test makes that
+    // contract explicit so it can't drift.
+    const path = simulatePath(
+      {
+        startingNetWorthUSD: 100_000,
+        allocation: ALL_CASH,
+        annualSpendUSD: 50_000,
+        spending: {
+          variableUSD: 50_000,
+          haircut: { rate: 1.0, onlyAfterDownYear: true },
+        },
+        retirementHorizonYears: 1,
+      },
+      [-0.50], // doesn't matter — y0 has no PRIOR year
+      [0],
+      [0],
+      [0],
+      [0],
+      "y0",
+    );
+    // Withdraw full 50k in y0 → NW goes to 50k, not 100k.
+    expect(path.trajectory[1]).toBeCloseTo(50_000, 0);
+  });
+
+  it("no spending config = baseline behavior preserved (back-compat)", () => {
+    // Callers that don't opt into dynamic-spending should see
+    // EXACTLY the pre-feature math — the simulator must not apply
+    // any haircut when `spending` is undefined.
+    const path = simulatePath(
+      {
+        startingNetWorthUSD: 1_000_000,
+        allocation: ALL_CASH,
+        annualSpendUSD: 100_000,
+        retirementHorizonYears: 3,
+      },
+      [-0.50, -0.50, -0.50],
+      [0, 0, 0],
+      [0, 0, 0],
+      [0, 0, 0],
+      [0, 0, 0],
+      "back-compat",
+    );
+    // No haircut applied → straight 100k/yr withdrawal.
+    expect(path.trajectory[3]).toBeCloseTo(700_000, 0);
+  });
+
+  it("haircut applies in retirement only, not pre-retirement contribution years", () => {
+    // 2 pre-retirement years (contributions) followed by 2
+    // retirement years. The conditional rule should NOT touch
+    // contribution years even if the simulator can read prior
+    // stock returns. (Haircut is a retirement-spending concept.)
+    const path = simulatePath(
+      {
+        startingNetWorthUSD: 1_000_000,
+        allocation: ALL_CASH,
+        annualSpendUSD: 100_000,
+        annualContributionUSD: 50_000,
+        yearsUntilRetirement: 2,
+        spending: {
+          variableUSD: 50_000,
+          haircut: { rate: 1.0, onlyAfterDownYear: false },
+        },
+        retirementHorizonYears: 2,
+      },
+      [-0.5, -0.5, -0.5, -0.5],
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+      "phase",
+    );
+    // y0, y1: contribute +50k each   → NW 1.0M → 1.05M → 1.10M
+    // y2, y3: retire, withdraw 50k   → NW 1.10M → 1.05M → 1.00M
+    expect(path.trajectory[1]).toBeCloseTo(1_050_000, 0);
+    expect(path.trajectory[2]).toBeCloseTo(1_100_000, 0);
+    expect(path.trajectory[3]).toBeCloseTo(1_050_000, 0);
+    expect(path.trajectory[4]).toBeCloseTo(1_000_000, 0);
+  });
+});
+
+describe("simulatePath — haircut mode comparison invariants", () => {
+  // High-level invariants that compare the three modes (none /
+  // always / down-year-only) on the same inputs. These pin the
+  // expected qualitative ordering — the user's mental model is
+  // "always-apply maxes survival, conditional sits in the middle,
+  // no-haircut floors it" — and the math must reflect it.
+  const baseInputs: Omit<MonteCarloInputs, "spending"> = {
+    startingNetWorthUSD: 1_000_000,
+    allocation: { stocksFraction: 1, bondsFraction: 0, cashFraction: 0 },
+    annualSpendUSD: 60_000,
+    retirementHorizonYears: 30,
+  };
+
+  function survivalRate(spending: MonteCarloInputs["spending"]): number {
+    // Use the real historical dataset so we exercise the
+    // simulator end-to-end.
+    const inputs = spending ? { ...baseInputs, spending } : baseInputs;
+    const result = runHistoricalSequences(inputs);
+    return result.successRate;
+  }
+
+  it("always-apply >= down-year-only >= no-haircut survival rate", () => {
+    const noHaircut = survivalRate(undefined);
+    const downYearOnly = survivalRate({
+      variableUSD: 30_000,
+      haircut: { rate: 0.5, onlyAfterDownYear: true },
+    });
+    const alwaysApply = survivalRate({
+      variableUSD: 30_000,
+      haircut: { rate: 0.5, onlyAfterDownYear: false },
+    });
+    // The qualitative ordering — every step adds withdrawal-
+    // reduction firepower, so survival rate is monotone non-
+    // decreasing in that order.
+    expect(downYearOnly).toBeGreaterThanOrEqual(noHaircut);
+    expect(alwaysApply).toBeGreaterThanOrEqual(downYearOnly);
+  });
+
+  it("conditional mode produces a strictly different result than always-apply (proves it actually fires conditionally)", () => {
+    // Sanity: if the conditional rule were a no-op (always-fires
+    // or never-fires regardless of the flag), this would equal
+    // alwaysApply or noHaircut. Asserting both inequalities
+    // catches the silent-no-op regression.
+    const noHaircut = survivalRate(undefined);
+    const downYearOnly = survivalRate({
+      variableUSD: 30_000,
+      haircut: { rate: 0.5, onlyAfterDownYear: true },
+    });
+    const alwaysApply = survivalRate({
+      variableUSD: 30_000,
+      haircut: { rate: 0.5, onlyAfterDownYear: false },
+    });
+    expect(downYearOnly).not.toBe(noHaircut);
+    expect(downYearOnly).not.toBe(alwaysApply);
+  });
+});
+
+describe("simulatePath — incomePerYearUSD (future-income streams)", () => {
+  // Locked-in semantic: income flows in EVERY year of the
+  // simulation it's set for (both accumulation and retirement),
+  // ADDING to the year's cash flow. Pre-feature, the simulator
+  // had no concept of in-loop income — these tests pin the new
+  // contract so it can't silently regress.
+  const ALL_CASH: MonteCarloInputs["allocation"] = {
+    stocksFraction: 0,
+    bondsFraction: 0,
+    cashFraction: 1,
+  };
+
+  it("retirement-phase income offsets withdrawal one-for-one", () => {
+    // 5y all-cash, 0% returns, $100k spend.
+    // Without income: $100k withdrawn each year → 1M, 900, 800, 700, 600, 500.
+    // With $40k income each year: net $60k withdrawn → 1M, 940, 880, 820, 760, 700.
+    const path = simulatePath(
+      {
+        startingNetWorthUSD: 1_000_000,
+        allocation: ALL_CASH,
+        annualSpendUSD: 100_000,
+        retirementHorizonYears: 5,
+        incomePerYearUSD: [40_000, 40_000, 40_000, 40_000, 40_000],
+      },
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      "income-flat",
+    );
+    expect(path.trajectory[1]).toBeCloseTo(940_000, 0);
+    expect(path.trajectory[5]).toBeCloseTo(700_000, 0);
+  });
+
+  it("intermittent income (only some years) only fires in active years", () => {
+    // Income $50k only in years 1, 2, 3 (3-year consulting gig).
+    // No income in years 0 + 4.
+    // 0% returns, $100k spend.
+    // Trajectory:
+    //   y0: -100k     → 900k
+    //   y1: -100+50=-50 → 850k
+    //   y2: -50       → 800k
+    //   y3: -50       → 750k
+    //   y4: -100      → 650k
+    const path = simulatePath(
+      {
+        startingNetWorthUSD: 1_000_000,
+        allocation: ALL_CASH,
+        annualSpendUSD: 100_000,
+        retirementHorizonYears: 5,
+        incomePerYearUSD: [0, 50_000, 50_000, 50_000, 0],
+      },
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      "income-intermittent",
+    );
+    expect(path.trajectory[1]).toBeCloseTo(900_000, 0);
+    expect(path.trajectory[2]).toBeCloseTo(850_000, 0);
+    expect(path.trajectory[3]).toBeCloseTo(800_000, 0);
+    expect(path.trajectory[4]).toBeCloseTo(750_000, 0);
+    expect(path.trajectory[5]).toBeCloseTo(650_000, 0);
+  });
+
+  it("accumulation-phase income BOOSTS contributions (positive cash flow stacks)", () => {
+    // 2 pre-retirement years with $50k contribution + $30k
+    // side income → net +$80k/yr in accumulation.
+    // 0 retirement years (just verify accumulation math).
+    const path = simulatePath(
+      {
+        startingNetWorthUSD: 100_000,
+        allocation: ALL_CASH,
+        annualSpendUSD: 0,
+        annualContributionUSD: 50_000,
+        yearsUntilRetirement: 2,
+        retirementHorizonYears: 0,
+        incomePerYearUSD: [30_000, 30_000],
+      },
+      [0, 0],
+      [0, 0],
+      [0, 0],
+      [0, 0],
+      [0, 0],
+      "income-accumulation",
+    );
+    // y0: +50+30 = +80 → 180k
+    // y1: +80 → 260k
+    expect(path.trajectory[1]).toBeCloseTo(180_000, 0);
+    expect(path.trajectory[2]).toBeCloseTo(260_000, 0);
+  });
+
+  it("no incomePerYearUSD = baseline behavior preserved (back-compat)", () => {
+    // Callers that don't pass the field should see EXACTLY the
+    // pre-feature math. Critical regression guard for the 95%
+    // of test cases written before this feature existed.
+    const path = simulatePath(
+      {
+        startingNetWorthUSD: 1_000_000,
+        allocation: ALL_CASH,
+        annualSpendUSD: 100_000,
+        retirementHorizonYears: 5,
+      },
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      "no-income",
+    );
+    expect(path.trajectory[5]).toBeCloseTo(500_000, 0);
+  });
+
+  it("income that exceeds spend in a year boosts NW (positive net cash flow in retirement)", () => {
+    // Real scenario: a high-earning consulting gig early in
+    // retirement that net adds to the portfolio. $200k income
+    // vs $100k spend → +$100k cash flow → NW goes UP that year.
+    const path = simulatePath(
+      {
+        startingNetWorthUSD: 1_000_000,
+        allocation: ALL_CASH,
+        annualSpendUSD: 100_000,
+        retirementHorizonYears: 2,
+        incomePerYearUSD: [200_000, 0],
+      },
+      [0, 0],
+      [0, 0],
+      [0, 0],
+      [0, 0],
+      [0, 0],
+      "income-exceeds-spend",
+    );
+    expect(path.trajectory[1]).toBeCloseTo(1_100_000, 0);
+    expect(path.trajectory[2]).toBeCloseTo(1_000_000, 0);
+  });
+
+  it("array shorter than totalYears: extra years read as 0 (defensive)", () => {
+    // Simulator should treat indexes past the array as 0
+    // rather than crash on undefined arithmetic. Catches an
+    // upstream mismatch (caller computed wrong horizon)
+    // without producing NaN trajectories.
+    const path = simulatePath(
+      {
+        startingNetWorthUSD: 1_000_000,
+        allocation: ALL_CASH,
+        annualSpendUSD: 100_000,
+        retirementHorizonYears: 3,
+        incomePerYearUSD: [50_000], // only year 0
+      },
+      [0, 0, 0],
+      [0, 0, 0],
+      [0, 0, 0],
+      [0, 0, 0],
+      [0, 0, 0],
+      "income-short",
+    );
+    // y0: -100 + 50 = -50 → 950k
+    // y1: -100        → 850k
+    // y2: -100        → 750k
+    expect(path.trajectory[1]).toBeCloseTo(950_000, 0);
+    expect(path.trajectory[3]).toBeCloseTo(750_000, 0);
+  });
+
+  it("income materially raises historical-MC survival rate", () => {
+    // Smoke test: at a marginal spend level where a portfolio
+    // sometimes fails, adding consulting income should
+    // monotonically improve survival. Catches a wiring bug
+    // where the income reaches the sim but the math is inverted.
+    const base: MonteCarloInputs = {
+      startingNetWorthUSD: 1_000_000,
+      allocation: { stocksFraction: 1, bondsFraction: 0, cashFraction: 0 },
+      annualSpendUSD: 60_000,
+      retirementHorizonYears: 30,
+    };
+    const noIncome = runHistoricalSequences(base);
+    const withIncome = runHistoricalSequences({
+      ...base,
+      // $30k/yr for the first 5 years — meaningful when the
+      // sequence-of-returns risk is concentrated in early years.
+      incomePerYearUSD: [30_000, 30_000, 30_000, 30_000, 30_000],
+    });
+    expect(withIncome.successRate).toBeGreaterThanOrEqual(noIncome.successRate);
+  });
+});
+
+describe("runHistoricalSequences — walks every starting year", () => {
+  it("produces (dataset.length - totalYears + 1) paths", () => {
+    const result = runHistoricalSequences(
+      {
+        startingNetWorthUSD: 1_000_000,
+        allocation: ALL_STOCKS,
+        annualSpendUSD: 0,
+        retirementHorizonYears: 2,
+      },
+      { dataset: TEST_DATASET },
+    );
+    // 5 years, 2-year horizon → 4 starting points (2000, 2001, 2002, 2003)
+    expect(result.pathCount).toBe(4);
+    expect(result.paths.map((p) => p.id)).toEqual([
+      "2000",
+      "2001",
+      "2002",
+      "2003",
+    ]);
+  });
+
+  it("100% success when spend is 0", () => {
+    const result = runHistoricalSequences(
+      {
+        startingNetWorthUSD: 1_000_000,
+        allocation: ALL_STOCKS,
+        annualSpendUSD: 0,
+        retirementHorizonYears: 3,
+      },
+      { dataset: TEST_DATASET },
+    );
+    expect(result.successRate).toBe(1);
+  });
+
+  it("0% success when spend always exceeds portfolio", () => {
+    const result = runHistoricalSequences(
+      {
+        startingNetWorthUSD: 10_000,
+        allocation: ALL_STOCKS,
+        annualSpendUSD: 1_000_000,
+        retirementHorizonYears: 3,
+      },
+      { dataset: TEST_DATASET },
+    );
+    expect(result.successRate).toBe(0);
+  });
+
+  it("returns empty result for zero horizon", () => {
+    const result = runHistoricalSequences({
+      startingNetWorthUSD: 1_000_000,
+      allocation: ALL_STOCKS,
+      annualSpendUSD: 0,
+      retirementHorizonYears: 0,
+    });
+    expect(result.pathCount).toBe(0);
+    expect(result.paths).toEqual([]);
+  });
+});
+
+describe("runBootstrap — random sampling with replacement", () => {
+  it("is deterministic given a seed", () => {
+    const inputs: MonteCarloInputs = {
+      startingNetWorthUSD: 1_000_000,
+      allocation: ALL_STOCKS,
+      annualSpendUSD: 40_000,
+      retirementHorizonYears: 5,
+    };
+    const a = runBootstrap(inputs, {
+      dataset: TEST_DATASET,
+      paths: 50,
+      seed: 42,
+    });
+    const b = runBootstrap(inputs, {
+      dataset: TEST_DATASET,
+      paths: 50,
+      seed: 42,
+    });
+    expect(a.successRate).toBe(b.successRate);
+    expect(a.endingNetWorthPercentiles.p50).toBeCloseTo(
+      b.endingNetWorthPercentiles.p50,
+      2,
+    );
+  });
+
+  it("produces the requested number of paths", () => {
+    const result = runBootstrap(
+      {
+        startingNetWorthUSD: 1_000_000,
+        allocation: ALL_STOCKS,
+        annualSpendUSD: 0,
+        retirementHorizonYears: 3,
+      },
+      { dataset: TEST_DATASET, paths: 123, seed: 1 },
+    );
+    expect(result.pathCount).toBe(123);
+  });
+
+  it("respects blockSize > 1 by stitching consecutive years", () => {
+    // With blockSize = 5, each draw pulls a full 5-year run. Over
+    // a 5-year horizon, every path is one whole block — and the
+    // dataset only has 5 starting positions, so we should see
+    // limited variance even with many paths.
+    const result = runBootstrap(
+      {
+        startingNetWorthUSD: 1_000_000,
+        allocation: ALL_STOCKS,
+        annualSpendUSD: 0,
+        retirementHorizonYears: 5,
+      },
+      {
+        dataset: TEST_DATASET,
+        paths: 500,
+        blockSize: 5,
+        seed: 7,
+      },
+    );
+    // Should hit every possible starting year. Unique ending NWs
+    // should be at most 5.
+    const uniqueEndings = new Set(
+      result.paths.map((p) => Math.round(p.endingNetWorthUSD)),
+    );
+    expect(uniqueEndings.size).toBeLessThanOrEqual(5);
+  });
+});
+
+describe("Percentile aggregation invariants", () => {
+  it("p5 <= p25 <= p50 <= p75 <= p95 on ending NW", () => {
+    const result = runBootstrap(
+      {
+        startingNetWorthUSD: 1_000_000,
+        allocation: ALL_STOCKS,
+        annualSpendUSD: 30_000,
+        retirementHorizonYears: 5,
+      },
+      { dataset: TEST_DATASET, paths: 200, seed: 99 },
+    );
+    const p = result.endingNetWorthPercentiles;
+    expect(p.p5).toBeLessThanOrEqual(p.p25);
+    expect(p.p25).toBeLessThanOrEqual(p.p50);
+    expect(p.p50).toBeLessThanOrEqual(p.p75);
+    expect(p.p75).toBeLessThanOrEqual(p.p95);
+  });
+
+  it("yearly percentile arrays all have length totalYears + 1", () => {
+    // Length contract: each band must include the year-0 starting
+    // value plus one entry per simulated year, so |array| =
+    // retirementHorizonYears + 1 (here 4 + 1 = 5). The fan chart
+    // and yearly tables rely on this — a length mismatch would
+    // misalign labels and data, painting wrong years on the X-axis.
+    const horizonYears = 4;
+    const expectedLength = horizonYears + 1;
+    const result = runBootstrap(
+      {
+        startingNetWorthUSD: 1_000_000,
+        allocation: ALL_STOCKS,
+        annualSpendUSD: 0,
+        retirementHorizonYears: horizonYears,
+      },
+      { dataset: TEST_DATASET, paths: 50, seed: 1 },
+    );
+    const yp = result.yearlyPercentiles;
+    expect(yp.years.length).toBe(expectedLength);
+    expect(yp.years[0]).toBe(0);
+    expect(yp.years[expectedLength - 1]).toBe(horizonYears);
+    // All percentile arrays must agree on length — fan-chart
+    // rendering iterates by index across them.
+    for (const band of [yp.p1, yp.p5, yp.p25, yp.p50, yp.p75, yp.p95]) {
+      expect(band.length).toBe(expectedLength);
+    }
+  });
+});

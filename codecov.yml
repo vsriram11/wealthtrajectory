@@ -1,0 +1,72 @@
+# Codecov config. The action upload is canonical (no files /
+# flags / extras); this file configures the Codecov-side
+# rendering — PR comment shape, badge color band, and the
+# ignore list that mirrors vitest.config.ts so the percentage
+# Codecov shows matches the local report.
+#
+# Validate after editing:
+#   curl -X POST --data-binary @codecov.yml https://codecov.io/validate
+#
+# Docs: https://docs.codecov.com/docs/codecov-yaml
+
+coverage:
+  precision: 1
+  round: down
+  # 70-90% range → badge color carries signal. Engine coverage
+  # sits in the high 80s/low 90s today; a drop into the 70s
+  # would visibly yellow the badge.
+  range: "70...90"
+
+  # Informational status checks — they appear in the PR's
+  # checks list but never block merge. The verify job in
+  # ci.yml is the gate.
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+        informational: true
+        if_ci_failed: ignore
+    patch:
+      default:
+        target: 80%
+        threshold: 5%
+        informational: true
+        if_ci_failed: ignore
+
+# PR comment behavior.
+#   require_changes: only comment when coverage actually moved.
+#   require_base / require_head: wait until both reports exist
+#     so we never post the half-rendered "base not yet reported"
+#     placeholder.
+#   behavior: default — replace the existing comment on each
+#     new commit rather than spamming a new one.
+comment:
+  layout: "diff, files"
+  behavior: default
+  require_changes: true
+  require_base: yes
+  require_head: yes
+
+# Path filters mirror vitest.config.ts's coverage.exclude.
+# Static payloads (demo seed, historical-returns dataset,
+# preset catalogs) carry no executable invariants worth
+# covering.
+ignore:
+  - "lib/demo.ts"
+  - "lib/historicalReturns.ts"
+  - "lib/presets.ts"
+  - "**/*.test.ts"
+  - "**/*.d.ts"
+  - "node_modules/**/*"
+  - ".next/**/*"
+  - "coverage/**/*"
+
+codecov:
+  # Reject reports older than 24h so a stale upload can't
+  # become "current state".
+  max_report_age: 24
+  # Wait for CI to succeed before posting comments; if CI
+  # fails, the coverage delta is noise.
+  notify:
+    wait_for_ci: true

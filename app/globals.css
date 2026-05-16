@@ -1,0 +1,106 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html,
+  body {
+    @apply bg-bg text-text antialiased;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  body {
+    @apply font-sans;
+  }
+
+  ::selection {
+    @apply bg-accent/30 text-text;
+  }
+}
+
+@layer utilities {
+  .num {
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+  }
+  .scrollbar-hide {
+    scrollbar-width: none;
+    -ms-overflow-style: none;
+  }
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+  /* Mark components the user wouldn't want on a printed summary
+     (navigation, sticky bars, interactive controls). Apply this on
+     the navigation drawer, the demo header's interactive buttons,
+     reminder cards, etc. Visible in the live app; printing hides. */
+  .print-hide {
+    /* no-op outside print */
+  }
+}
+
+/* Print-friendly summary mode. Triggered by browser print dialog
+   (Cmd/Ctrl+P) — produces a clean single-page snapshot suitable for
+   sharing with a financial advisor or filing for records.
+
+   Key choices:
+   • Force the dark theme to white background + black ink — printing
+     a dark background wastes toner and most home printers can't
+     reproduce the contrast anyway.
+   • Strip chrome (nav, sync indicators, action buttons) — they're
+     UI affordances, not part of the plan.
+   • Allow page breaks between sections; avoid orphaning headings.
+*/
+@media print {
+  :root,
+  html,
+  body {
+    background: #fff !important;
+    color: #000 !important;
+    font-size: 11pt !important;
+  }
+  * {
+    color: #000 !important;
+    background-color: transparent !important;
+    border-color: #888 !important;
+    box-shadow: none !important;
+  }
+  /* Hide interactive chrome. */
+  .print-hide,
+  header,
+  nav,
+  button,
+  input[type="checkbox"],
+  input[type="text"],
+  input[type="date"],
+  select {
+    display: none !important;
+  }
+  /* Charts get a thin black stroke + no fill so they're readable. */
+  svg path,
+  svg polyline {
+    stroke: #000 !important;
+  }
+  svg [fill] {
+    fill: #000 !important;
+  }
+  svg [fill="url(#hist-fill)"],
+  svg [fill="url(#flame)"] {
+    fill: transparent !important;
+  }
+  /* Avoid mid-section page breaks. */
+  section {
+    break-inside: avoid;
+    page-break-inside: avoid;
+    margin-bottom: 16pt;
+  }
+  /* Reset rounding / drop shadows. */
+  .rounded-2xl,
+  .rounded-xl,
+  .rounded-lg,
+  .rounded-md,
+  .rounded-full {
+    border-radius: 4pt !important;
+  }
+}

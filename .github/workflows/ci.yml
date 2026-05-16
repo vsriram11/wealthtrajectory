@@ -1,0 +1,196 @@
+name: CI
+
+# Trigger model:
+#   - pull_request: every PR (including from forks) gets one run
+#   - push to main: post-merge canary build (keeps main green)
+#
+# Branches like `oss` aren't in the push list because they're
+# already covered by their PR's pull_request event — listing both
+# triggers duplicate runs on every PR push.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Cancel a stale run when a new commit lands on the same ref —
+# avoids tying up runners on superseded PR pushes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Each top-level job appears as its own check on the PR status
+# list. Splitting the work this way gives reviewers a faster
+# signal on what specifically broke (fast verify ≠ slow e2e ≠
+# perf budget). The trade-off is a longer total runner-minute
+# bill — we share the build output across jobs via the
+# upload-artifact / download-artifact dance to keep the cost
+# bounded.
+jobs:
+  # ─────────────────────────────────────────────────────────────
+  # Job 1: fast verification — typecheck + lint + unit tests +
+  # build. ~3 min wall-clock. Uploads the build output so the
+  # downstream jobs don't re-build.
+  # ─────────────────────────────────────────────────────────────
+  verify:
+    name: verify (typecheck · lint · test · build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      HUSKY: 0
+      NEXT_TELEMETRY_DISABLED: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Typecheck
+        run: npx tsc --noEmit
+      - name: Lint
+        run: npm run lint
+      - name: Test (with coverage)
+        run: npm test -- --coverage
+      - name: Build
+        run: npm run build
+      # Upload the built app for downstream jobs.
+      #
+      # include-hidden-files: true is REQUIRED — `.next` starts
+      # with a dot, and actions/upload-artifact@v4 defaults to
+      # excluding hidden files. Without this flag, the upload
+      # silently produces an empty artifact and downstream
+      # jobs die with "Artifact not found".
+      #
+      # if-no-files-found: error makes a future regression
+      # (e.g. someone changing the path) fail the verify job
+      # immediately rather than letting it cascade into
+      # downstream confusion.
+      - name: Upload build output
+        uses: actions/upload-artifact@v4
+        with:
+          name: next-build
+          path: .next
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
+        continue-on-error: true
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  # ─────────────────────────────────────────────────────────────
+  # Job 2: end-to-end tests against the built app.
+  #
+  # Three suites run inside Playwright:
+  #   smoke.spec.ts   — golden-path HTTP + content + hydration
+  #                     regression (~7 tests).
+  #   visual.spec.ts  — full-page screenshot diffs against
+  #                     committed baselines for /, /review,
+  #                     /security (~3 tests). Linux baselines
+  #                     match ubuntu-latest's rasterizer.
+  #   a11y.spec.ts    — axe-core scans + WCAG 2.x A/AA
+  #                     assertions on critical + serious impact
+  #                     (~4 tests, one informational).
+  #   pwa.spec.ts     — installability + manifest + iOS/Android
+  #                     meta tags (~6 tests). Fills the gap left
+  #                     by Lighthouse 12 dropping the PWA
+  #                     category in 2024.
+  #
+  # Total ~30s wall-clock once browsers are installed.
+  # ─────────────────────────────────────────────────────────────
+  e2e:
+    name: e2e (smoke · visual · a11y · pwa)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: verify
+    env:
+      HUSKY: 0
+      NEXT_TELEMETRY_DISABLED: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Download build output
+        uses: actions/download-artifact@v4
+        with:
+          name: next-build
+          path: .next/
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+      - name: Run Playwright suites
+        run: npm run test:e2e
+        env:
+          CI: "1"
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+
+  # ─────────────────────────────────────────────────────────────
+  # Job 3: Lighthouse CI — perf + accessibility + best-practices
+  # + SEO scores. Three runs per URL, median-aggregated. Fails
+  # the check on score-floor or Web-Vitals-budget regression.
+  # Note: Lighthouse 12 (2024) dropped the PWA category; the PWA
+  # surface area is now covered by the `pwa.spec.ts` Playwright
+  # suite in the e2e job.
+  # ─────────────────────────────────────────────────────────────
+  lighthouse:
+    name: lighthouse (perf · a11y · best-practices · seo)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: verify
+    env:
+      HUSKY: 0
+      NEXT_TELEMETRY_DISABLED: 1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+      - name: Install
+        run: npm ci
+      - name: Download build output
+        uses: actions/download-artifact@v4
+        with:
+          name: next-build
+          path: .next/
+      # Lighthouse needs a full Chrome — Playwright's headless-
+      # shell isn't enough. Install Chrome via Playwright then
+      # resolve the binary path at runtime (the directory name
+      # contains a Playwright-managed version number, so we
+      # glob-resolve in a shell step rather than guess).
+      - name: Install Chrome for Lighthouse
+        run: npx playwright install --with-deps chromium
+      - name: Resolve CHROME_PATH
+        run: |
+          CHROME_BIN=$(ls /home/runner/.cache/ms-playwright/chromium-*/chrome-linux64/chrome 2>/dev/null | head -n 1)
+          if [ -z "$CHROME_BIN" ]; then
+            echo "::error::Could not find Playwright-installed Chrome binary"
+            ls /home/runner/.cache/ms-playwright/ || true
+            exit 1
+          fi
+          echo "CHROME_PATH=$CHROME_BIN" >> "$GITHUB_ENV"
+          echo "Resolved CHROME_PATH=$CHROME_BIN"
+      - name: Lighthouse CI
+        run: npm run test:lhci
+        env:
+          CI: "1"
+      - name: Upload Lighthouse report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lighthouse-report
+          path: .lighthouseci/
+          retention-days: 7

@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+
+# Direct security reports off the public tracker. Email keeps the
+# disclosure window quiet until there's a fix to ship.
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/vsriram11/wealthtrajectory/security/advisories/new
+    about: Please report security issues privately via GitHub Security Advisories, not as a public issue.

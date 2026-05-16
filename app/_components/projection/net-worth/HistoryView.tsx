@@ -1,0 +1,571 @@
+"use client";
+
+/**
+ * History tab content for the home-page NetWorthCard. Replays the
+ * household's net-worth over time, splicing three data sources:
+ *
+ *   1. Live-quote history for liquid holdings (from yfinance via
+ *      `lib/quotes.ts`).
+ *   2. User-recorded snapshots (full household composition or just
+ *      a scalar NW point) from `lib/persistence.ts`.
+ *   3. Back-projection using each holding's expected real CAGR for
+ *      windows that pre-date any recorded snapshot.
+ *
+ * The right edge is always pinned to the live headline NW so the
+ * chart cannot disagree with the number shown above it. Hovering
+ * the chart surfaces a portfolio-composition strip at that point
+ * when a rich snapshot covers the window — useful for "wait, what
+ * was my mix in 2022?" recall.
+ *
+ * Milestone markers ($50K, $100K, $250K, $1M, …) are auto-detected
+ * at threshold crossings so the user can see when they hit each
+ * round number without any manual annotation.
+ */
+
+import { useEffect, useMemo, useState } from "react";
+import { useAppStore } from "@/lib/store";
+import {
+  HISTORY_RANGE_LABELS,
+  memberFilteredSnapshots,
+  overlaySnapshots,
+  reconstructHistory,
+  uniqueSymbols,
+  type HistoryPoint,
+  type HistoryRange,
+} from "@/lib/data/history";
+import { loadSnapshots, type Snapshot } from "@/lib/persistence/persistence";
+import { getCachedQuote, getQuote, type Quote } from "@/lib/data/quotes";
+import {
+  formatPercent,
+  formatPercentTight,
+  formatUSD,
+  formatUSDCompact,
+} from "@/lib/format";
+import type { Household } from "@/lib/types";
+import { SnapshotsManager } from "@/app/_components/data/SnapshotsManager";
+
+/** Range chips shown above the history chart. */
+const HISTORY_RANGES: HistoryRange[] = [
+  "1M",
+  "3M",
+  "6M",
+  "1Y",
+  "YTD",
+  "5Y",
+  "ALL",
+];
+
+export function HistoryView({
+  household,
+  netWorth,
+  memberId,
+  empty,
+}: {
+  household: Household;
+  netWorth: number;
+  /** Active member-filter id, or null for the rolled-up Household view.
+   *  Used to filter snapshot households so the past line and the live
+   *  headline stay member-consistent. */
+  memberId: string | null;
+  empty: boolean;
+}) {
+  const symbols = useMemo(() => uniqueSymbols(household), [household]);
+  const [quotes, setQuotes] = useState<Record<string, Quote | null>>({});
+  const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [range, setRange] = useState<HistoryRange>("1Y");
+  const [hovered, setHovered] = useState<HistoryPoint | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadSnapshots().then((snaps) => {
+      if (!cancelled) setSnapshots(snaps);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // setLoading(true) below is the canonical "start an async data
+  // load" pattern. The React 19 idiomatic alternative is Suspense
+  // + `use()`, which would require lifting the quote fetch out of
+  // this component and into a Promise-returning parent — a larger
+  // refactor we're not undertaking yet. The setState is gated by a
+  // symbol change, so it never cascades on its own commits.
+  /* eslint-disable react-hooks/set-state-in-effect */
+  useEffect(() => {
+    if (symbols.length === 0) return;
+    let cancelled = false;
+    setLoading(true);
+    void (async () => {
+      const next: Record<string, Quote | null> = {};
+      for (const s of symbols) {
+        const cached = await getCachedQuote(s);
+        if (cached) next[s] = cached;
+      }
+      if (!cancelled && Object.keys(next).length > 0) {
+        setQuotes((q) => ({ ...q, ...next }));
+      }
+      for (const s of symbols) {
+        if (next[s] && next[s]!.history.length > 0) continue;
+        const live = await getQuote(s);
+        if (cancelled) return;
+        setQuotes((q) => ({ ...q, [s]: live }));
+      }
+      if (!cancelled) setLoading(false);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [symbols.join("|")]); // eslint-disable-line react-hooks/exhaustive-deps
+  /* eslint-enable react-hooks/set-state-in-effect */
+
+  // Filter snapshots to the active member view so the historical
+  // composition path AND the scalar-overlay path both project the
+  // chosen member's slice — without this, switching to Member A
+  // historically over-reports because the snapshot's embedded
+  // household still contains the full family's accounts.
+  const filteredSnapshots = useMemo(
+    () => memberFilteredSnapshots(snapshots, memberId),
+    [snapshots, memberId],
+  );
+
+  const series = useMemo(
+    () =>
+      overlaySnapshots(
+        reconstructHistory(
+          household,
+          quotes,
+          range,
+          undefined,
+          filteredSnapshots,
+        ),
+        filteredSnapshots,
+        // Pin today's bucket to the live headline NW so the chart can
+        // never disagree with the number shown at the top of the
+        // card (and so a stale snapshot or out-of-date quote history
+        // can't drop the right edge to ~$0).
+        netWorth,
+      ),
+    [household, quotes, range, filteredSnapshots, netWorth],
+  );
+
+  const hasLiveData = symbols.some(
+    (s) => quotes[s] && (quotes[s] as Quote).history.length > 0,
+  );
+  const hasSnapshots = snapshots.length > 1;
+  const allFailed = !loading && symbols.length > 0 && !hasLiveData;
+
+  const first = series[0];
+  const last = series[series.length - 1];
+  const change = last && first ? last.netWorthUSD - first.netWorthUSD : 0;
+  const changePct =
+    first && first.netWorthUSD !== 0 ? change / first.netWorthUSD : 0;
+  const positive = change >= 0;
+
+  if (empty) {
+    return (
+      <div className="mt-4 text-center text-[11px] text-text-dim">
+        Add holdings to see history.
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div className="mt-3 flex items-center justify-between">
+        <div className="num text-base font-semibold text-text">
+          {formatUSD(hovered ? hovered.netWorthUSD : netWorth)}
+        </div>
+        {!hovered && first && last && (
+          <span
+            className={`num text-xs font-medium ${
+              positive ? "text-positive" : "text-negative"
+            }`}
+          >
+            {positive ? "+" : ""}
+            {formatUSD(change)} · {positive ? "+" : ""}
+            {formatPercent(changePct)}
+          </span>
+        )}
+        {hovered && (
+          <span className="text-[11px] text-text-muted">
+            {formatDate(hovered.t)}
+          </span>
+        )}
+      </div>
+
+      {/*
+        Composition-at-point: when the user hovers a past date and a
+        rich snapshot covers that window, surface the household
+        breakdown for that moment. Helps the user remember "this is
+        when I went all-in on stocks" / "this is when I bought the
+        house" without having to dig into the snapshot manager.
+      */}
+      {hovered && <CompositionAtPoint t={hovered.t} snapshots={snapshots} />}
+
+      <div className="mt-2">
+        <HistoryChart
+          series={series}
+          onHover={setHovered}
+          positive={positive}
+        />
+        {series.length > 1 && (
+          <div className="mt-1 flex justify-between text-[10px] text-text-dim">
+            <span>{formatDate(series[0].t)}</span>
+            <span>{formatDate(series[series.length - 1].t)}</span>
+          </div>
+        )}
+      </div>
+
+      <div className="mt-3 -mx-1 flex gap-1 overflow-x-auto px-1 scrollbar-hide">
+        {HISTORY_RANGES.map((r) => (
+          <button
+            key={r}
+            type="button"
+            onClick={() => setRange(r)}
+            className={`shrink-0 rounded-full px-3 py-1 text-[11px] font-medium transition active:opacity-70 ${
+              range === r
+                ? "bg-accent/15 text-accent"
+                : "border border-border bg-bg-elevated text-text-muted"
+            }`}
+          >
+            {HISTORY_RANGE_LABELS[r]}
+          </button>
+        ))}
+      </div>
+
+      {symbols.length > 0 && !hasLiveData && !hasSnapshots && loading && (
+        <div className="mt-3 rounded-md border border-border bg-bg-elevated p-2.5 text-[11px] text-text-dim">
+          Loading live prices…
+        </div>
+      )}
+      {allFailed && !hasSnapshots && (
+        <div className="mt-3 rounded-md border border-border bg-bg-elevated p-2.5 text-[11px] text-text-dim">
+          Estimated history — back-projected from each holding&apos;s expected
+          real CAGR. Daily snapshots will fill in real history as you keep
+          using the app.
+        </div>
+      )}
+      {hasSnapshots && (
+        <div className="mt-3 rounded-md border border-border bg-bg-elevated p-2.5 text-[11px] text-text-dim">
+          History uses your own daily net-worth snapshots where recorded;
+          pre-snapshot periods are estimated from each holding&apos;s expected
+          real CAGR.
+        </div>
+      )}
+      {symbols.length === 0 && (
+        <div className="mt-3 text-[11px] text-text-dim">
+          All holdings are manual or cash — history is flat at the current
+          value.
+        </div>
+      )}
+      <SnapshotsManager />
+    </>
+  );
+}
+
+function CompositionAtPoint({
+  t,
+  snapshots,
+}: {
+  t: number;
+  snapshots: Snapshot[];
+}) {
+  // Find the rich snapshot at-or-before t (if any).
+  const rich = snapshots
+    .filter((s): s is Snapshot & { household: Household } => !!s.household)
+    .sort((a, b) => a.t - b.t);
+  let snap: (Snapshot & { household: Household }) | null = null;
+  for (let i = rich.length - 1; i >= 0; i--) {
+    if (rich[i].t <= t) {
+      snap = rich[i];
+      break;
+    }
+  }
+  if (!snap) return null;
+
+  const totalsByKind: Record<string, number> = {
+    equity: 0,
+    bond: 0,
+    cash: 0,
+    crypto: 0,
+    commodity: 0,
+    real_estate: 0,
+    private_stock: 0,
+    other: 0,
+  };
+  let snapshotNetWorth = 0;
+  for (const account of snap.household.accounts) {
+    for (const holding of account.holdings) {
+      totalsByKind[holding.kind] =
+        (totalsByKind[holding.kind] ?? 0) + holding.valueUSD;
+      snapshotNetWorth += holding.valueUSD;
+    }
+  }
+  if (snapshotNetWorth <= 0) return null;
+
+  const segments: Array<{ label: string; color: string; share: number }> = [
+    { label: "Stocks", color: "#38bdf8", share: totalsByKind.equity / snapshotNetWorth },
+    { label: "Bonds", color: "#a78bfa", share: totalsByKind.bond / snapshotNetWorth },
+    { label: "Cash", color: "#64748b", share: totalsByKind.cash / snapshotNetWorth },
+    { label: "Crypto", color: "#f59e0b", share: totalsByKind.crypto / snapshotNetWorth },
+    { label: "Commodity", color: "#fbbf24", share: totalsByKind.commodity / snapshotNetWorth },
+    { label: "Real estate", color: "#10b981", share: totalsByKind.real_estate / snapshotNetWorth },
+    { label: "Private", color: "#ec4899", share: totalsByKind.private_stock / snapshotNetWorth },
+    { label: "Other", color: "#94a3b8", share: totalsByKind.other / snapshotNetWorth },
+  ].filter((s) => s.share > 0.005);
+
+  return (
+    <div className="mt-1.5 rounded-md border border-border bg-bg-elevated px-2.5 py-1.5">
+      <div className="flex h-1.5 overflow-hidden rounded-full bg-bg-surface">
+        {segments.map((s, i) => (
+          <div
+            key={i}
+            style={{ width: `${s.share * 100}%`, backgroundColor: s.color }}
+          />
+        ))}
+      </div>
+      <div className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 text-[10px] text-text-dim">
+        <span>Composition on {new Date(snap.t).toLocaleDateString()}</span>
+        {segments.map((s, i) => (
+          <span key={i} className="flex items-center gap-1">
+            <span
+              className="inline-block h-1.5 w-1.5 rounded-sm"
+              style={{ backgroundColor: s.color }}
+              aria-hidden
+            />
+            <span className="text-text-muted">{s.label}</span>
+            <span className="num text-text">{formatPercentTight(s.share)}%</span>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function HistoryChart({
+  series,
+  onHover,
+  positive,
+}: {
+  series: HistoryPoint[];
+  onHover: (p: HistoryPoint | null) => void;
+  positive: boolean;
+}) {
+  if (series.length < 2) return null;
+  const width = 360;
+  const height = 160;
+  const padLeft = 36;
+  const padTop = 8;
+  const padBottom = 16;
+  const innerWidth = width - padLeft - 8;
+  const innerHeight = height - padTop - padBottom;
+
+  const values = series.map((p) => p.netWorthUSD);
+  const minY = Math.min(...values);
+  const maxY = Math.max(...values);
+  const ySpan = maxY - minY || 1;
+  const minX = series[0].t;
+  const maxX = series[series.length - 1].t;
+
+  const xScale = (t: number) =>
+    padLeft + ((t - minX) / (maxX - minX || 1)) * innerWidth;
+  const yScale = (v: number) =>
+    padTop + (1 - (v - minY) / ySpan) * innerHeight;
+
+  const linePath =
+    `M ${xScale(series[0].t)},${yScale(series[0].netWorthUSD)} ` +
+    series
+      .slice(1)
+      .map((p) => `L ${xScale(p.t)},${yScale(p.netWorthUSD)}`)
+      .join(" ");
+  const areaPath =
+    linePath +
+    ` L ${xScale(maxX)},${yScale(minY)} L ${xScale(minX)},${yScale(minY)} Z`;
+
+  const yTicks = niceTicks(minY, maxY, 3);
+  const stroke = positive ? "#38bdf8" : "#f87171";
+
+  const pointAtClientX = (clientX: number, target: SVGElement) => {
+    const svg = target.closest("svg");
+    if (!svg) return null;
+    const rect = svg.getBoundingClientRect();
+    const x = ((clientX - rect.left) / rect.width) * width;
+    const t = minX + ((x - padLeft) / innerWidth) * (maxX - minX);
+    return closest(series, t);
+  };
+
+  return (
+    <svg
+      viewBox={`0 0 ${width} ${height}`}
+      preserveAspectRatio="none"
+      className="h-[160px] w-full"
+      role="img"
+      aria-label="Net worth history"
+      onMouseLeave={() => onHover(null)}
+      onMouseMove={(e) => {
+        const p = pointAtClientX(e.clientX, e.target as SVGElement);
+        if (p) onHover(p);
+      }}
+      onTouchMove={(e) => {
+        if (e.touches.length === 0) return;
+        const p = pointAtClientX(e.touches[0].clientX, e.target as SVGElement);
+        if (p) onHover(p);
+      }}
+      onTouchEnd={() => onHover(null)}
+    >
+      <defs>
+        <linearGradient id="hist-fill" x1="0" x2="0" y1="0" y2="1">
+          <stop offset="0%" stopColor={stroke} stopOpacity="0.28" />
+          <stop offset="100%" stopColor={stroke} stopOpacity="0" />
+        </linearGradient>
+      </defs>
+      {yTicks.map((tick) => (
+        <g key={tick}>
+          <line
+            x1={padLeft}
+            x2={width - 8}
+            y1={yScale(tick)}
+            y2={yScale(tick)}
+            stroke="#1f2730"
+            strokeDasharray="2 4"
+            strokeWidth={1}
+          />
+          <text
+            x={padLeft - 4}
+            y={yScale(tick) + 3}
+            textAnchor="end"
+            fontSize={9}
+            fill="#5b6573"
+          >
+            {formatUSDCompact(tick)}
+          </text>
+        </g>
+      ))}
+      <path d={areaPath} fill="url(#hist-fill)" />
+      <path
+        d={linePath}
+        fill="none"
+        stroke={stroke}
+        strokeWidth={2}
+        strokeLinejoin="round"
+        strokeLinecap="round"
+        vectorEffect="non-scaling-stroke"
+      />
+      {/*
+        Milestone pins. We detect every time the series CROSSES a
+        round-number threshold ($50K, $100K, $250K, $500K, $1M, …)
+        and drop a small marker at the crossing. Gives the user a
+        sense of "when did I hit each major level" without any
+        manual annotation work.
+      */}
+      {detectMilestones(series).map((m, i) => (
+        <g key={i}>
+          <circle
+            cx={xScale(m.t)}
+            cy={yScale(m.netWorthUSD)}
+            r={3}
+            fill={stroke}
+            stroke="#0a0d12"
+            strokeWidth={1.5}
+          />
+          <text
+            x={xScale(m.t)}
+            y={yScale(m.netWorthUSD) - 6}
+            textAnchor="middle"
+            fontSize={8}
+            fill={stroke}
+            fontWeight={600}
+          >
+            {formatUSDCompact(m.threshold)}
+          </text>
+        </g>
+      ))}
+    </svg>
+  );
+}
+
+/**
+ * Find every point where the series crosses a "round" net-worth
+ * threshold for the first time within the window. Thresholds are
+ * a 1/2.5/5 sweep across each decade ($10K, $25K, $50K, $100K,
+ * $250K, $500K, $1M, $2.5M, $5M, $10M, …).
+ *
+ * Returns at most 5 markers so the chart doesn't litter with
+ * pins when net worth bounces around the same number.
+ */
+function detectMilestones(series: HistoryPoint[]): Array<{
+  t: number;
+  netWorthUSD: number;
+  threshold: number;
+}> {
+  const thresholds: number[] = [];
+  for (const base of [1e4, 1e5, 1e6, 1e7]) {
+    thresholds.push(base, base * 2.5, base * 5);
+  }
+  thresholds.sort((a, b) => a - b);
+  const crossed = new Set<number>();
+  const milestones: Array<{
+    t: number;
+    netWorthUSD: number;
+    threshold: number;
+  }> = [];
+  for (let i = 1; i < series.length; i++) {
+    const prev = series[i - 1].netWorthUSD;
+    const curr = series[i].netWorthUSD;
+    const lo = Math.min(prev, curr);
+    const hi = Math.max(prev, curr);
+    for (const threshold of thresholds) {
+      if (crossed.has(threshold)) continue;
+      if (threshold > lo && threshold <= hi) {
+        crossed.add(threshold);
+        milestones.push({ t: series[i].t, netWorthUSD: curr, threshold });
+      }
+    }
+  }
+  return milestones.slice(0, 5);
+}
+
+/** Nearest point in `series` to time `t` by absolute time delta. */
+function closest(series: HistoryPoint[], t: number): HistoryPoint {
+  let best = series[0];
+  let bestDist = Math.abs(best.t - t);
+  for (const p of series) {
+    const d = Math.abs(p.t - t);
+    if (d < bestDist) {
+      best = p;
+      bestDist = d;
+    }
+  }
+  return best;
+}
+
+/** N nicely-rounded tick values between min and max. */
+function niceTicks(min: number, max: number, n: number): number[] {
+  const span = max - min;
+  if (span <= 0) return [];
+  const step = niceStep(span / n);
+  const start = Math.ceil(min / step) * step;
+  const ticks: number[] = [];
+  for (let v = start; v <= max; v += step) ticks.push(v);
+  return ticks;
+}
+
+/** Round step up to a 1/2/5 × 10^n value for visually-pleasing ticks. */
+function niceStep(rough: number): number {
+  const magnitude = Math.pow(10, Math.floor(Math.log10(Math.abs(rough) || 1)));
+  const normalized = rough / magnitude;
+  if (normalized < 1.5) return 1 * magnitude;
+  if (normalized < 3) return 2 * magnitude;
+  if (normalized < 7) return 5 * magnitude;
+  return 10 * magnitude;
+}
+
+function formatDate(t: number): string {
+  return new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  }).format(new Date(t));
+}
