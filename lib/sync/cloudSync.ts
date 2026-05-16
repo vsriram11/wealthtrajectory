@@ -1,0 +1,438 @@
+/**
+ * Reusable Drive-pull helper. Wraps the "find backup → decrypt →
+ * importPayload" flow so any caller (AuthHydrator's mount + resume
+ * paths, the EncryptionUnlockBanner's post-unlock retry, the Data
+ * page's Sync now button) goes through the same code path.
+ *
+ * Returns one of:
+ *   - "ok"               : pulled + imported successfully
+ *   - "no-backup"        : signed-in user has no backup yet
+ *   - "encrypted"        : ciphertext exists but no passphrase is
+ *                          loaded — caller should prompt the user
+ *   - "error"            : transient (network / decode) failure;
+ *                          message is in store.googleSyncError
+ *   - "throttled"        : skipped because a sync ran very recently
+ *                          (caller passed throttle=true)
+ *
+ * Also writes the appropriate store updates: googleSyncing,
+ * googleSyncError, googleLastSyncAt, and the structured
+ * googleSyncBlockedReason ("encrypted" / null) so the unlock
+ * banner can react.
+ */
+
+import type { useAppStore } from "@/lib/store";
+import { getAccessToken } from "@/lib/sync/googleAuth";
+import {
+  downloadBackup,
+  findBackupFile,
+  uploadBackup,
+} from "@/lib/sync/googleDrive";
+import { exportData, parseImport } from "@/lib/persistence/dataIO";
+import {
+  DriveUnreadableError,
+  checkShrinkageAgainstDrive,
+} from "@/lib/sync/syncSafety";
+
+export type PullResult =
+  | "ok"
+  | "no-backup"
+  | "encrypted"
+  | "shrinkage-blocked"
+  | "error"
+  | "throttled";
+
+export type PushResult =
+  | "ok"
+  | "blocked-by-encryption"
+  | "blocked-by-shrinkage"
+  | "blocked-by-initial-sync"
+  | "error";
+
+const DEFAULT_THROTTLE_MS = 60 * 1000;
+
+/**
+ * Inbound shrinkage guard: refuse to import a Drive payload that
+ * would wipe a non-empty local collection down to empty. Symmetric
+ * to CloudSyncer's outbound guard — both directions now reject
+ * "this would lose data" transitions.
+ *
+ * The trigger scenario: user edits on Device A, Device A's queued
+ * upload doesn't fire before they switch (browser killed the tab,
+ * background-throttled timer, network down). Device B pulls Drive
+ * (still stale), imports, and overwrites Device A's IDB on next
+ * sync. Without this guard, the data is lost from both sides.
+ *
+ * With the guard:
+ *   - We refuse the import
+ *   - googleSyncBlockedReason = "import-shrinkage"
+ *   - Banner gives the user the choice: keep local (manual upload
+ *     pushes local to Drive, replacing the stale Drive copy) or
+ *     accept Drive (acknowledged data loss, manual override).
+ */
+function isInboundShrinkage(
+  drivePayload: {
+    scenarios?: unknown[];
+    goals?: unknown[];
+    budgetItems?: unknown[];
+    incomeStreams?: unknown[];
+    healthPlans?: unknown[];
+    healthImportanceWeights?: Record<string, unknown>;
+  },
+  localState: {
+    scenarios: unknown[];
+    goals: unknown[];
+    budgetItems: unknown[];
+    incomeStreams: unknown[];
+    healthPlans: unknown[];
+    healthImportanceWeights: Record<string, unknown>;
+  },
+): { shrinking: string[] } | null {
+  const shrinking: string[] = [];
+  const check = <
+    K extends
+      | "scenarios"
+      | "goals"
+      | "budgetItems"
+      | "incomeStreams"
+      | "healthPlans",
+  >(
+    k: K,
+  ) => {
+    const driveLen = Array.isArray(drivePayload[k]) ? drivePayload[k]!.length : 0;
+    const localLen = localState[k].length;
+    if (localLen > 0 && driveLen === 0) shrinking.push(k);
+  };
+  check("scenarios");
+  check("goals");
+  check("budgetItems");
+  check("incomeStreams");
+  check("healthPlans");
+  // Sparse-map collection: N→0 wipe protection on healthImportanceWeights.
+  const driveWeights = drivePayload.healthImportanceWeights;
+  const driveWeightCount =
+    driveWeights &&
+    typeof driveWeights === "object" &&
+    !Array.isArray(driveWeights)
+      ? Object.keys(driveWeights).length
+      : 0;
+  const localWeightCount = Object.keys(
+    localState.healthImportanceWeights,
+  ).length;
+  if (localWeightCount > 0 && driveWeightCount === 0)
+    shrinking.push("healthImportanceWeights");
+  return shrinking.length > 0 ? { shrinking } : null;
+}
+
+/**
+ * Pull the Drive backup and import it. Use `silent: true` for
+ * background re-pulls (skips the welcome-banner lastSyncOutcome
+ * update). Use `throttle: true` to no-op when a recent sync
+ * already ran — handy for tab-resume re-syncs.
+ *
+ * Threading `store` rather than calling `useAppStore.getState()`
+ * inline keeps this testable later if we want to mock the store.
+ * Today both paths use the singleton.
+ */
+export async function pullFromDrive(
+  store: typeof useAppStore,
+  options: {
+    silent?: boolean;
+    throttle?: boolean;
+    throttleMs?: number;
+  } = {},
+): Promise<PullResult> {
+  const silent = options.silent ?? false;
+  const throttle = options.throttle ?? false;
+  const throttleMs = options.throttleMs ?? DEFAULT_THROTTLE_MS;
+
+  const s = store.getState();
+  if (!s.user) return "no-backup";
+  if (s.googleSyncing) return "throttled";
+  // Refuse to pull while a CloudSyncer upload is queued or
+  // executing. Otherwise a backgrounded tab whose setTimeout was
+  // throttled could be raced by the resume sync — the pull would
+  // overwrite local edits with stale Drive state, then the
+  // queued upload would push the overwritten payload out.
+  if (s.googleUploadScheduled) return "throttled";
+  if (throttle) {
+    const last = s.googleLastSyncAt ?? 0;
+    if (Date.now() - last < throttleMs) return "throttled";
+  }
+
+  s.setGoogleSyncState({ googleSyncing: true, googleSyncError: null });
+  try {
+    const token = await getAccessToken();
+    const existing = await findBackupFile(token);
+    if (!existing) {
+      s.setGoogleSyncState({
+        googleSyncing: false,
+        googleSyncBlockedReason: null,
+      });
+      return "no-backup";
+    }
+    const text = await downloadBackup(token, existing.id);
+    // Any time Drive returns ciphertext, this device should remember
+    // that encryption is in use — even if decrypt succeeds here.
+    // Without this, a device that *successfully* decrypts wouldn't
+    // flip the persisted flag, and a later session on the same
+    // device (passphrase wiped) would show the first-time setup UI.
+    const { looksEncrypted, unwrapBackup } = await import("@/lib/sync/crypto");
+    if (looksEncrypted(text) && !store.getState().driveEncryptionEnabled) {
+      store.setState({ driveEncryptionEnabled: true });
+    }
+    let plain: string;
+    try {
+      plain = await unwrapBackup(text, store.getState().encryptionPassphrase);
+    } catch (err) {
+      const needsPassphrase =
+        err instanceof Error && err.name === "EncryptedRequiresPassphrase";
+      s.setGoogleSyncState({
+        googleSyncing: false,
+        googleSyncError: needsPassphrase
+          ? "Your Drive backup is encrypted. Enter your passphrase to sync."
+          : err instanceof Error
+            ? err.message
+            : String(err),
+        googleSyncBlockedReason: needsPassphrase ? "encrypted" : null,
+      });
+      if (needsPassphrase) {
+        // Drive payload is ciphertext but we have no passphrase. Persist
+        // the "encryption is set up" flag so subsequent sessions / tabs
+        // can prompt for the passphrase before they even attempt a
+        // sync — without this, a fresh tab forgets entirely until it
+        // fails a sync.
+        store.setState({ driveEncryptionEnabled: true });
+      }
+      return needsPassphrase ? "encrypted" : "error";
+    }
+    const parsed = parseImport(plain);
+    // Inbound shrinkage guard. If accepting this Drive payload
+    // would wipe a non-empty local collection (the most common
+    // class of inadvertent data loss when an upload didn't make
+    // it from another device), refuse the import and surface a
+    // recovery banner asking the user to choose.
+    const localNow = store.getState();
+    const shrinkage = isInboundShrinkage(parsed, {
+      healthImportanceWeights: localNow.healthImportanceWeights,
+      scenarios: localNow.scenarios,
+      goals: localNow.goals,
+      budgetItems: localNow.budgetItems,
+      incomeStreams: localNow.incomeStreams,
+      healthPlans: localNow.healthPlans,
+    });
+    if (shrinkage) {
+      s.setGoogleSyncState({
+        googleSyncing: false,
+        googleSyncError: `Drive is missing ${shrinkage.shrinking.join(", ")} that you have locally — refused to import. Open the recovery banner to keep local or accept Drive.`,
+        googleSyncBlockedReason: "import-shrinkage",
+      });
+      console.warn(
+        "[pullFromDrive] aborted import to prevent data loss",
+        shrinkage,
+      );
+      return "shrinkage-blocked";
+    }
+    s.importPayload({
+      household: parsed.household,
+      assumptions: parsed.assumptions,
+      scenarios: parsed.scenarios ?? [],
+      memberAssumptions: parsed.memberAssumptions,
+      preferredMemberId: parsed.preferredMemberId,
+      targetAllocation: parsed.targetAllocation,
+      glidePath: parsed.glidePath,
+      householdAnnualIncomeUSD: parsed.householdAnnualIncomeUSD,
+      goals: parsed.goals,
+      budgetItems: parsed.budgetItems,
+      incomeStreams: parsed.incomeStreams,
+      healthPlans: parsed.healthPlans,
+      healthImportanceWeights: parsed.healthImportanceWeights,
+    });
+    s.setGoogleSyncState({
+      googleSyncing: false,
+      googleLastSyncAt: Date.now(),
+      googleSyncError: null,
+      googleSyncBlockedReason: null,
+      ...(silent ? {} : { lastSyncOutcome: "imported" }),
+    });
+    return "ok";
+  } catch (e) {
+    s.setGoogleSyncState({
+      googleSyncing: false,
+      googleSyncError: e instanceof Error ? e.message : String(e),
+    });
+    return "error";
+  }
+}
+
+/**
+ * Reusable Drive-push helper. Every upload path in the app —
+ * `CloudSyncer`'s debounced timer, `GoogleSyncCard`'s "Sync now"
+ * button, `AuthHydrator`'s "uploaded-local" branch on sign-in —
+ * MUST go through this function. Direct calls to `uploadBackup`
+ * bypass the safety checks and have shipped data-loss bugs.
+ *
+ * Pre-flight guards (in order):
+ *   1. Signed in. Else "error".
+ *   2. mode === "real". Else "error" (never upload demo data).
+ *   3. Not isDemoHousehold (paranoia). Else "error".
+ *   4. Encryption block clear. Else "blocked-by-encryption".
+ *   5. Initial Drive pull confirmed (googleLastSyncAt is set),
+ *      UNLESS `bypassInitialSyncGate` is true (used by the
+ *      "uploaded-fresh" branch of AuthHydrator, which is creating
+ *      the first backup for a brand-new user). Else
+ *      "blocked-by-initial-sync".
+ *   6. Shrinkage guard: download current Drive content, refuse
+ *      upload if doing so would wipe a non-empty collection
+ *      (scenarios / goals / budgetItems) down to empty. THROWS
+ *      `DriveUnreadableError` propagate to fail-closed
+ *      ("blocked-by-encryption" if the Drive is encrypted without
+ *      passphrase). UNLESS `bypassShrinkageGuard` is true, used by
+ *      the explicit user-override action in `SyncShrinkageBanner`.
+ *
+ * On success, sets googleLastSyncAt and clears errors. On any
+ * blocked / error result, writes a descriptive googleSyncError
+ * and (for encryption) sets googleSyncBlockedReason so the
+ * banner can react.
+ */
+export async function pushToDrive(
+  store: typeof useAppStore,
+  options: {
+    bypassInitialSyncGate?: boolean;
+    bypassShrinkageGuard?: boolean;
+  } = {},
+): Promise<PushResult> {
+  const { bypassInitialSyncGate = false, bypassShrinkageGuard = false } =
+    options;
+  const s = store.getState();
+  if (!s.user) return "error";
+  if (s.mode !== "real") return "error";
+  const { isDemoHousehold } = await import("@/lib/types");
+  if (isDemoHousehold(s.household)) return "error";
+
+  if (s.googleSyncBlockedReason === "encrypted") {
+    s.setGoogleSyncState({
+      googleSyncing: false,
+      googleSyncError:
+        "Your Drive backup is encrypted. Enter your passphrase before syncing.",
+    });
+    return "blocked-by-encryption";
+  }
+
+  // Cross-device safety: if THIS device previously knew encryption was
+  // set up (persisted flag) but the in-memory passphrase isn't loaded,
+  // refuse the push. Without this guard, a freshly-signed-in second
+  // device that hasn't yet seen the encryption setup would happily
+  // upload plaintext on top of the encrypted Drive backup — silently
+  // degrading the user's encryption. Surfacing it as "encrypted"
+  // routes to the unlock banner.
+  if (s.driveEncryptionEnabled && !s.encryptionPassphrase) {
+    s.setGoogleSyncState({
+      googleSyncing: false,
+      googleSyncError:
+        "Encryption is set up on this account, but the passphrase isn't loaded in this tab. Unlock to sync.",
+      googleSyncBlockedReason: "encrypted",
+    });
+    return "blocked-by-encryption";
+  }
+
+  if (!bypassInitialSyncGate && s.googleLastSyncAt == null) {
+    s.setGoogleSyncState({
+      googleSyncing: false,
+      googleSyncError:
+        "Waiting for the initial Drive sync to complete — try again in a moment.",
+    });
+    return "blocked-by-initial-sync";
+  }
+
+  s.setGoogleSyncState({ googleSyncing: true, googleSyncError: null });
+  try {
+    const token = await getAccessToken();
+
+    if (!bypassShrinkageGuard) {
+      try {
+        const existing = await findBackupFile(token);
+        if (existing) {
+          const driveText = await downloadBackup(token, existing.id);
+          const shrinkage = await checkShrinkageAgainstDrive(
+            driveText,
+            s.encryptionPassphrase,
+            {
+              scenarios: s.scenarios,
+              goals: s.goals,
+              budgetItems: s.budgetItems,
+              incomeStreams: s.incomeStreams,
+              healthPlans: s.healthPlans,
+              healthImportanceWeights: s.healthImportanceWeights,
+            },
+          );
+          if (shrinkage) {
+            s.setGoogleSyncState({
+              googleSyncing: false,
+              googleSyncError: `Refused to upload — would wipe ${shrinkage.shrinking.join(", ")} from Drive (Drive has data, local doesn't).`,
+              googleSyncBlockedReason: "import-shrinkage",
+            });
+            console.warn(
+              "[pushToDrive] aborted upload to prevent data loss",
+              shrinkage,
+            );
+            return "blocked-by-shrinkage";
+          }
+        }
+      } catch (guardErr) {
+        // Fail-closed: if we can't read Drive (encrypted /
+        // malformed / network), refuse the upload rather than risk
+        // overwriting unverifiable content. The encrypted case
+        // sets the banner-driving blocked reason.
+        const isEncrypted =
+          guardErr instanceof DriveUnreadableError &&
+          guardErr.reason === "encrypted";
+        s.setGoogleSyncState({
+          googleSyncing: false,
+          googleSyncError: isEncrypted
+            ? "Your Drive backup is encrypted. Enter your passphrase before syncing."
+            : `Refused to upload — couldn't verify Drive content: ${
+                guardErr instanceof Error
+                  ? guardErr.message
+                  : String(guardErr)
+              }`,
+          googleSyncBlockedReason: isEncrypted ? "encrypted" : null,
+        });
+        return isEncrypted ? "blocked-by-encryption" : "error";
+      }
+    }
+
+    const json = exportData({
+      household: s.household,
+      assumptions: s.assumptions,
+      scenarios: s.scenarios,
+      memberAssumptions: s.memberAssumptions,
+      preferredMemberId: s.preferredMemberId,
+      targetAllocation: s.targetAllocation,
+      glidePath: s.glidePath,
+      householdAnnualIncomeUSD: s.householdAnnualIncomeUSD,
+      goals: s.goals,
+      budgetItems: s.budgetItems,
+      incomeStreams: s.incomeStreams,
+      healthPlans: s.healthPlans,
+      healthImportanceWeights: s.healthImportanceWeights,
+    });
+    const payload = s.encryptionPassphrase
+      ? await (
+          await import("@/lib/sync/crypto")
+        ).encryptString(json, s.encryptionPassphrase)
+      : json;
+    await uploadBackup(token, payload);
+    s.setGoogleSyncState({
+      googleSyncing: false,
+      googleLastSyncAt: Date.now(),
+      googleSyncError: null,
+    });
+    return "ok";
+  } catch (e) {
+    s.setGoogleSyncState({
+      googleSyncing: false,
+      googleSyncError: e instanceof Error ? e.message : String(e),
+    });
+    return "error";
+  }
+}

@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="FIREr">
+  <!-- Dark background matching app theme -->
+  <rect width="512" height="512" rx="96" fill="#0a0d12"/>
+  <!-- Glow ring -->
+  <circle cx="256" cy="256" r="190" fill="none" stroke="#1e2630" stroke-width="6"/>
+  <!-- Up-arrow flame -->
+  <defs>
+    <linearGradient id="flame" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0%" stop-color="#fbbf24"/>
+      <stop offset="50%" stop-color="#f97316"/>
+      <stop offset="100%" stop-color="#38bdf8"/>
+    </linearGradient>
+  </defs>
+  <path d="M 256 100
+           C 230 160, 200 200, 200 260
+           C 200 300, 230 320, 256 320
+           C 282 320, 312 300, 312 260
+           C 312 200, 282 160, 256 100 Z"
+        fill="url(#flame)"/>
+  <!-- Tick at the bottom — upward trajectory -->
+  <polyline points="160 380, 220 350, 280 360, 350 300"
+            fill="none" stroke="#38bdf8" stroke-width="14"
+            stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

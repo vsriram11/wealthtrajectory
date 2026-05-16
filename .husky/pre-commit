@@ -1,0 +1,10 @@
+# Pre-commit guardrails. Fast checks only — full test suite runs
+# in CI, not here. Order matters: lint-staged auto-fixes first
+# (touching only staged files), then typecheck runs project-wide
+# since TS is a global concern.
+#
+# To bypass in an emergency: git commit --no-verify. Almost always
+# better to fix the failure.
+
+npx lint-staged
+npx tsc --noEmit

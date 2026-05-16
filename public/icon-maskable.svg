@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="FIREr">
+  <!-- Maskable icon: full-bleed fill so iOS/Android can mask the corners
+       into circles, squares, squircles etc. without losing the brand mark. -->
+  <rect width="512" height="512" fill="#0a0d12"/>
+  <defs>
+    <linearGradient id="flame" x1="0" y1="1" x2="0" y2="0">
+      <stop offset="0%" stop-color="#fbbf24"/>
+      <stop offset="50%" stop-color="#f97316"/>
+      <stop offset="100%" stop-color="#38bdf8"/>
+    </linearGradient>
+  </defs>
+  <path d="M 256 140
+           C 226 200, 196 240, 196 300
+           C 196 340, 226 360, 256 360
+           C 286 360, 316 340, 316 300
+           C 316 240, 286 200, 256 140 Z"
+        fill="url(#flame)"/>
+  <polyline points="170 400, 230 370, 290 380, 360 320"
+            fill="none" stroke="#38bdf8" stroke-width="14"
+            stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

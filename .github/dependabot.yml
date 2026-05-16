@@ -1,0 +1,48 @@
+version: 2
+
+# Dependency-update bot config. Two ecosystems: the npm tree and
+# the GitHub Actions we pin in workflows. Both run weekly so the
+# PR churn is predictable and reviewable in one sitting.
+#
+# Updates are *grouped* — one PR per ecosystem per week instead of
+# N tiny PRs — so review cost scales with risk, not dependency
+# count. Major-version bumps stay un-grouped because they often
+# require migration work that warrants its own PR.
+
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Los_Angeles
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - npm
+    groups:
+      # Minor + patch bumps land in one weekly digest. Reviewer
+      # skims the changelog deltas and squash-merges in one pass.
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+    # Major bumps land as their own PRs so migration work doesn't
+    # collide with low-risk updates.
+    ignore: []
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Los_Angeles
+    labels:
+      - dependencies
+      - github-actions
+    groups:
+      actions:
+        patterns:
+          - "*"
