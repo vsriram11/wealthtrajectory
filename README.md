@@ -1,2 +1,2 @@
 # wealthtrajectory
-A century of market stress-tests with your per-asset assumptions — runs locally in your browser, your data never leaves your device.
+Stress-test your financial-independence plan against a century of markets. Per-asset assumptions. In your browser. Never on a server.
