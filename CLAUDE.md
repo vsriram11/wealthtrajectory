@@ -82,6 +82,7 @@ If you can't write the failing test first, you don't understand the change well 
 
 - **Modify engine code without tests.** Even a "trivial" bug fix gets a regression test in the same commit.
 - **Mutate Zustand state in place.** Always shallow-copy via spread or array methods that return new arrays.
+- **Add analytics, telemetry, or third-party trackers.** The README's "no analytics, no telemetry, no third-party trackers in the bundle" is a contract with users, not aspiration. Don't install `@vercel/analytics`, `@vercel/speed-insights`, Sentry, PostHog, Plausible, GA, Hotjar, Segment, etc. — and don't add `<script>` tags pointing at third-party CDNs. "Just to see how the site is performing" breaks the privacy claim anyone opening DevTools will verify. If a future contributor needs perf data, run Lighthouse locally — the repo already wires that into CI.
 - **Sprinkle null-checks for impossible cases.** Trust internal code; validate at system boundaries (user input, API responses).
 - **Add `as never` / `as any` to make tests compile.** Build a proper fixture instead — type errors in test code are catching a real signal.
 - **Default to creating new helper files.** Three similar lines is better than a premature abstraction. If a pattern emerges across three call sites, extract then.
