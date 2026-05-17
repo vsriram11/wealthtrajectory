@@ -36,6 +36,18 @@ function isInsufficientScopeError(message: string): boolean {
   );
 }
 
+/**
+ * Detect Google's `access_denied` OAuth response — the test-user
+ * allowlist miss. The GIS token response surfaces this as
+ * `response.error === "access_denied"`, which `signIn()` rejects
+ * with `new Error("access_denied")` (lib/sync/googleAuth.ts).
+ * Documented user path: email the maintainer to be added to the
+ * allowlist; see docs/OAUTH_VERIFICATION.md.
+ */
+function isAccessDeniedError(message: string): boolean {
+  return /access_denied/i.test(message);
+}
+
 type ConnectStep =
   | { kind: "idle" }
   | { kind: "merging"; cloud: DriveBackupRef; cloudText: string };
@@ -233,6 +245,7 @@ export function GoogleSyncCard() {
   };
 
   const insufficientScope = !!error && isInsufficientScopeError(error);
+  const accessDenied = !!error && isAccessDeniedError(error);
 
   return (
     <section className="px-5 pt-3">
@@ -280,6 +293,21 @@ export function GoogleSyncCard() {
                       Google says this app no longer has Drive access on
                       your account. Click <strong>Reconnect</strong> to
                       grant access again — your data on Drive is untouched.
+                    </>
+                  ) : accessDenied ? (
+                    <>
+                      Your Gmail isn&apos;t on the OAuth test-user
+                      allowlist. Drive sync is in Google&apos;s 100-user
+                      Testing tier — email{" "}
+                      <a
+                        href="mailto:varunsriram93@hotmail.com?subject=wealthtrajectory%20Drive%20sync%20access"
+                        className="underline"
+                      >
+                        varunsriram93@hotmail.com
+                      </a>{" "}
+                      with the address you&apos;d like added (usually
+                      within 24h). Until then, your data stays on this
+                      device — Data → Export covers cross-device transfer.
                     </>
                   ) : (
                     error
