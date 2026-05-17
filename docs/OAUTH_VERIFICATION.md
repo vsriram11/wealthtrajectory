@@ -12,7 +12,7 @@
 ## What the cap actually means
 
 Google's OAuth consent screen has three states. Today this app is
-in the second:
+in the first (Testing) — and intends to stay there:
 
 | State | Who can sign in | UX |
 |---|---|---|
@@ -20,9 +20,47 @@ in the second:
 | **Published, Unverified** | Any Google user, up to **100 unique users total** for SENSITIVE scopes | One-time "unverified app" warning screen; "Advanced → Continue (unsafe)" link |
 | **Published, Verified** | Any Google user, no cap | Clean consent screen, no warning |
 
-Past 100 unique users in the Unverified state, sign-ins start
-failing with `access_denied`. The cap is enforced by Google, not
-by anything in this codebase.
+In Testing mode, anyone whose Gmail isn't on the allowlist gets
+`access_denied` at the sign-in step. The cap (max 100 allowlist
+slots) is enforced by Google, not by anything in this codebase.
+
+## Why Testing rather than Published-Unverified
+
+Of the three states, this project deliberately sits in **Testing**
+rather than Published-Unverified, even though the user cap is the
+same 100 either way. Reasoning:
+
+- **No "unverified app" warning** for users we add. Published-
+  Unverified shows a "Google hasn't verified this app" screen with
+  an `Advanced → Continue (unsafe)` link — which makes a privacy-
+  forward personal-finance project look exactly the opposite.
+- **Allowlist filters for intent.** A user emailing to be added is
+  a strong signal they want Drive sync specifically; most visitors
+  are happy with the local + encrypted-export path and never need
+  it.
+- **Less Google policy surface area.** Sensitive scopes have been
+  tightened twice in the last 18 months; Testing mode is the most
+  stable place to sit while the project's distribution is small.
+
+The trade-offs we accept:
+
+- Refresh tokens expire after 7 days in Testing mode. Users see a
+  silent re-auth prompt about once a week.
+- Sign-in requires being on the allowlist, so onboarding adds a
+  ~24h round-trip via email (see next section).
+
+## How to request Drive sync
+
+If you want Google Drive auto-sync, email **varunsriram93@hotmail.com**
+with the Gmail address you want added. We'll add it to the OAuth
+test-user allowlist (usually within 24 hours). This is the only
+out-of-band step; everything else in the app works without
+sign-in.
+
+Most users never email — the local export/import path (encrypted
+with a user-set passphrase) covers cross-device transfer
+losslessly. Drive sync is the "I want auto-push on every change"
+convenience, not the only path to multi-device.
 
 ## Why we don't pursue verification
 
@@ -66,7 +104,7 @@ exactly what we don't want.
 ## What the cap doesn't mean
 
 **This isn't a 100-user-total cap on the app.** It's specifically
-a cap on users who sign in for Drive sync. The app:
+a cap on allowlisted Drive-sync users. The app:
 
 - Works fully offline-first via IndexedDB.
 - Persists demo data + real-mode data without any sign-in.
@@ -76,9 +114,10 @@ a cap on users who sign in for Drive sync. The app:
   forever.
 
 So:
-- Users 1-100 who want auto-sync via Drive can sign in.
-- User 101+ who hits the cap sees `access_denied` and falls back
-  to manual export/import.
+- The first 100 allowlisted Gmail addresses can sign in for Drive
+  sync.
+- Anyone else — not yet emailed, past the cap, or just preferring
+  no sign-in — uses the local encrypted export/import path.
 - All 1000+ users (whatever scale we reach) can use the rest of
   the app indefinitely.
 
