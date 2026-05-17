@@ -51,7 +51,7 @@ The trade-offs we accept:
 
 ## How to request Drive sync
 
-If you want Google Drive auto-sync, email **jaamun11@gmail.com**
+If you want Google Drive auto-sync, email **varunsriram93@hotmail.com**
 with the Gmail address you want added. We'll add it to the OAuth
 test-user allowlist (usually within 24 hours). This is the only
 out-of-band step; everything else in the app works without

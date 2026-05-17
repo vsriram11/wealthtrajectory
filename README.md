@@ -15,7 +15,7 @@
 >
 > Free. No signup. No install. No data ever leaves your browser. Open in any modern browser (Chrome, Safari, Firefox, Edge) on desktop or mobile and start planning.
 
-> **Want Google Drive auto-sync?** The app works fully without sign-in — your data lives in your browser, and you can encrypt + export it to move between devices losslessly. For optional Google Drive auto-sync, email **jaamun11@gmail.com** with the Gmail address you want added. The project sits in Google's 100-user OAuth Testing tier (verifying would require a paid domain, which we deliberately avoid). Most users never need this — local export/import covers cross-device transfer. See [docs/OAUTH_VERIFICATION.md](./docs/OAUTH_VERIFICATION.md) for the full rationale.
+> **Want Google Drive auto-sync?** The app works fully without sign-in — your data lives in your browser, and you can encrypt + export it to move between devices losslessly. For optional Google Drive auto-sync, email **varunsriram93@hotmail.com** with the Gmail address you want added. The project sits in Google's 100-user OAuth Testing tier (verifying would require a paid domain, which we deliberately avoid). Most users never need this — local export/import covers cross-device transfer. See [docs/OAUTH_VERIFICATION.md](./docs/OAUTH_VERIFICATION.md) for the full rationale.
 
 ## A quick visual tour
 
@@ -109,7 +109,7 @@ spreadsheets; the React shell is just a fast way to interact with them.
 > **Drive sync is in Google's 100-user OAuth Testing tier.**
 > The project deliberately doesn't pursue verification (would require an
 > owned domain → recurring $$). Sign-in requires the Gmail to be on the
-> OAuth test-user allowlist — email **jaamun11@gmail.com** with the
+> OAuth test-user allowlist — email **varunsriram93@hotmail.com** with the
 > address you want added (usually within 24h). Past the 100-user cap, or
 > for anyone who'd rather skip sign-in entirely, the Data page's local
 > export/import remains the free, encrypted, cross-device path. See
