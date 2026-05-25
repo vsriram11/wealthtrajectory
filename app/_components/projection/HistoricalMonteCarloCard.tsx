@@ -184,6 +184,13 @@ export function HistoricalMonteCarloCard() {
   // assumption; cash is the conservative floor. Commodity is NOT in
   // this toggle — it has its own historical gold series.
   const [altsAs, setAltsAs] = useState<"stocks" | "cash">("stocks");
+  // Rebalancing policy for the stress test. Default "annual" matches
+  // standard retirement-survival convention (Trinity Study, Bengen,
+  // cfiresim). "none" lets the portfolio drift based on differential
+  // class returns — when a glide path is configured, only year 0 of
+  // the glide path is honored under "none" since no rebalance = no
+  // glide-target snap.
+  const [rebalance, setRebalance] = useState<"annual" | "none">("annual");
 
   const portfolio = useMemo(
     () => computePortfolio(scopedHousehold),
@@ -402,11 +409,12 @@ export function HistoricalMonteCarloCard() {
         : {}),
     };
     if (mode === "historical") {
-      return runHistoricalSequences(inputs);
+      return runHistoricalSequences(inputs, { rebalance });
     }
     return runBootstrap(inputs, {
       paths: Math.max(100, Math.min(10000, bootstrapPaths)),
       seed: 1, // deterministic — UI feels stable across re-renders
+      rebalance,
     });
   }, [
     effectiveStartingNW,
@@ -424,6 +432,7 @@ export function HistoricalMonteCarloCard() {
     glidePathActive,
     glidePath,
     memberAge,
+    rebalance,
   ]);
 
   const successPct = (result.successRate * 100).toFixed(1);
@@ -705,6 +714,31 @@ export function HistoricalMonteCarloCard() {
           </div>
         )}
 
+        {/* Rebalancing-policy toggle. Default Annual matches standard
+            retirement-survival convention. None lets the portfolio
+            drift — when a glide path is configured, only year 0 is
+            honored under None (no rebalance = no glide-target snap).
+            Both modes go through the same simulator path; the choice
+            is part of the input bundle. */}
+        <div className="mt-3 flex items-center justify-between gap-2 rounded-md border border-border bg-bg-elevated px-3 py-2">
+          <div className="min-w-0 text-[10px] leading-snug text-text-dim">
+            <span className="text-text">Rebalance</span> between
+            asset classes
+          </div>
+          <div className="inline-flex shrink-0 gap-0.5 rounded-full border border-border bg-bg-surface p-0.5">
+            <ModeChip
+              label="Annual"
+              active={rebalance === "annual"}
+              onClick={() => setRebalance("annual")}
+            />
+            <ModeChip
+              label="None"
+              active={rebalance === "none"}
+              onClick={() => setRebalance("none")}
+            />
+          </div>
+        </div>
+
         <div className="mt-3 rounded-md border border-border bg-bg-elevated px-3 py-2 text-[10px] leading-snug text-text-dim">
           <div className="text-[10px] uppercase tracking-wider text-text-muted">
             Methodology
@@ -749,31 +783,53 @@ export function HistoricalMonteCarloCard() {
               )}
               .
             </li>
-            {glidePathActive ? (
-              <li>
-                <span className="text-text">
-                  Glide path active + annual rebalance.
-                </span>{" "}
-                Allocation interpolates per year between your{" "}
-                {glidePath!.waypoints.length} waypoint
-                {glidePath!.waypoints.length === 1 ? "" : "s"} as you
-                age (currently {memberAge}). The percentages shown
-                above are <em>today&apos;s</em> mix; the simulator
-                resolves the per-year mix and snaps to it each year
-                (rebalance-to-target — no drift tracking between
-                rebalances).
-              </li>
+            {rebalance === "annual" ? (
+              glidePathActive ? (
+                <li>
+                  <span className="text-text">
+                    Glide path active + annual rebalance.
+                  </span>{" "}
+                  Allocation interpolates per year between your{" "}
+                  {glidePath!.waypoints.length} waypoint
+                  {glidePath!.waypoints.length === 1 ? "" : "s"} as
+                  you age (currently {memberAge}). The percentages
+                  shown above are <em>today&apos;s</em> mix; the
+                  simulator resolves the per-year mix and snaps to
+                  it each year (rebalance-to-target — no drift
+                  tracking between rebalances).
+                </li>
+              ) : (
+                <li>
+                  <span className="text-text">
+                    Static allocation + annual rebalance-to-target.
+                  </span>{" "}
+                  The mix above is held constant across the horizon;
+                  the simulator snaps to it every year before applying
+                  that year&apos;s returns (no drift tracking between
+                  rebalances — matches Trinity Study / cfiresim
+                  defaults). Configure a glide path on the Allocation
+                  page and it&apos;ll honor that here instead.
+                </li>
+              )
             ) : (
               <li>
                 <span className="text-text">
-                  Static allocation + annual rebalance-to-target.
+                  Set-and-forget — no rebalancing across the horizon.
                 </span>{" "}
-                The mix above is held constant across the horizon; the
-                simulator snaps to it every year before applying that
-                year&apos;s returns (no drift tracking between
-                rebalances — matches Trinity Study / cfiresim
-                defaults). Configure a glide path on the Allocation
-                page and it&apos;ll honor that here instead.
+                Initial weights are{" "}
+                {glidePathActive
+                  ? "drawn from your glide path's age-" +
+                    memberAge +
+                    " waypoint (later waypoints are ignored — no rebalance = no glide-target snap)"
+                  : "your current static allocation"}{" "}
+                and the portfolio drifts based on differential class
+                returns thereafter. Cash flow (spend / contributions)
+                is distributed proportionally to current weights each
+                year so it doesn&apos;t itself force a rebalance.
+                Drift can raise expected wealth in stocks-outperform
+                sequences AND raise sequence-risk exposure when
+                equity grows beyond your target — neither effect is
+                small over a 30+ year horizon.
               </li>
             )}
             <li>

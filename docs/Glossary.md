@@ -192,6 +192,28 @@ simulator routes to a dedicated `stocks2x` return series (RYTNX-derived
 for 2001-2025, formula-projected for 1928-2000). These positions are
 kept as-is in the stress test (no tax hit, no restructure).
 
+### Rebalance policy (MC stress test)
+Toggle on the historical-MC card with two modes:
+
+- **Annual** (default) — snap to target weights at the start of every
+  year, before returns are applied. The target is the static allocation
+  or the glide-path-resolved per-age allocation when a glide path is
+  configured. Matches Trinity Study / Bengen / cfiresim defaults; the
+  standard convention for retirement-survival research.
+- **None** ("set and forget") — initialize per-class balances at year
+  0 from the static / glide-path-year-0 allocation, then let returns
+  dictate composition. The portfolio drifts based on differential
+  class returns; cash flow is distributed proportionally to current
+  (post-return) weights so cf itself doesn't force a rebalance. When
+  a glide path is configured, only its year-0 waypoint is honored
+  under None — no rebalance means no glide-target snap.
+
+Drift effects over a 30+ year horizon are non-trivial: in stocks-
+outperform sequences, equity drifts up over time and raises both
+expected wealth AND sequence-risk exposure when the next crash
+arrives. Worth running both modes when stress-testing a plan that
+relies on long-duration drift assumptions.
+
 ### Capital-efficient multi-asset wrappers
 A class of leveraged ETFs that combine equity with bonds, gold, or
 managed futures in a single product (NTSX 90/60 stocks/bonds, GDE

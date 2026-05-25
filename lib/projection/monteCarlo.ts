@@ -219,17 +219,38 @@ export type MonteCarloInputs = {
   startAge?: number;
 };
 
+/**
+ * Per-year rebalancing policy.
+ *
+ *   - "annual"  Snap to target weights (static allocation or
+ *               glide-path-resolved per-year) at the start of every
+ *               year, before returns are applied. Standard
+ *               retirement-survival convention (Trinity Study,
+ *               Bengen, cfiresim defaults).
+ *   - "none"    Set initial weights at year 0 only, then let the
+ *               portfolio drift based on differential class returns.
+ *               Cash flow is distributed proportionally to current
+ *               (post-return) weights each year, so spend doesn't
+ *               itself force a rebalance — drift comes purely from
+ *               returns. When a glide path is configured, only its
+ *               year-0 waypoint is honored; later waypoints are
+ *               ignored under this policy (no rebalance = no
+ *               glide-target snap).
+ */
+export type RebalancePolicy = "annual" | "none";
+
 export type SimulationOptions = {
   /** Historical dataset to draw from. Defaults to HISTORICAL_REAL_RETURNS. */
   dataset?: readonly AnnualRealReturns[];
-  // NOTE: an earlier API exposed a `rebalance?: boolean` flag here.
-  // The engine has always implicitly rebalanced annually (it snaps to
-  // target weights at the start of each year, with no per-class
-  // balance drift tracked between rebalances), so the flag was a
-  // no-op. Removed from the type so the API matches behavior. If a
-  // future enhancement adds true drift-tracking, the right thing is
-  // to add a new option name with the new semantics rather than
-  // resurrecting `rebalance` as a flag that was always on.
+  /**
+   * Rebalancing policy. Default "annual" — snap to target each year.
+   * Pass "none" to model a set-and-forget portfolio (initial weights
+   * from year 0, then drift). The two modes can produce materially
+   * different success rates over long horizons because differential
+   * class returns let equity drift up over time in "none" mode,
+   * which raises both expected wealth AND sequence-risk exposure.
+   */
+  rebalance?: RebalancePolicy;
 };
 
 export type BootstrapOptions = SimulationOptions & {
@@ -409,7 +430,7 @@ export function simulatePath(
     pathId = (pathIdOrOptions as string) ?? "";
     options = optionsArg;
   }
-  void options; // currently unused — see note above
+  const rebalancePolicy: RebalancePolicy = options.rebalance ?? "annual";
   const yearsPre = inputs.yearsUntilRetirement ?? 0;
   const yearsRet = inputs.retirementHorizonYears;
   const totalYears = yearsPre + yearsRet;
@@ -455,22 +476,37 @@ export function simulatePath(
   let nw = trajectory[0];
   let failedAtYear = -1;
 
+  // Per-class balances. In "annual" mode these are re-derived each
+  // year from target weights × current nw (existing behavior, drift
+  // is irrelevant). In "none" mode these persist across years —
+  // initialized at year 0 from `weightsForYear(0)` × startingNW,
+  // then drift based on differential class returns; cash flow each
+  // year is distributed proportionally to current (post-return)
+  // weights so cf itself doesn't force a rebalance.
+  const initialWeights = weightsForYear(0);
+  let sB = nw * initialWeights.wS;
+  let bB = nw * initialWeights.wB;
+  let cB = nw * initialWeights.wC;
+  let gB = nw * initialWeights.wG;
+  let rB = nw * initialWeights.wR;
+  let lB = nw * initialWeights.wL;
+
   for (let y = 0; y < totalYears; y++) {
-    // Annual rebalance-to-target. Each year we snap to the target
-    // weights (static from `inputs.allocation`, or per-age from the
-    // glide path when configured) BEFORE applying that year's
-    // returns. The engine doesn't track per-class balance drift
-    // between rebalances — partly for simplicity, partly because
-    // most retirement-survival research (Trinity Study, Bengen,
-    // cfiresim defaults) assumes annual rebalancing too. Documented
-    // in §7.6 of docs/Calculations.md.
-    const { wS, wB, wC, wG, wR, wL } = weightsForYear(y);
-    let sB = nw * wS;
-    let bB = nw * wB;
-    let cB = nw * wC;
-    let gB = nw * wG;
-    let rB = nw * wR;
-    let lB = nw * wL;
+    if (rebalancePolicy === "annual") {
+      // Annual rebalance-to-target. Each year we snap to the target
+      // weights (static from `inputs.allocation`, or per-age from
+      // the glide path when configured) BEFORE applying that year's
+      // returns. Standard retirement-survival convention.
+      const { wS, wB, wC, wG, wR, wL } = weightsForYear(y);
+      sB = nw * wS;
+      bB = nw * wB;
+      cB = nw * wC;
+      gB = nw * wG;
+      rB = nw * wR;
+      lB = nw * wL;
+    }
+    // For "none" mode, balances persist from the previous iteration
+    // (or from the year-0 initialization above). No snap.
 
     // Apply this year's real returns.
     const rs = stockReturns[y] ?? 0;
@@ -532,7 +568,35 @@ export function simulatePath(
       y < yearsPre
         ? (inputs.annualContributionUSD ?? 0) + income
         : -withdrawal + income;
-    nw = nwAfterReturns + cf * (1 + rImplied / 2);
+    const cfWithGrowth = cf * (1 + rImplied / 2);
+    nw = nwAfterReturns + cfWithGrowth;
+
+    if (rebalancePolicy === "none") {
+      // Distribute cf proportionally to current (post-return)
+      // bucket weights so cf itself doesn't force a rebalance. The
+      // drift across years comes purely from differential class
+      // returns; this step just keeps the per-class balances
+      // consistent with the new total nw.
+      if (nwAfterReturns > 0 && nw > 0) {
+        const factor = nw / nwAfterReturns;
+        sB *= factor;
+        bB *= factor;
+        cB *= factor;
+        gB *= factor;
+        rB *= factor;
+        lB *= factor;
+      } else if (nw <= 0) {
+        sB = 0;
+        bB = 0;
+        cB = 0;
+        gB = 0;
+        rB = 0;
+        lB = 0;
+      }
+    }
+    // "annual" mode doesn't need to update per-class balances —
+    // they'll be re-snapped to target weights × nw at the top of
+    // the next iteration.
 
     if (nw <= 0) {
       nw = 0;
