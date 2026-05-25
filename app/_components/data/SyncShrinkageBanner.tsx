@@ -42,6 +42,15 @@ export function SyncShrinkageBanner() {
   const keepLocal = async () => {
     setError(null);
     setBusy("keep");
+    // Yield once so React can paint the "Pushing…" state before we
+    // start the heavy crypto + network work. Otherwise the whole
+    // chain runs in one event-handler task and INP (Chrome's
+    // interaction-to-next-paint metric) registers the full delay
+    // as a frozen-UI event on the button — even though the user
+    // got immediate visual feedback intent. Real fix for the
+    // underlying ~1.5s would be moving PBKDF2 to a Web Worker;
+    // this is the cheap shim that buys good INP today.
+    await new Promise<void>((r) => setTimeout(r, 0));
     // Clear the import-shrinkage block so pushToDrive's encryption-
     // block check doesn't see a stale reason. The push helper will
     // re-set if it hits a different problem.
@@ -66,6 +75,12 @@ export function SyncShrinkageBanner() {
       return;
     setError(null);
     setBusy("accept");
+    // Yield once so React can paint the "Pulling…" state before we
+    // start the heavy decryption + import work. See `keepLocal`
+    // for the same fix — both buttons trigger PBKDF2-heavy paths
+    // and need the browser to land a paint between the click and
+    // the crypto.
+    await new Promise<void>((r) => setTimeout(r, 0));
     // Temporarily clear the blocked reason so pullFromDrive
     // doesn't immediately re-trigger the same guard against the
     // user's explicit choice.
