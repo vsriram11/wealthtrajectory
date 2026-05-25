@@ -45,6 +45,7 @@ import {
   PercentileBox,
 } from "./historical-mc/fields";
 import { worstPathContext } from "./historical-mc/worstPathContext";
+import { HistoricalReturnsTableModal } from "./HistoricalReturnsTableModal";
 
 /**
  * Historical Monte Carlo card — runs the user's plan against
@@ -173,6 +174,10 @@ export function HistoricalMonteCarloCard() {
       ? ("at_target" as const)
       : ("below_target" as const);
   const [mode, setMode] = useState<"historical" | "bootstrap">("historical");
+  // Reference-data viewer for the underlying historical-MC dataset.
+  // Opened from the "View year-by-year table →" affordance in the
+  // methodology footnote at the bottom of the card.
+  const [historicalTableOpen, setHistoricalTableOpen] = useState(false);
   const [bootstrapPaths, setBootstrapPaths] = useState(2000);
   // How to model the "other alts" bucket (crypto + direct RE +
   // private stock + plain "other"). Stocks is the more aggressive
@@ -705,14 +710,29 @@ export function HistoricalMonteCarloCard() {
             )}
             <li>
               <span className="text-text">Data source:</span> Damodaran
-              Jan 2026 refresh (committed at docs/histretSP.xls) —
-              S&amp;P 500, 10Y T-Bond, 3-mo T-Bill, Baa Corp, RE,
-              Gold — CPI-deflated to real returns. Past returns
-              don&apos;t predict future ones.
+              Jan 2026 refresh — S&amp;P 500, 10Y T-Bond, 3-mo T-Bill,
+              Baa Corp, RE, Gold, plus RYTNX-derived 2x SPY (projected
+              pre-2001). CPI-deflated to real returns. Past returns
+              don&apos;t predict future ones.{" "}
+              <button
+                type="button"
+                onClick={() => setHistoricalTableOpen(true)}
+                className="rounded-sm text-accent underline decoration-dotted underline-offset-2 hover:decoration-solid focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
+              >
+                View year-by-year table →
+              </button>
             </li>
           </ul>
         </div>
       </div>
+
+      {/* Year-by-year historical-returns viewer. Renders nothing when
+          closed; the modal manages its own Escape / backdrop dismiss
+          handlers so we don't have to wire them up here. */}
+      <HistoricalReturnsTableModal
+        open={historicalTableOpen}
+        onClose={() => setHistoricalTableOpen(false)}
+      />
     </section>
   );
 }
