@@ -706,7 +706,12 @@ export function HistoricalMonteCarloCard() {
         )}
 
         <div className="mt-3 rounded-md border border-border bg-bg-elevated px-3 py-2 text-[10px] leading-snug text-text-dim">
-          <div className="font-medium text-text">What this is modeling</div>
+          <div className="text-[10px] uppercase tracking-wider text-text-muted">
+            Methodology
+          </div>
+          <div className="font-medium text-text">
+            What the stress test is actually doing
+          </div>
           <ul className="mt-1 space-y-1">
             <li>
               <span className="text-text">Real-terms throughout</span> —
@@ -718,6 +723,12 @@ export function HistoricalMonteCarloCard() {
               {(allocation.stocksFraction * 100).toFixed(0)}% stocks /{" "}
               {(allocation.bondsFraction * 100).toFixed(0)}% bonds /{" "}
               {(allocation.cashFraction * 100).toFixed(0)}% cash
+              {stocks2xFraction > 0.001 && (
+                <>
+                  {" "}/ {(stocks2xFraction * 100).toFixed(0)}% 2x equity
+                  (RYTNX series — real 2001+, projected pre-2001)
+                </>
+              )}
               {commodityShare > 0.001 && (
                 <>
                   {" "}/ {(commodityShare * 100).toFixed(0)}% commodity
@@ -740,21 +751,68 @@ export function HistoricalMonteCarloCard() {
             </li>
             {glidePathActive ? (
               <li>
-                <span className="text-text">Glide path active.</span>{" "}
+                <span className="text-text">
+                  Glide path active + annual rebalance.
+                </span>{" "}
                 Allocation interpolates per year between your{" "}
                 {glidePath!.waypoints.length} waypoint
                 {glidePath!.waypoints.length === 1 ? "" : "s"} as you
                 age (currently {memberAge}). The percentages shown
                 above are <em>today&apos;s</em> mix; the simulator
-                resolves the actual mix for each future year.
-                Annual rebalancing assumed.
+                resolves the per-year mix and snaps to it each year
+                (rebalance-to-target — no drift tracking between
+                rebalances).
               </li>
             ) : (
               <li>
-                <span className="text-text">Static allocation, annual rebalance.</span>{" "}
-                The mix above is held constant across the horizon. If
-                you configure a glide-path on the Allocation page,
-                the simulator will honor it here.
+                <span className="text-text">
+                  Static allocation + annual rebalance-to-target.
+                </span>{" "}
+                The mix above is held constant across the horizon; the
+                simulator snaps to it every year before applying that
+                year&apos;s returns (no drift tracking between
+                rebalances — matches Trinity Study / cfiresim
+                defaults). Configure a glide path on the Allocation
+                page and it&apos;ll honor that here instead.
+              </li>
+            )}
+            <li>
+              <span className="text-text">
+                Mid-year cash-flow timing.
+              </span>{" "}
+              Contributions (pre-retirement) and spend (retirement)
+              are applied at mid-year: a $40K real spend in a −10%
+              year reduces NW by $40K × (1 + −0.05) = $38K, not the
+              full $40K — the unspent half avoids the second half of
+              the drawdown. Matches the deterministic Independence
+              projection.
+            </li>
+            {(leveragedBuckets.stocks2xUSD +
+              leveragedBuckets.postTaxDeleverageToStocks2xUSD >
+              0) && (
+              <li>
+                <span className="text-text">
+                  2x equity routes to the stocks2x return series
+                </span>{" "}
+                — RYTNX-derived real data 2001+, formula-projected
+                pre-2001. Recognized 2x SPY positions (SSO/SPUU/QLD)
+                are kept at face value;{" "}
+                {leveragedBuckets.postTaxDeleverageToStocks2xUSD > 0 &&
+                  "3x SPY/Nasdaq positions (UPRO/SPXL/TQQQ) are modeled as deleveraged to 2x at retirement, post-tax."}
+              </li>
+            )}
+            {leveragedBuckets.deleveragingTaxHitUSD > 0 && (
+              <li>
+                <span className="text-text">
+                  At-retirement deleveraging restructure.
+                </span>{" "}
+                Non-recognized leveraged positions are modeled as
+                restructured at retirement (3x SPY/Nasdaq → 2x, other
+                concentrated leverage → 1x). Capital-gains tax on the
+                restructure (only for positions in taxable accounts)
+                is applied to starting NW at the retirement tax rate
+                — see the amber callout above the success-rate panel
+                for your scenario&apos;s numbers.
               </li>
             )}
             {commodityShare > 0.001 && (

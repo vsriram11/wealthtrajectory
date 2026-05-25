@@ -222,12 +222,14 @@ export type MonteCarloInputs = {
 export type SimulationOptions = {
   /** Historical dataset to draw from. Defaults to HISTORICAL_REAL_RETURNS. */
   dataset?: readonly AnnualRealReturns[];
-  /**
-   * Annual rebalancing — re-set the allocation each year before
-   * applying returns. Default true (most retirement plans assume
-   * rebalancing).
-   */
-  rebalance?: boolean;
+  // NOTE: an earlier API exposed a `rebalance?: boolean` flag here.
+  // The engine has always implicitly rebalanced annually (it snaps to
+  // target weights at the start of each year, with no per-class
+  // balance drift tracked between rebalances), so the flag was a
+  // no-op. Removed from the type so the API matches behavior. If a
+  // future enhancement adds true drift-tracking, the right thing is
+  // to add a new option name with the new semantics rather than
+  // resurrecting `rebalance` as a flag that was always on.
 };
 
 export type BootstrapOptions = SimulationOptions & {
@@ -389,6 +391,12 @@ export function simulatePath(
   // simulator then uses a zero-filled stocks2x stream.
   let stocks2xReturns: number[];
   let pathId: string;
+  // Note: `options` is reserved for the dataset hook used by tests
+  // that swap in a synthetic return series. Other options used to
+  // live here (the old `rebalance` flag — see SimulationOptions
+  // doc) but were no-ops, so the parameter is currently
+  // unconsumed inside the loop. Kept in the signature for the
+  // dataset hook and future expansion.
   let options: SimulationOptions;
   if (typeof stocks2xReturnsOrPathId === "string") {
     // Old 5-stream signature: (..., realEstate, pathId, options?)
@@ -401,7 +409,7 @@ export function simulatePath(
     pathId = (pathIdOrOptions as string) ?? "";
     options = optionsArg;
   }
-  const rebalance = options.rebalance ?? true;
+  void options; // currently unused — see note above
   const yearsPre = inputs.yearsUntilRetirement ?? 0;
   const yearsRet = inputs.retirementHorizonYears;
   const totalYears = yearsPre + yearsRet;
@@ -448,12 +456,14 @@ export function simulatePath(
   let failedAtYear = -1;
 
   for (let y = 0; y < totalYears; y++) {
-    // Annual rebalancing — snap to target weights. Non-rebalancing
-    // mode in this lightweight engine still uses target weights at
-    // each year (we don't track per-class balance drift over time),
-    // so `rebalance: false` collapses to the same blended-return
-    // path. Documented in §7.6 of docs/Calculations.md.
-    void rebalance;
+    // Annual rebalance-to-target. Each year we snap to the target
+    // weights (static from `inputs.allocation`, or per-age from the
+    // glide path when configured) BEFORE applying that year's
+    // returns. The engine doesn't track per-class balance drift
+    // between rebalances — partly for simplicity, partly because
+    // most retirement-survival research (Trinity Study, Bengen,
+    // cfiresim defaults) assumes annual rebalancing too. Documented
+    // in §7.6 of docs/Calculations.md.
     const { wS, wB, wC, wG, wR, wL } = weightsForYear(y);
     let sB = nw * wS;
     let bB = nw * wB;
