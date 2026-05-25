@@ -9,6 +9,7 @@ import {
 import {
   HISTORICAL_RETURNS_FIRST_YEAR,
   HISTORICAL_RETURNS_LAST_YEAR,
+  LEVERAGED_2X_REAL_DATA_START_YEAR,
 } from "@/lib/data/historicalReturns";
 import {
   runBootstrap,
@@ -513,7 +514,20 @@ export function HistoricalMonteCarloCard() {
         {worstPath && mode === "historical" && (
           <div className="mt-3 rounded-md border border-amber-300/40 bg-amber-300/5 px-3 py-2 text-[11px] leading-snug text-amber-200">
             Worst start:{" "}
-            <span className="font-semibold">{worstPath.id}</span> →{" "}
+            <span className="font-semibold">{worstPath.id}</span>
+            {/* When the user has 2x exposure and the worst-failure
+                start year predates the real RYTNX data (2001), flag
+                that the 2x return for that sequence came from the
+                projection formula, not direct observation. Keeps
+                the UI honest about what's measured vs modeled. */}
+            {stocks2xFraction > 0 &&
+              Number.isFinite(Number(worstPath.id)) &&
+              Number(worstPath.id) < LEVERAGED_2X_REAL_DATA_START_YEAR && (
+                <span className="ml-1.5 inline-flex items-center rounded border border-amber-300/40 bg-amber-300/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-amber-300">
+                  Projected 2x
+                </span>
+              )}{" "}
+            →{" "}
             {worstPath.survived
               ? `survived but ended at ${formatUSDCompact(worstPath.endingNetWorthUSD)} real`
               : `ran out of money in year ${worstPath.failedAtYear}`}
