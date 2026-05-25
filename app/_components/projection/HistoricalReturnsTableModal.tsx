@@ -73,10 +73,11 @@ export function HistoricalReturnsTableModal({
           onClick={onClose}
           aria-hidden
         />
-        <div className="absolute inset-x-0 bottom-0 max-h-[92dvh] overflow-hidden rounded-t-3xl border-t border-border-strong bg-bg-surface sm:inset-x-auto sm:left-1/2 sm:top-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 sm:max-h-[85dvh] sm:max-w-3xl sm:rounded-3xl sm:border">
-          {/* Header — sticky relative to the modal so the close
-              button stays reachable while the table scrolls. */}
-          <div className="border-b border-border bg-bg-surface px-5 pb-3 pt-3">
+        <div className="absolute inset-x-0 bottom-0 flex max-h-[92dvh] flex-col overflow-hidden rounded-t-3xl border-t border-border-strong bg-bg-surface sm:inset-x-auto sm:left-1/2 sm:top-1/2 sm:max-h-[85dvh] sm:max-w-3xl sm:-translate-x-1/2 sm:-translate-y-1/2 sm:rounded-3xl sm:border">
+          {/* Header — flex-shrink-0 so it always stays at the top
+              and the close button stays reachable while the table
+              area scrolls. */}
+          <div className="shrink-0 border-b border-border bg-bg-surface px-5 pb-3 pt-3">
             <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-border-strong sm:hidden" />
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
@@ -111,10 +112,16 @@ export function HistoricalReturnsTableModal({
             </div>
           </div>
 
-          {/* Scrollable table. The container handles overflow; sticky
-              header + sticky first column stay locked while scrolling
-              in either direction. */}
-          <div className="max-h-[60dvh] overflow-auto sm:max-h-[60dvh]">
+          {/* Scrollable table. flex-1 + min-h-0 = "take whatever
+              vertical space is left between the sticky header and
+              the sticky footer." min-h-0 is required for flex
+              children to actually shrink past their intrinsic
+              content height — without it, the table would push the
+              modal past its max-h cap and the footer + scrollbar
+              would land below the viewport. Sticky header + sticky
+              first column stay locked while scrolling in either
+              direction. */}
+          <div className="min-h-0 flex-1 overflow-auto">
             <table className="min-w-full border-separate border-spacing-0 text-[11px]">
               <thead>
                 <tr className="text-text-dim">
@@ -168,10 +175,12 @@ export function HistoricalReturnsTableModal({
             </table>
           </div>
 
-          {/* Footer — methodology disclosure. Anyone scrutinizing the
+          {/* Footer — methodology disclosure. flex-shrink-0 so it
+              always sits at the bottom of the modal and never gets
+              clipped by tall content above. Anyone scrutinizing the
               data deserves to see the projection formula + fit
               quality, not just a single asterisk. */}
-          <div className="border-t border-border bg-bg-surface px-5 py-3 text-[10px] leading-snug text-text-dim">
+          <div className="shrink-0 border-t border-border bg-bg-surface px-5 py-3 text-[10px] leading-snug text-text-dim">
             <div>
               <span className="inline-flex h-3.5 w-3.5 items-center justify-center rounded border border-amber-300/50 bg-amber-300/10 text-[8px] font-bold leading-none text-amber-300">
                 P
