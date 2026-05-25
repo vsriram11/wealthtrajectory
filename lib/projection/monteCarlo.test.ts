@@ -12,12 +12,14 @@ import type { AnnualRealReturns } from "@/lib/data/historicalReturns";
 // numbers. 5 years of fixed returns.
 const TEST_DATASET: readonly AnnualRealReturns[] = [
   // +10% / +5% / +1% stocks/bonds/cash; alt columns flat so blends
-  // are easy to hand-check.
-  { year: 2000, stocks: 0.10, bonds: 0.05, cash: 0.01, corpBonds: 0.0, realEstate: 0.0, gold: 0.0 },
-  { year: 2001, stocks: -0.20, bonds: 0.0, cash: 0.0, corpBonds: 0.0, realEstate: 0.0, gold: 0.0 },
-  { year: 2002, stocks: 0.10, bonds: 0.05, cash: 0.01, corpBonds: 0.0, realEstate: 0.0, gold: 0.0 },
-  { year: 2003, stocks: 0.10, bonds: 0.05, cash: 0.01, corpBonds: 0.0, realEstate: 0.0, gold: 0.0 },
-  { year: 2004, stocks: 0.10, bonds: 0.05, cash: 0.01, corpBonds: 0.0, realEstate: 0.0, gold: 0.0 },
+  // are easy to hand-check. stocks2x set to 2x of stocks for simple
+  // hand-checking; engine tests that exercise the 2x bucket can
+  // build their own fixtures if needed.
+  { year: 2000, stocks: 0.10, bonds: 0.05, cash: 0.01, corpBonds: 0.0, realEstate: 0.0, gold: 0.0, stocks2x: 0.20, stocks2xSource: "projected" },
+  { year: 2001, stocks: -0.20, bonds: 0.0, cash: 0.0, corpBonds: 0.0, realEstate: 0.0, gold: 0.0, stocks2x: -0.40, stocks2xSource: "projected" },
+  { year: 2002, stocks: 0.10, bonds: 0.05, cash: 0.01, corpBonds: 0.0, realEstate: 0.0, gold: 0.0, stocks2x: 0.20, stocks2xSource: "projected" },
+  { year: 2003, stocks: 0.10, bonds: 0.05, cash: 0.01, corpBonds: 0.0, realEstate: 0.0, gold: 0.0, stocks2x: 0.20, stocks2xSource: "projected" },
+  { year: 2004, stocks: 0.10, bonds: 0.05, cash: 0.01, corpBonds: 0.0, realEstate: 0.0, gold: 0.0, stocks2x: 0.20, stocks2xSource: "projected" },
 ];
 
 const ALL_STOCKS: MonteCarloInputs["allocation"] = {
