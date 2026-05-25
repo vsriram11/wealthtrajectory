@@ -76,44 +76,31 @@ export function SyncShrinkageBanner() {
     // and need the browser to land a paint between the click and
     // the crypto.
     await new Promise<void>((r) => setTimeout(r, 0));
-    // Temporarily clear the blocked reason so pullFromDrive
-    // doesn't immediately re-trigger the same guard against the
-    // user's explicit choice.
+    // Clear the blocked reason so any racing pullFromDrive call
+    // (e.g. tab-resume sync) doesn't immediately re-fire the
+    // banner against the user's explicit choice. Note we do NOT
+    // clear local collections here — that was the old approach,
+    // and it didn't work reliably because the setState mutation
+    // triggered CloudSyncer subscribers + reactivity races that
+    // left localState.incomeStreams populated by the time
+    // pullFromDrive read it. Instead we let pullFromDrive itself
+    // skip the shrinkage check via skipShrinkageCheck below;
+    // importPayload then overwrites local with Drive's payload,
+    // which is the actual semantics of "Accept Drive (lose
+    // local)".
     useAppStore.getState().setGoogleSyncState({
       googleSyncBlockedReason: null,
       googleSyncError: null,
     });
-    // Zero out the local collections so the next pull doesn't
-    // detect "local has data Drive doesn't" again — the user has
-    // explicitly opted to discard local. List every collection
-    // the inbound shrinkage guard checks (see
-    // SHRINKAGE_GUARDED_* constants); the regression test in
-    // syncSafety.test.ts pins that the lists stay symmetric.
-    //
-    // We use the OBJECT form of setState (not the function form)
-    // because Zustand's shallow-merge semantics are unambiguous
-    // there — `setState({ k: [] })` reliably overrides existing
-    // `k` with the empty array, no whole-state spread acrobatics
-    // that could leave the cast/typing path ambiguous.
-    useAppStore.setState({
-      scenarios: [],
-      goals: [],
-      budgetItems: [],
-      incomeStreams: [],
-      healthPlans: [],
-      healthImportanceWeights: {},
-    });
-    // CloudSyncer's subscriber fires synchronously when we mutate
-    // any of those 6 collections — it sets googleUploadScheduled
-    // = true so its debounced upload doesn't get raced. But that
-    // flag would cause pullFromDrive's default throttle check to
-    // return "throttled" before it ever fetches Drive. The user
-    // has explicitly consented to overwriting local; force-pull
-    // bypasses the throttle so the consent isn't blocked by a
-    // queued-but-not-yet-fired upload.
+    // Force bypasses the queued-upload throttle so a CloudSyncer-
+    // scheduled push from prior local edits doesn't block this
+    // pull. skipShrinkageCheck lets the inbound guard accept the
+    // smaller-than-local Drive payload — the whole point of
+    // this code path is that the user opted into that.
     const result = await pullFromDrive(useAppStore, {
       silent: true,
       force: true,
+      skipShrinkageCheck: true,
     });
     setBusy(null);
     if (result !== "ok" && result !== "no-backup") {

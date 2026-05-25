@@ -298,6 +298,56 @@ describe("pullFromDrive — main flow", () => {
     expect(useAppStore.getState().scenarios[0].id).toBe("sc-local");
   });
 
+  it("skipShrinkageCheck: true imports the Drive payload anyway, replacing local (Accept Drive recovery)", async () => {
+    // Regression for the bug where SyncShrinkageBanner's "Accept
+    // Drive (lose local)" looped on shrinkage-blocked because
+    // pre-clearing local collections couldn't reliably win the
+    // race against subscribers / timing. The semantic fix is
+    // for the caller to declare consent explicitly via
+    // skipShrinkageCheck, and for pullFromDrive to honor it.
+    findBackupFileMock.mockResolvedValueOnce({
+      id: "file-id",
+      modifiedTime: "2026-05-15T00:00:00Z",
+    });
+    const { exportData } = await import("@/lib/persistence/dataIO");
+    // Drive payload has empty scenarios; local has scenarios.
+    const payload = exportData({
+      household: {
+        id: "h-from-drive",
+        members: [{ id: "m", displayName: "FromDrive" }],
+        accounts: [],
+        liabilities: [],
+      },
+      assumptions: useAppStore.getState().assumptions,
+      scenarios: [],
+    });
+    downloadBackupMock.mockResolvedValueOnce(payload);
+    // Seed local scenarios — without skipShrinkageCheck this WOULD
+    // trip the guard.
+    useAppStore.setState({
+      scenarios: [
+        {
+          id: "sc-local",
+          name: "Local Scenario",
+          color: "#000",
+          createdAt: 0,
+          overrides: {},
+        },
+      ],
+    });
+
+    const out = await pullFromDrive(useAppStore, {
+      skipShrinkageCheck: true,
+    });
+    // Got past the guard and imported Drive's content.
+    expect(out).toBe("ok");
+    expect(useAppStore.getState().googleSyncBlockedReason).toBeNull();
+    // Local scenarios were OVERWRITTEN with Drive's empty array —
+    // exactly the "lose local" semantics the user opted into.
+    expect(useAppStore.getState().scenarios).toEqual([]);
+    expect(useAppStore.getState().household.id).toBe("h-from-drive");
+  });
+
   it("returns 'error' when getAccessToken rejects (network / auth failure)", async () => {
     const { getAccessToken } = await import("@/lib/sync/googleAuth");
     vi.mocked(getAccessToken).mockRejectedValueOnce(new Error("auth blew up"));
