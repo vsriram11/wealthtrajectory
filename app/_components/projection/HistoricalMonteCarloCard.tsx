@@ -249,23 +249,67 @@ export function HistoricalMonteCarloCard() {
     portfolio.classes.cryptoShare +
     portfolio.classes.privateStockShare +
     portfolio.classes.otherShare;
-  // Split equity into the 2x-recognized bucket (SSO/SPUU/QLD) and the
-  // remainder, so the simulator can route the 2x portion to the
-  // RYTNX-derived `stocks2x` return series. Non-recognized leveraged
-  // equity (TQQQ/UPRO/SOXL/etc.) stays in the regular stocks bucket;
-  // the warning card surfaces those positions separately.
+  // Model an at-retirement deleveraging of non-recognized leveraged
+  // ETFs:
+  //   - 3x S&P 500 (UPRO/SPXL) → 2x S&P (SSO/SPUU equivalent) →
+  //     stocks2x bucket post-tax
+  //   - 3x Nasdaq (TQQQ) → 2x Nasdaq (QLD equivalent) → stocks2x
+  //     bucket post-tax
+  //   - Other leveraged (SOXL/FAS/etc.) → 1x broad equity →
+  //     stocks (1x) bucket post-tax
+  // Capital-gains tax (only on holdings in TAXABLE accounts) is
+  // applied to the deleveraging at the user's retirement tax rate
+  // and SUBTRACTED from starting NW for the MC. Models the realistic
+  // cost of restructuring a leveraged portfolio at retirement.
   const leveragedBuckets = useMemo(
-    () => computeLeveragedEquityBuckets(scopedHousehold),
-    [scopedHousehold],
+    () =>
+      computeLeveragedEquityBuckets(
+        scopedHousehold,
+        effective.retirementTaxRate,
+      ),
+    [scopedHousehold, effective.retirementTaxRate],
   );
+  // Decompose equity into face values to recompose post-tax.
+  // `regular1xEquityUSD` is the equity that's neither recognized 2x
+  // nor leveraged-being-restructured — it stays at full face value.
+  const totalEquityFaceUSD =
+    portfolio.classes.equityShare * portfolio.netWorthUSD;
+  const regular1xEquityUSD = Math.max(
+    0,
+    totalEquityFaceUSD -
+      leveragedBuckets.stocks2xUSD -
+      leveragedBuckets.nonRecognizedLeveragedUSD,
+  );
+  // Bucket dollar amounts going into the MC sim:
+  //   stocks2x = recognized 2x face (unchanged) + post-tax 3x SPY/Nasdaq
+  //   stocks   = regular 1x face (unchanged)  + post-tax other-leveraged
+  const stocks2xBucketUSD =
+    leveragedBuckets.stocks2xUSD +
+    leveragedBuckets.postTaxDeleverageToStocks2xUSD;
+  const stocks1xBucketUSD =
+    regular1xEquityUSD + leveragedBuckets.postTaxDiversifyToStocks1xUSD;
+  // Fractions of pre-tax NW. `resolveWeights` inside the simulator
+  // normalizes these to sum-to-1, so a sub-1 raw sum (the tax-hit
+  // shrinkage) is handled correctly when applied to the post-tax
+  // `effectiveStartingNW` below — net effect: bucket dollars come
+  // out as bucket_face_or_post_tax × (startingNW / netWorthUSD),
+  // which scales correctly with what-if overrides.
   const stocks2xFraction =
     portfolio.netWorthUSD > 0
-      ? leveragedBuckets.stocks2xUSD / portfolio.netWorthUSD
+      ? stocks2xBucketUSD / portfolio.netWorthUSD
       : 0;
-  const regularStocksFraction = Math.max(
-    0,
-    portfolio.classes.equityShare - stocks2xFraction,
-  );
+  const regularStocksFraction =
+    portfolio.netWorthUSD > 0
+      ? stocks1xBucketUSD / portfolio.netWorthUSD
+      : 0;
+  // Tax hit as a fraction of total pre-tax NW. Scales with the
+  // user's startingNW override so what-if scenarios get proportional
+  // tax drag — the assumption is portfolio composition is held
+  // constant across what-if sizing.
+  const taxHitFraction =
+    portfolio.netWorthUSD > 0
+      ? leveragedBuckets.deleveragingTaxHitUSD / portfolio.netWorthUSD
+      : 0;
   const allocation = useMemo(
     () => ({
       stocksFraction: regularStocksFraction,
@@ -287,7 +331,17 @@ export function HistoricalMonteCarloCard() {
     ],
   );
 
-  const effectiveStartingNW = Math.max(0, startingNW);
+  // Post-tax starting NW. When the user has leveraged ETFs that
+  // the stress test models as deleveraged-at-retirement, the
+  // capital-gains tax on that restructure comes out of starting NW.
+  // When there are no leveraged positions to deleverage (or all
+  // such positions are in tax-advantaged accounts),
+  // `taxHitFraction` is 0 and this reduces to the original
+  // `Math.max(0, startingNW)`.
+  const effectiveStartingNW = Math.max(
+    0,
+    startingNW * (1 - taxHitFraction),
+  );
   const effectiveWR =
     effectiveStartingNW > 0 ? annualSpend / effectiveStartingNW : 0;
 
@@ -477,6 +531,30 @@ export function HistoricalMonteCarloCard() {
               <span className="num">{formatUSDCompact(currentNW)}</span>).
               The accumulation question — &ldquo;will I reach the
               target?&rdquo; — is answered by the Outlook tab.
+            </div>
+          )}
+          {/* Deleveraging-at-retirement tax hit. Surfaces when the
+              user has non-recognized leveraged ETFs in taxable
+              accounts — the stress test models a retirement-date
+              restructure and applies capital-gains tax at the
+              configured retirement tax rate, reducing the starting
+              NW the sim runs from. Without this annotation, users
+              would see a smaller-than-expected starting NW and
+              wonder why. */}
+          {taxHitFraction > 0 && (
+            <div className="mt-2 rounded-md border border-amber-300/40 bg-amber-300/5 px-2.5 py-1.5 text-[10px] leading-snug text-amber-200">
+              Starting NW reflects a ~
+              <span className="num">
+                {formatUSDCompact(startingNW * taxHitFraction)}
+              </span>{" "}
+              capital-gains tax hit from deleveraging non-2x-SPY
+              leveraged ETFs at retirement (
+              <span className="num">
+                {((effective.retirementTaxRate ?? 0.2) * 100).toFixed(0)}%
+              </span>{" "}
+              retirement tax rate × 100% gain assumption × value in
+              taxable accounts). See the leveraged-allocation warning
+              on the Allocation page for the per-position breakdown.
             </div>
           )}
           {effectiveWR > 0.06 && (

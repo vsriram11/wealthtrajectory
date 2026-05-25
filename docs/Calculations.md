@@ -291,6 +291,57 @@ routing per portion. This preserves face-value invariants while
 modeling the leveraged-portion's catastrophic-year behavior honestly
 (e.g. 2x portfolio in 1931 loses ~69% real in that one year).
 
+#### At-retirement deleveraging of non-recognized leveraged ETFs
+
+3x daily-reset products (UPRO, SPXL, TQQQ, SOXL, FAS, NAIL, TMF, etc.)
+have catastrophic multi-decade survival rates and no defensible
+projection backwards. Rather than just modeling them as 1x equity for
+the stress test (the previous behavior, which silently understated
+their tax cost), the historical-MC engine now models a realistic
+**at-retirement portfolio restructure** for each non-recognized
+leveraged holding:
+
+- `UPRO`, `SPXL` (3x S&P 500) → 2x S&P (SSO/SPUU equivalent) → routes
+  to `stocks2x` bucket post-tax
+- `TQQQ` (3x Nasdaq-100) → 2x Nasdaq-100 (QLD equivalent) → routes to
+  `stocks2x` bucket post-tax (RYTNX is the closest long-history proxy;
+  Nasdaq-100 has been more volatile than S&P 500 so the modeled result
+  slightly understates true Nasdaq sequence risk)
+- Everything else leveraged (`SOXL`, `FAS`, `NAIL`, `TNA`, `TECL`,
+  `TMF`, etc.) → 1x broad equity → routes to `stocks` (1x) bucket
+  post-tax
+
+The deleveraging is modeled as a sell + rebuy at retirement. For
+holdings in **taxable** accounts (per `TAX_TREATMENT_BY_CATEGORY`,
+i.e. `BROKERAGE` / `SAVINGS` / `CHECKING` / `CRYPTO`/ `REAL_ESTATE` /
+`OTHER`), this incurs capital-gains tax at the user's configured
+retirement tax rate (`assumptions.retirementTaxRate`, default 20%).
+For holdings in **tax-advantaged** accounts (`401K`/`ROTH_401K`/
+`TRAD_IRA`/`ROTH_IRA`/`HSA`/`FIVE_29`/`TRUMP_ACCOUNT`), the tax is
+zero — the trade happens inside the wrapper.
+
+Cost-basis caveat: the app doesn't track cost basis per holding, so
+the gain fraction defaults to 1.0 (treat all current value as gain).
+This is the conservative stress-test assumption — long-held
+leveraged positions through an accumulation phase typically have very
+high gain-to-basis ratios anyway, and the resulting tax hit is the
+worst case the user actually faces. The MC card surfaces this
+assumption inline when the tax hit is non-zero.
+
+Mathematical effect on the simulator inputs:
+
+- `effectiveStartingNW = startingNW × (1 − taxHitFraction)` where
+  `taxHitFraction = totalTaxHit / portfolio.netWorthUSD`. Scales
+  with what-if startingNW overrides.
+- `stocks2xFraction` includes both recognized 2x (full face) AND
+  post-tax deleveraged 3x SPY/Nasdaq; `stocksFraction` includes
+  regular 1x equity (full face) AND post-tax diversified-to-1x.
+  Bonds, cash, commodity, real-estate fractions unchanged.
+
+Recognized 2x positions (SSO/SPUU/QLD) are NOT touched by the
+deleveraging — they're already at the target leverage, no tax cost,
+no restructure.
+
 Crypto is mapped via the toggle because its return history (2009-on) is
 too short to fit into a 1928-anchored simulator. Direct real estate (vs
 REITs, which already act equity-like) and private stock are idiosyncratic

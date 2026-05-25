@@ -166,3 +166,146 @@ describe("computeLeveragedEquityBuckets", () => {
     expect(buckets.nonRecognizedHoldings[0].holdingId).toBe("hld-9");
   });
 });
+
+describe("computeLeveragedEquityBuckets — deleveraging strategy", () => {
+  it("classifies UPRO as deleverage-to-2x-spy", () => {
+    const hh = householdWith([
+      equityHolding({ id: "h1", symbol: "UPRO", leverage: 3.0, valueUSD: 50_000 }),
+    ]);
+    const b = computeLeveragedEquityBuckets(hh, 0); // 0 tax for cleaner math
+    expect(b.nonRecognizedHoldings[0].deleverageStrategy).toBe("to-2x-spy");
+    expect(b.postTaxDeleverageToStocks2xUSD).toBe(50_000);
+    expect(b.postTaxDiversifyToStocks1xUSD).toBe(0);
+  });
+
+  it("classifies SPXL as deleverage-to-2x-spy", () => {
+    const hh = householdWith([
+      equityHolding({ id: "h1", symbol: "SPXL", leverage: 3.0, valueUSD: 30_000 }),
+    ]);
+    const b = computeLeveragedEquityBuckets(hh, 0);
+    expect(b.nonRecognizedHoldings[0].deleverageStrategy).toBe("to-2x-spy");
+    expect(b.postTaxDeleverageToStocks2xUSD).toBe(30_000);
+  });
+
+  it("classifies TQQQ as deleverage-to-2x-nasdaq", () => {
+    const hh = householdWith([
+      equityHolding({ id: "h1", symbol: "TQQQ", leverage: 3.0, valueUSD: 40_000 }),
+    ]);
+    const b = computeLeveragedEquityBuckets(hh, 0);
+    expect(b.nonRecognizedHoldings[0].deleverageStrategy).toBe("to-2x-nasdaq");
+    expect(b.postTaxDeleverageToStocks2xUSD).toBe(40_000);
+    expect(b.postTaxDiversifyToStocks1xUSD).toBe(0);
+  });
+
+  it("classifies SOXL / FAS / NAIL / TMF as diversify-to-1x", () => {
+    for (const ticker of ["SOXL", "FAS", "NAIL", "TMF", "TNA", "TECL"]) {
+      const hh = householdWith([
+        equityHolding({ id: "h1", symbol: ticker, leverage: 3.0, valueUSD: 10_000 }),
+      ]);
+      const b = computeLeveragedEquityBuckets(hh, 0);
+      expect(b.nonRecognizedHoldings[0].deleverageStrategy, ticker).toBe(
+        "diversify-to-1x",
+      );
+      expect(b.postTaxDeleverageToStocks2xUSD).toBe(0);
+      expect(b.postTaxDiversifyToStocks1xUSD).toBe(10_000);
+    }
+  });
+});
+
+describe("computeLeveragedEquityBuckets — deleveraging tax model", () => {
+  it("applies retirement tax rate to leveraged positions in BROKERAGE (taxable) accounts", () => {
+    const hh = householdWith([
+      equityHolding({ id: "h1", symbol: "UPRO", leverage: 3.0, valueUSD: 100_000 }),
+    ]);
+    // 20% retirement tax rate, 100% gain assumption (default)
+    const b = computeLeveragedEquityBuckets(hh, 0.2);
+    // BROKERAGE is the default account category in householdWith()
+    expect(b.nonRecognizedHoldings[0].inTaxableAccount).toBe(true);
+    expect(b.nonRecognizedHoldings[0].taxHitUSD).toBe(20_000);
+    expect(b.deleveragingTaxHitUSD).toBe(20_000);
+    expect(b.postTaxDeleverageToStocks2xUSD).toBe(80_000);
+  });
+
+  it("does NOT apply tax to leveraged positions in tax-advantaged accounts", () => {
+    // Build a household where the leveraged holding lives in a ROTH_IRA.
+    const hh: Household = {
+      id: "hh-1",
+      members: [
+        {
+          id: "mem-1",
+          displayName: "Tester",
+          age: 40,
+          incomeUSD: 100_000,
+          includeInRollup: true,
+        },
+      ],
+      accounts: [
+        {
+          id: "acc-roth",
+          ownerId: "mem-1",
+          category: "ROTH_IRA",
+          displayName: "Roth IRA",
+          holdings: [
+            equityHolding({
+              id: "h1",
+              symbol: "TQQQ",
+              leverage: 3.0,
+              valueUSD: 100_000,
+            }),
+          ],
+          monthlyContributionUSD: 0,
+        },
+      ],
+      liabilities: [],
+    };
+    const b = computeLeveragedEquityBuckets(hh, 0.2);
+    expect(b.nonRecognizedHoldings[0].inTaxableAccount).toBe(false);
+    expect(b.nonRecognizedHoldings[0].taxHitUSD).toBe(0);
+    expect(b.deleveragingTaxHitUSD).toBe(0);
+    // Full value routes to stocks2x (no tax drag)
+    expect(b.postTaxDeleverageToStocks2xUSD).toBe(100_000);
+  });
+
+  it("combines tax hits across multiple taxable holdings with different strategies", () => {
+    const hh = householdWith([
+      equityHolding({ id: "h1", symbol: "TQQQ", leverage: 3.0, valueUSD: 50_000 }), // to-2x-nasdaq
+      equityHolding({ id: "h2", symbol: "UPRO", leverage: 3.0, valueUSD: 80_000 }), // to-2x-spy
+      equityHolding({ id: "h3", symbol: "SOXL", leverage: 3.0, valueUSD: 20_000 }), // diversify-to-1x
+    ]);
+    const b = computeLeveragedEquityBuckets(hh, 0.25);
+    // All 150K of leveraged, all taxable, 25% rate → 37.5K total tax
+    expect(b.deleveragingTaxHitUSD).toBeCloseTo(37_500, 0);
+    // 130K (TQQQ + UPRO) → 2x post-tax
+    expect(b.postTaxDeleverageToStocks2xUSD).toBeCloseTo(97_500, 0);
+    // 20K SOXL → 1x post-tax
+    expect(b.postTaxDiversifyToStocks1xUSD).toBeCloseTo(15_000, 0);
+  });
+
+  it("clamps retirement tax rate to [0, 0.99]", () => {
+    const hh = householdWith([
+      equityHolding({ id: "h1", symbol: "UPRO", leverage: 3.0, valueUSD: 100_000 }),
+    ]);
+    const negative = computeLeveragedEquityBuckets(hh, -0.5);
+    expect(negative.deleveragingTaxHitUSD).toBe(0);
+    const tooHigh = computeLeveragedEquityBuckets(hh, 1.5);
+    expect(tooHigh.deleveragingTaxHitUSD).toBe(99_000); // 100K * 0.99
+  });
+
+  it("uses default retirement tax rate (20%) when no rate is passed", () => {
+    const hh = householdWith([
+      equityHolding({ id: "h1", symbol: "UPRO", leverage: 3.0, valueUSD: 100_000 }),
+    ]);
+    const b = computeLeveragedEquityBuckets(hh); // no rate arg
+    expect(b.deleveragingTaxHitUSD).toBe(20_000);
+  });
+
+  it("gainFraction param scales the tax hit proportionally", () => {
+    const hh = householdWith([
+      equityHolding({ id: "h1", symbol: "UPRO", leverage: 3.0, valueUSD: 100_000 }),
+    ]);
+    // 50% gain assumption (vs the default 100%)
+    const b = computeLeveragedEquityBuckets(hh, 0.2, 0.5);
+    expect(b.deleveragingTaxHitUSD).toBe(10_000); // 100K × 0.5 × 0.2
+    expect(b.postTaxDeleverageToStocks2xUSD).toBe(90_000);
+  });
+});

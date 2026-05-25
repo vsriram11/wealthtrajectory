@@ -189,12 +189,30 @@ leverage = 1.
 ### Recognized 2x equity tickers
 The set `{ SSO, SPUU, QLD }` — daily-reset 2× SPY/Nasdaq LETFs the
 simulator routes to a dedicated `stocks2x` return series (RYTNX-derived
-for 2001-2025, formula-projected for 1928-2000). Other leveraged ETFs
-(TQQQ, UPRO, SOXL, FAS, TMF, etc.) are flattened to 1× equity for
-stress-testing — projecting 3× daily-reset returns backwards across
-1929-32 / 1937 / 1973-74 has no honest model. The Allocation page
-surfaces a warning card listing affected positions when this flattening
-is in effect.
+for 2001-2025, formula-projected for 1928-2000). These positions are
+kept as-is in the stress test (no tax hit, no restructure).
+
+### Deleveraging strategy (at-retirement portfolio restructure)
+For non-recognized leveraged equity positions, the historical-MC
+stress test models a realistic retirement-date restructure:
+
+- **3x S&P 500 → 2x S&P** (UPRO, SPXL → SSO/SPUU equivalent). Routes
+  to `stocks2x` bucket post-tax.
+- **3x Nasdaq-100 → 2x Nasdaq-100** (TQQQ → QLD equivalent). Routes
+  to `stocks2x` bucket post-tax. The 2x SPY series is used as the
+  closest long-history proxy.
+- **Other concentrated/sector leverage → 1x broad equity** (SOXL,
+  FAS, NAIL, TNA, TECL, TMF, etc.). Routes to `stocks` (1x) bucket
+  post-tax. Sector-leveraged products have catastrophic multi-decade
+  survival; we can't honestly project them backwards.
+
+The restructure incurs **capital-gains tax** for positions in taxable
+accounts, computed as `value × gainFraction × assumptions.retirementTaxRate`.
+Default `gainFraction` is 1.0 (treat all current value as gain — the
+conservative stress-test assumption since cost basis isn't tracked).
+The total tax hit reduces the MC simulation's starting NW. Tax-
+advantaged accounts (401K / IRA / HSA / Roth-anything / 529 / Trump
+Account) contribute zero tax.
 
 ### `stocks2x` projection
 The historical-MC engine's 6th return series. Real-terms annual returns
