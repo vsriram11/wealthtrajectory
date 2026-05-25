@@ -97,17 +97,11 @@ export function SyncShrinkageBanner() {
     // pull. skipShrinkageCheck lets the inbound guard accept the
     // smaller-than-local Drive payload — the whole point of
     // this code path is that the user opted into that.
-    console.info(
-      "[SyncShrinkageBanner] acceptDrive → pullFromDrive with skipShrinkageCheck=true (force=true, silent=true)",
-    );
     const result = await pullFromDrive(useAppStore, {
       silent: true,
       force: true,
       skipShrinkageCheck: true,
     });
-    console.info(
-      `[SyncShrinkageBanner] acceptDrive result=${result}`,
-    );
     setBusy(null);
     if (result !== "ok" && result !== "no-backup") {
       setError(`Re-pull failed (${result}). Local data has been cleared.`);
