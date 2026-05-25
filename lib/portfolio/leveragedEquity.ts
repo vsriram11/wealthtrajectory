@@ -77,6 +77,52 @@ const SET_3X_SP500 = new Set<string>(RECOGNIZED_3X_SP500_TICKERS);
 export const RECOGNIZED_3X_NASDAQ_TICKERS = ["TQQQ"] as const;
 const SET_3X_NASDAQ = new Set<string>(RECOGNIZED_3X_NASDAQ_TICKERS);
 
+/**
+ * Multi-asset "capital-efficient" wrappers that ARE FINE to hold in
+ * retirement as-is. These combine equity with bonds / gold / managed
+ * futures via mild leverage (typically 1.5×–2×) and are explicitly
+ * designed for long-term holding. The diversification across asset
+ * classes offsets the daily-reset volatility decay that makes
+ * single-asset 3× LETFs catastrophic.
+ *
+ * Two reasons we list these by ticker rather than rely purely on
+ * the composition-spec check:
+ *
+ * 1. **Defense-in-depth.** The composition system (in the presets
+ *    file) already gives the simulator a proper per-class breakdown
+ *    when the user picks one of these from the preset list. But a
+ *    user can also add a holding manually with the symbol typed in
+ *    and the composition field left blank — in which case the
+ *    composition check wouldn't catch it, and my code would
+ *    incorrectly flag NTSX-like positions as needing deleveraging.
+ *    The ticker-based skip handles this edge case cleanly.
+ *
+ * 2. **UX clarity.** The warning card explicitly tells users these
+ *    wrappers are intentionally not flagged — so a user who holds
+ *    NTSX + TQQQ doesn't wonder whether the NTSX was missed. We
+ *    can only do that reliably if the skip is ticker-named.
+ *
+ * Kept aligned with the multi-asset preset list (lib/portfolio/
+ * presets.ts:519+) — adding a new preset that's truly capital-
+ * efficient should also extend this list.
+ */
+export const MULTI_ASSET_WRAPPER_TICKERS = [
+  // WisdomTree Efficient Core series (90/60 stocks/bonds, ~1.5×)
+  "NTSX",
+  "NTSI",
+  "NTSE",
+  "NTSG",
+  // WisdomTree Efficient Gold + Equity (90/90, ~1.8×)
+  "GDE",
+  // Return Stacked series (100/100 stocks + alt sleeve, 2.0×)
+  "RSST",
+  "RSSY",
+  "RSSB",
+  // Avantis multi-asset blend (single-class but listed for parity)
+  "AVGE",
+] as const;
+const SET_MULTI_ASSET_WRAPPER = new Set<string>(MULTI_ASSET_WRAPPER_TICKERS);
+
 export type DeleverageStrategy =
   | "to-2x-spy"
   | "to-2x-nasdaq"
@@ -208,6 +254,15 @@ export function computeLeveragedEquityBuckets(
       const lev = holding.leverage;
       if (!(lev > 1.0)) continue;
       const symbol = holding.symbol;
+
+      // Multi-asset capital-efficient wrappers (NTSX/GDE/RSSB/RSST/
+      // etc.) are intentionally NOT flagged — they're designed to be
+      // held long-term and their leverage is offset by diversification
+      // across asset classes. Usually they have a composition spec
+      // (caught above), but a defense-in-depth ticker check catches
+      // them when the user adds the symbol manually without the
+      // preset.
+      if (SET_MULTI_ASSET_WRAPPER.has(symbol)) continue;
 
       if (RECOGNIZED_SET.has(symbol)) {
         // Recognized 2x SPY proxy — already at the modeled leverage,

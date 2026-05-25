@@ -192,6 +192,18 @@ simulator routes to a dedicated `stocks2x` return series (RYTNX-derived
 for 2001-2025, formula-projected for 1928-2000). These positions are
 kept as-is in the stress test (no tax hit, no restructure).
 
+### Capital-efficient multi-asset wrappers
+A class of leveraged ETFs that combine equity with bonds, gold, or
+managed futures in a single product (NTSX 90/60 stocks/bonds, GDE
+90/90 stocks/gold, RSSB 100/100 stocks/bonds, RSST 100/100 stocks/
+managed-futures, NTSI/NTSE/NTSG international variants, AVGE multi-
+asset blend). Designed for long-term holding — their mild leverage
+(1.5×–2×) is offset by diversification across asset classes, so
+they're NOT flagged for the at-retirement deleveraging restructure.
+The simulator decomposes them across per-class return series via
+their composition spec; a defense-in-depth ticker check handles the
+edge case where a user enters one manually without the preset.
+
 ### Deleveraging strategy (at-retirement portfolio restructure)
 For non-recognized leveraged equity positions, the historical-MC
 stress test models a realistic retirement-date restructure:

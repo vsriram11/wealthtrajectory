@@ -146,6 +146,39 @@ describe("computeLeveragedEquityBuckets", () => {
     expect(buckets.nonRecognizedHoldings).toEqual([]);
   });
 
+  it("ignores capital-efficient multi-asset wrapper tickers even WITHOUT composition (manual-entry safety)", () => {
+    // Defense-in-depth: a user who types NTSX into the form without
+    // setting a composition spec should NOT have the holding flagged
+    // for deleveraging or taxed. These wrappers are designed to be
+    // held long-term — the ticker-based skip catches the manual-
+    // entry edge case the composition check would miss.
+    for (const ticker of [
+      "NTSX",
+      "NTSI",
+      "NTSE",
+      "NTSG",
+      "GDE",
+      "RSST",
+      "RSSY",
+      "RSSB",
+    ]) {
+      const hh = householdWith([
+        equityHolding({
+          id: "h1",
+          symbol: ticker,
+          leverage: 1.5,
+          valueUSD: 100_000,
+          // no composition — simulating manual entry
+        }),
+      ]);
+      const buckets = computeLeveragedEquityBuckets(hh, 0.2);
+      expect(buckets.stocks2xUSD, ticker).toBe(0);
+      expect(buckets.nonRecognizedLeveragedUSD, ticker).toBe(0);
+      expect(buckets.nonRecognizedHoldings, ticker).toEqual([]);
+      expect(buckets.deleveragingTaxHitUSD, ticker).toBe(0);
+    }
+  });
+
   it("ignores holdings with leverage == 1.0 even if ticker is in recognized set", () => {
     // Defensive: if a user happens to mark SSO as leverage=1.0 (bug or
     // manual override), don't claim 2x exposure they don't have.

@@ -61,6 +61,19 @@ export function LeveragedAllocationWarningCard() {
           that restructure is subtracted from starting NW (only for
           positions in taxable accounts).
         </div>
+        <div className="mt-2 text-[11px] leading-snug text-amber-200/70">
+          Multi-asset capital-efficient wrappers like{" "}
+          <span className="font-mono">NTSX</span> (90/60 stocks/bonds),{" "}
+          <span className="font-mono">GDE</span> (90/90 stocks/gold),{" "}
+          <span className="font-mono">RSSB</span> /{" "}
+          <span className="font-mono">RSST</span> (100/100 return-stacked),
+          and <span className="font-mono">AVGE</span> are intentionally NOT
+          flagged here. Their mild leverage is offset by diversification
+          across asset classes, they&apos;re designed for long-term
+          holding, and the simulator decomposes them across the right
+          per-class return series via their composition spec — no
+          restructure, no tax hit.
+        </div>
 
         {/* Top-line summary: total affected value + total tax hit. */}
         <div className="mt-3 grid grid-cols-2 gap-3 rounded-md border border-amber-300/30 bg-amber-300/5 px-3 py-2">

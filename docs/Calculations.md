@@ -299,7 +299,21 @@ projection backwards. Rather than just modeling them as 1x equity for
 the stress test (the previous behavior, which silently understated
 their tax cost), the historical-MC engine now models a realistic
 **at-retirement portfolio restructure** for each non-recognized
-leveraged holding:
+leveraged holding.
+
+Capital-efficient multi-asset wrappers — `NTSX` (90/60 stocks/bonds),
+`NTSI` / `NTSE` / `NTSG` (international/EM/global variants), `GDE`
+(90/90 stocks/gold), `RSST` / `RSSY` (100/100 stocks + managed
+futures), `RSSB` (100/100 stocks/bonds), `AVGE` — are intentionally
+**NOT flagged**: their mild leverage is offset by diversification
+across asset classes and they're designed for long-term holding.
+The simulator decomposes them across per-class return series via
+the composition spec. A defense-in-depth ticker check (see
+`MULTI_ASSET_WRAPPER_TICKERS` in `lib/portfolio/leveragedEquity.ts`)
+also handles the edge case where a user enters one manually without
+the preset.
+
+The restructure applies to single-asset leveraged products:
 
 - `UPRO`, `SPXL` (3x S&P 500) → 2x S&P (SSO/SPUU equivalent) → routes
   to `stocks2x` bucket post-tax
