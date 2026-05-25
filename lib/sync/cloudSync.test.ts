@@ -110,6 +110,37 @@ describe("pullFromDrive — pre-flight guards", () => {
     expect(useAppStore.getState().googleUploadScheduled).toBe(true);
   });
 
+  it("force: true bypasses throttle / sync-in-flight / queued-upload checks", async () => {
+    // Used by SyncShrinkageBanner's "Accept Drive (lose local)"
+    // flow. The user has explicitly opted to overwrite local;
+    // a debounced CloudSyncer upload (scheduled by the very
+    // setState that cleared local for the override) would
+    // otherwise re-trigger the throttle check and block the
+    // consent. Regression for the bug where the shrinkage-
+    // recovery banner would loop on "Re-pull failed
+    // (shrinkage-blocked)" because the throttle returned first.
+    const { findBackupFile, downloadBackup } = await import(
+      "@/lib/sync/googleDrive"
+    );
+    (
+      findBackupFile as unknown as ReturnType<typeof vi.fn>
+    ).mockResolvedValue(null); // no Drive backup → "no-backup" result, but
+    // critically that means we got PAST the throttle checks. Existing
+    // test infra mocks Drive responses; what matters here is that
+    // googleUploadScheduled=true + googleSyncing=true don't short-
+    // circuit when force is set.
+    useAppStore.getState().setGoogleSyncState({
+      googleSyncing: true,
+      googleUploadScheduled: true,
+      googleLastSyncAt: Date.now(),
+    });
+    const result = await pullFromDrive(useAppStore, { force: true });
+    // We got past the throttle checks — result is "no-backup" because
+    // findBackupFile returned null, not "throttled".
+    expect(result).toBe("no-backup");
+    void downloadBackup; // referenced for type-only import below
+  });
+
   it("bails 'throttled' when last sync was within throttle window", async () => {
     useAppStore.getState().setGoogleSyncState({
       googleLastSyncAt: Date.now() - 10_000, // 10s ago

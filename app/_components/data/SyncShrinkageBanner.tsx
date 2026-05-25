@@ -2,12 +2,7 @@
 
 import { useState } from "react";
 import { useAppStore } from "@/lib/store";
-import {
-  pullFromDrive,
-  pushToDrive,
-  SHRINKAGE_GUARDED_ARRAY_COLLECTIONS,
-  SHRINKAGE_GUARDED_MAP_COLLECTIONS,
-} from "@/lib/sync/cloudSync";
+import { pullFromDrive, pushToDrive } from "@/lib/sync/cloudSync";
 
 /**
  * Banner that surfaces when an inbound Drive import was refused
@@ -90,24 +85,36 @@ export function SyncShrinkageBanner() {
     });
     // Zero out the local collections so the next pull doesn't
     // detect "local has data Drive doesn't" again — the user has
-    // explicitly opted to discard local. Iterate over the
-    // SHRINKAGE_GUARDED constants exported from cloudSync.ts so
-    // this list stays exactly in sync with what the guard checks
-    // — the previous hardcoded version was missing
-    // `incomeStreams`, which left users in a loop where every
-    // re-pull re-fired the guard against a collection they
-    // thought they'd cleared.
-    useAppStore.setState((s) => {
-      const cleared: Record<string, unknown> = { ...s };
-      for (const k of SHRINKAGE_GUARDED_ARRAY_COLLECTIONS) {
-        cleared[k] = [];
-      }
-      for (const k of SHRINKAGE_GUARDED_MAP_COLLECTIONS) {
-        cleared[k] = {};
-      }
-      return cleared as typeof s;
+    // explicitly opted to discard local. List every collection
+    // the inbound shrinkage guard checks (see
+    // SHRINKAGE_GUARDED_* constants); the regression test in
+    // syncSafety.test.ts pins that the lists stay symmetric.
+    //
+    // We use the OBJECT form of setState (not the function form)
+    // because Zustand's shallow-merge semantics are unambiguous
+    // there — `setState({ k: [] })` reliably overrides existing
+    // `k` with the empty array, no whole-state spread acrobatics
+    // that could leave the cast/typing path ambiguous.
+    useAppStore.setState({
+      scenarios: [],
+      goals: [],
+      budgetItems: [],
+      incomeStreams: [],
+      healthPlans: [],
+      healthImportanceWeights: {},
     });
-    const result = await pullFromDrive(useAppStore, { silent: true });
+    // CloudSyncer's subscriber fires synchronously when we mutate
+    // any of those 6 collections — it sets googleUploadScheduled
+    // = true so its debounced upload doesn't get raced. But that
+    // flag would cause pullFromDrive's default throttle check to
+    // return "throttled" before it ever fetches Drive. The user
+    // has explicitly consented to overwriting local; force-pull
+    // bypasses the throttle so the consent isn't blocked by a
+    // queued-but-not-yet-fired upload.
+    const result = await pullFromDrive(useAppStore, {
+      silent: true,
+      force: true,
+    });
     setBusy(null);
     if (result !== "ok" && result !== "no-backup") {
       setError(`Re-pull failed (${result}). Local data has been cleared.`);

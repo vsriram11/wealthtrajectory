@@ -130,24 +130,39 @@ export async function pullFromDrive(
     silent?: boolean;
     throttle?: boolean;
     throttleMs?: number;
+    /**
+     * Bypass the `googleSyncing` / `googleUploadScheduled` /
+     * throttle-window early-returns. ONLY for explicit user-
+     * consent flows like the shrinkage-recovery banner's
+     * "Accept Drive (lose local)" button, where the user has
+     * already chosen to overwrite local data and any concurrent
+     * upload would be racing the user's intent anyway. Other
+     * callers (AuthHydrator's tab-resume sync, EncryptionCard
+     * unlock) should leave this false so they cooperate with
+     * CloudSyncer's debounce.
+     */
+    force?: boolean;
   } = {},
 ): Promise<PullResult> {
   const silent = options.silent ?? false;
   const throttle = options.throttle ?? false;
   const throttleMs = options.throttleMs ?? DEFAULT_THROTTLE_MS;
+  const force = options.force ?? false;
 
   const s = store.getState();
   if (!s.user) return "no-backup";
-  if (s.googleSyncing) return "throttled";
-  // Refuse to pull while a CloudSyncer upload is queued or
-  // executing. Otherwise a backgrounded tab whose setTimeout was
-  // throttled could be raced by the resume sync — the pull would
-  // overwrite local edits with stale Drive state, then the
-  // queued upload would push the overwritten payload out.
-  if (s.googleUploadScheduled) return "throttled";
-  if (throttle) {
-    const last = s.googleLastSyncAt ?? 0;
-    if (Date.now() - last < throttleMs) return "throttled";
+  if (!force) {
+    if (s.googleSyncing) return "throttled";
+    // Refuse to pull while a CloudSyncer upload is queued or
+    // executing. Otherwise a backgrounded tab whose setTimeout was
+    // throttled could be raced by the resume sync — the pull would
+    // overwrite local edits with stale Drive state, then the
+    // queued upload would push the overwritten payload out.
+    if (s.googleUploadScheduled) return "throttled";
+    if (throttle) {
+      const last = s.googleLastSyncAt ?? 0;
+      if (Date.now() - last < throttleMs) return "throttled";
+    }
   }
 
   s.setGoogleSyncState({ googleSyncing: true, googleSyncError: null });
