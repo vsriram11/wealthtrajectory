@@ -16,14 +16,13 @@ import {
   formatUSDCompact,
 } from "@/lib/format";
 import {
-  filterHousehold,
   filterHouseholdByTaxBucket,
   householdNetWorth,
-  liquidHousehold,
   type AssetClass,
   type Household,
   type TaxTreatment,
 } from "@/lib/types";
+import { useActiveProjection } from "@/lib/projection/useActiveProjection";
 import {
   filterHouseholdByClass,
   leverageBuckets,
@@ -49,10 +48,14 @@ import { OtherView } from "@/app/_components/allocation/allocation-views/OtherVi
 type ClassTab = "ALL" | AssetClass;
 
 export function AllocationPanel() {
-  const household = useAppStore((s) => s.household);
-  const memberId = useAppStore((s) => s.selectedMemberId);
+  // Use the canonical active-projection resolver so member +
+  // liquidity + active-SCENARIO overrides all flow into this page.
+  // Reading `state.household` directly here was the historical bug
+  // (issue #11) — scenario contribution / CAGR overrides never
+  // reached the allocation views because the scenario merge happens
+  // inside `useActiveProjection`, not on the raw store slice.
+  const { household: baseHousehold } = useActiveProjection();
   const basis = useAppStore((s) => s.viewBasis);
-  const liquidityView = useAppStore((s) => s.liquidityView);
   const setBasis = useAppStore((s) => s.setViewBasis);
   // When the user has tapped "Apply above" on AllocationFutureCard,
   // re-root every downstream calculation to the household as it
@@ -67,17 +70,12 @@ export function AllocationPanel() {
     (s) => s.setAppliedFutureYears,
   );
 
-  // Filter by selected member, then optionally strip illiquid
-  // holdings when the user has flipped the global toggle to
-  // "Liquid". Same composability as the home page — engines run
-  // unchanged on the filtered Household.
-  //
   // Tax-bucket filter (selectedTaxBucket below) is local to this
   // page: the user taps a bucket in the TaxBuckets card to scope
   // every downstream number — NW, leverage breakdown, class
   // breakdown, metrics — to just that tax treatment. Composable
-  // with member + liquid filters: intersection is the same in
-  // any order.
+  // with member + liquid + scenario filters that
+  // `useActiveProjection()` already applied upstream.
   const [selectedTaxBucket, setSelectedTaxBucket] =
     useState<TaxTreatment | null>(null);
 
@@ -87,17 +85,15 @@ export function AllocationPanel() {
   // collapse the picker). The "fully filtered" view feeds every
   // other card on the page (NW, leverage, allocation, metrics).
   const householdMemberLiquid = useMemo(() => {
-    let h = filterHousehold(household, memberId);
-    if (liquidityView === "liquid") h = liquidHousehold(h);
-    // Age forward when the user has applied a future state. We do
-    // this AFTER member/liquidity filtering so the future projection
-    // operates on the same subset the user is currently viewing
-    // (compose-cleanly principle — same as scenario / liquidity).
+    let h = baseHousehold;
+    // Age forward when the user has applied a future state. The
+    // member + liquidity + scenario filters are already baked into
+    // `baseHousehold` via the resolver.
     if (appliedFutureYears != null && appliedFutureYears > 0) {
       h = ageHousehold(h, appliedFutureYears);
     }
     return h;
-  }, [household, memberId, liquidityView, appliedFutureYears]);
+  }, [baseHousehold, appliedFutureYears]);
 
   const filteredHousehold = useMemo(
     () =>

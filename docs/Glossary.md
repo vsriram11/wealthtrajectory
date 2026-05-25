@@ -186,6 +186,27 @@ Effective exposure ÷ equity. A 2× leveraged ETF has leverage = 2; an
 80%-LTV mortgaged property has leverage ≈ 5×; cash and unlevered equity have
 leverage = 1.
 
+### Recognized 2x equity tickers
+The set `{ SSO, SPUU, QLD }` — daily-reset 2× SPY/Nasdaq LETFs the
+simulator routes to a dedicated `stocks2x` return series (RYTNX-derived
+for 2001-2025, formula-projected for 1928-2000). Other leveraged ETFs
+(TQQQ, UPRO, SOXL, FAS, TMF, etc.) are flattened to 1× equity for
+stress-testing — projecting 3× daily-reset returns backwards across
+1929-32 / 1937 / 1973-74 has no honest model. The Allocation page
+surfaces a warning card listing affected positions when this flattening
+is in effect.
+
+### `stocks2x` projection
+The historical-MC engine's 6th return series. Real-terms annual returns
+for a 2× daily-reset S&P 500 LETF. **Real RYTNX data** 2001-2025
+(CPI-deflated). **Projected** 1928-2000 via OLS-calibrated formula
+`r_2x ≈ 2.0·r + 0.82·r² - 0.05`, where the 0.82 coefficient captures
+daily-reset compounding (geometric bonus in bull years, drag mitigation
+in bear years) and -0.05 captures combined fee + financing-cost drag
+in real terms. Fit RMSE 3.93% / MAE 2.84% on the 25-year calibration
+window. Worst-case years are catastrophic: 1931 ~-69%, 1937 ~-68%,
+1974 ~-64%.
+
 ### Leverage buckets
 The app groups holdings into four buckets for risk visualization:
 - **0–1×** (inclusive): no leverage.

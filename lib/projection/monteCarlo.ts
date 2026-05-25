@@ -90,6 +90,20 @@ export type MonteCarloInputs = {
     stocksFraction: number;
     bondsFraction: number;
     cashFraction: number;
+    /**
+     * Fraction allocated to a 2x daily-reset S&P 500 LETF
+     * (SSO / SPUU / QLD by ticker recognition; see
+     * `RECOGNIZED_2X_EQUITY_TICKERS` in
+     * `lib/data/historicalReturns.ts`). Routed to the dataset's
+     * `stocks2x` real-return series — which is RYTNX-derived
+     * for 2001+ and formula-projected for 1928-2000.
+     *
+     * Note: `stocksFraction` and `stocks2xFraction` are
+     * non-overlapping. Portfolio aggregation should put each
+     * holding into exactly one bucket. Sum-to-1 with the other
+     * fractions still holds.
+     */
+    stocks2xFraction?: number;
     /** Routed to the gold real-return series (1928–present). */
     commodityFraction?: number;
     /** Routed to Damodaran's residential RE price-return series. */
@@ -320,7 +334,15 @@ export type MonteCarloResult = {
 function resolveWeights(
   spec: MonteCarloInputs["allocation"],
   otherIsStock: boolean,
-): { wS: number; wB: number; wC: number; wG: number; wR: number } {
+): {
+  wS: number;
+  wB: number;
+  wC: number;
+  wG: number;
+  wR: number;
+  /** Leveraged 2x equity bucket weight (routed to stocks2x series). */
+  wL: number;
+} {
   const otherFrac = Math.max(0, spec.otherFraction ?? 0);
   const stocksW =
     Math.max(0, spec.stocksFraction) + (otherIsStock ? otherFrac : 0);
@@ -329,14 +351,17 @@ function resolveWeights(
     Math.max(0, spec.cashFraction) + (otherIsStock ? 0 : otherFrac);
   const goldW = Math.max(0, spec.commodityFraction ?? 0);
   const reW = Math.max(0, spec.realEstateFraction ?? 0);
-  const total = stocksW + bondsW + cashW + goldW + reW;
-  if (total <= 0) return { wS: 0, wB: 0, wC: 0, wG: 0, wR: 0 };
+  const lW = Math.max(0, spec.stocks2xFraction ?? 0);
+  const total = stocksW + bondsW + cashW + goldW + reW + lW;
+  if (total <= 0)
+    return { wS: 0, wB: 0, wC: 0, wG: 0, wR: 0, wL: 0 };
   return {
     wS: stocksW / total,
     wB: bondsW / total,
     wC: cashW / total,
     wG: goldW / total,
     wR: reW / total,
+    wL: lW / total,
   };
 }
 
@@ -347,9 +372,35 @@ export function simulatePath(
   cashReturns: number[],
   goldReturns: number[],
   realEstateReturns: number[],
-  pathId: string,
-  options: SimulationOptions = {},
+  /**
+   * Per-year 2x leveraged equity returns (routed to `stocks2xFraction`).
+   * Optional — when omitted, defaults to all zeros, which is correct
+   * for callers that don't use the 2x bucket (their
+   * `stocks2xFraction` should be 0 too). Inserted as a parameter
+   * rather than absorbed into the dataset shape so the simulator
+   * stays return-stream-agnostic at its boundary.
+   */
+  stocks2xReturnsOrPathId: number[] | string,
+  pathIdOrOptions?: string | SimulationOptions,
+  optionsArg: SimulationOptions = {},
 ): SimulationPath {
+  // Backward-compat shim: callers that didn't pass a stocks2x array
+  // shift their `pathId` and `options` into the new slots. The
+  // simulator then uses a zero-filled stocks2x stream.
+  let stocks2xReturns: number[];
+  let pathId: string;
+  let options: SimulationOptions;
+  if (typeof stocks2xReturnsOrPathId === "string") {
+    // Old 5-stream signature: (..., realEstate, pathId, options?)
+    stocks2xReturns = new Array(realEstateReturns.length).fill(0);
+    pathId = stocks2xReturnsOrPathId;
+    options = (pathIdOrOptions as SimulationOptions | undefined) ?? optionsArg;
+  } else {
+    // New 6-stream signature: (..., realEstate, stocks2x, pathId, options?)
+    stocks2xReturns = stocks2xReturnsOrPathId;
+    pathId = (pathIdOrOptions as string) ?? "";
+    options = optionsArg;
+  }
   const rebalance = options.rebalance ?? true;
   const yearsPre = inputs.yearsUntilRetirement ?? 0;
   const yearsRet = inputs.retirementHorizonYears;
@@ -403,12 +454,13 @@ export function simulatePath(
     // so `rebalance: false` collapses to the same blended-return
     // path. Documented in §7.6 of docs/Calculations.md.
     void rebalance;
-    const { wS, wB, wC, wG, wR } = weightsForYear(y);
+    const { wS, wB, wC, wG, wR, wL } = weightsForYear(y);
     let sB = nw * wS;
     let bB = nw * wB;
     let cB = nw * wC;
     let gB = nw * wG;
     let rB = nw * wR;
+    let lB = nw * wL;
 
     // Apply this year's real returns.
     const rs = stockReturns[y] ?? 0;
@@ -416,13 +468,15 @@ export function simulatePath(
     const rc = cashReturns[y] ?? 0;
     const rg = goldReturns[y] ?? 0;
     const rr = realEstateReturns[y] ?? 0;
+    const rl = stocks2xReturns[y] ?? 0;
     sB *= 1 + rs;
     bB *= 1 + rb;
     cB *= 1 + rc;
     gB *= 1 + rg;
     rB *= 1 + rr;
+    lB *= 1 + rl;
 
-    const nwAfterReturns = sB + bB + cB + gB + rB;
+    const nwAfterReturns = sB + bB + cB + gB + rB + lB;
 
     // Cash flows happen at mid-year — matches the deterministic
     // `projectIndependence` engine's monthly compounding (each monthly
@@ -518,6 +572,7 @@ export function runHistoricalSequences(
     const cash = slice.map((r) => r.cash);
     const gold = slice.map((r) => r.gold);
     const re = slice.map((r) => r.realEstate);
+    const stocks2x = slice.map((r) => r.stocks2x);
     paths.push(
       simulatePath(
         inputs,
@@ -526,6 +581,7 @@ export function runHistoricalSequences(
         cash,
         gold,
         re,
+        stocks2x,
         String(slice[0].year),
         options,
       ),
@@ -570,12 +626,14 @@ function sampleBlockBootstrap(
   cash: number[];
   gold: number[];
   realEstate: number[];
+  stocks2x: number[];
 } {
   const stocks: number[] = [];
   const bonds: number[] = [];
   const cash: number[] = [];
   const gold: number[] = [];
   const realEstate: number[] = [];
+  const stocks2x: number[] = [];
   while (stocks.length < totalYears) {
     const startIdx = Math.floor(rand() * dataset.length);
     for (
@@ -589,9 +647,10 @@ function sampleBlockBootstrap(
       cash.push(r.cash);
       gold.push(r.gold);
       realEstate.push(r.realEstate);
+      stocks2x.push(r.stocks2x);
     }
   }
-  return { stocks, bonds, cash, gold, realEstate };
+  return { stocks, bonds, cash, gold, realEstate, stocks2x };
 }
 
 export function runBootstrap(
@@ -610,12 +669,8 @@ export function runBootstrap(
   }
   const out: SimulationPath[] = [];
   for (let i = 0; i < paths; i++) {
-    const { stocks, bonds, cash, gold, realEstate } = sampleBlockBootstrap(
-      totalYears,
-      dataset,
-      blockSize,
-      rand,
-    );
+    const { stocks, bonds, cash, gold, realEstate, stocks2x } =
+      sampleBlockBootstrap(totalYears, dataset, blockSize, rand);
     out.push(
       simulatePath(
         inputs,
@@ -624,6 +679,7 @@ export function runBootstrap(
         cash,
         gold,
         realEstate,
+        stocks2x,
         `bootstrap-${i}`,
         options,
       ),

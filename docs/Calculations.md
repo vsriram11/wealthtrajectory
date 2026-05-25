@@ -266,18 +266,30 @@ silently answers a different and less useful question ("can I retire
 that mislead the user.
 
 ### 7.5 Asset-class routing — which return series each bucket gets
-The simulator carries **four** real-return series per year (1928–2025):
+The simulator carries **six** real-return series per year (1928–2025):
 **stocks** (S&P 500), **bonds** (10Y US Treasury total return), **cash**
-(3-mo T-Bill), and **gold** (year-end physical gold price deflated by
-CPI). The user's portfolio is decomposed into these buckets:
+(3-mo T-Bill), **gold** (year-end physical gold price deflated by
+CPI), **real estate** (Case-Shiller-style price-return), and **stocks2x**
+(2x daily-reset SPY LETF — RYTNX-derived for 2001+, formula-projected
+for 1928–2000). The user's portfolio is decomposed into these buckets:
 
 | Portfolio class | Routes to | Notes |
 | --- | --- | --- |
-| Equity (incl. leveraged ETFs) | `stocks` | Face value, not exposure-weighted |
+| Equity (1x and unrecognized-leverage like TQQQ / UPRO / SOXL) | `stocks` | Face value, not exposure-weighted. Non-recognized leveraged ETFs are flattened to 1x for projection purposes — projecting 3x daily-reset behavior backwards across 1929-32 / 1937 / 1973-74 isn't feasible; the UI surfaces a warning. |
+| Equity in SSO / SPUU / QLD | `stocks2x` | Routed to the RYTNX-derived 2x return series. Real data 2001-2025, formula-projected 1928-2000 (RMSE 3.93% on the calibration window). See `LEVERAGED_2X_PROJECTION` for constants. |
 | Bond | `bonds` | All durations / credit grades collapse to 10Y Treasury |
 | Cash | `cash` | T-bills, money-market, checking, savings |
 | Commodity | `gold` | Silver / copper / industrial metals collapse into gold as a stand-in (known approximation) |
-| Crypto + direct RE + private stock + other | `otherFraction`, routed via UI toggle | Default `stocks`; user can pick `cash` for a conservative floor |
+| Direct real estate | `realEstate` | Case-Shiller price-return (no rental yield, no leverage adjustment) |
+| Crypto + private stock + other | `otherFraction`, routed via UI toggle | Default `stocks`; user can pick `cash` for a conservative floor |
+
+The `stocks2x` bucket is a SUBSET of total equity allocation, not an
+addition to it — for a user with 60% equity (of which 20% is SSO), the
+simulator sees `stocksFraction=0.40` + `stocks2xFraction=0.20`, summing
+to the same 0.60 equity exposure but with different return-series
+routing per portion. This preserves face-value invariants while
+modeling the leveraged-portion's catastrophic-year behavior honestly
+(e.g. 2x portfolio in 1931 loses ~69% real in that one year).
 
 Crypto is mapped via the toggle because its return history (2009-on) is
 too short to fit into a 1928-anchored simulator. Direct real estate (vs

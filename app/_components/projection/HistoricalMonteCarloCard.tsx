@@ -17,6 +17,7 @@ import {
   type SimulationPath,
 } from "@/lib/projection/monteCarlo";
 import { computePortfolio } from "@/lib/portfolio/portfolio";
+import { computeLeveragedEquityBuckets } from "@/lib/portfolio/leveragedEquity";
 import {
   activeMemberIds,
   activeMembers,
@@ -242,9 +243,27 @@ export function HistoricalMonteCarloCard() {
     portfolio.classes.cryptoShare +
     portfolio.classes.privateStockShare +
     portfolio.classes.otherShare;
+  // Split equity into the 2x-recognized bucket (SSO/SPUU/QLD) and the
+  // remainder, so the simulator can route the 2x portion to the
+  // RYTNX-derived `stocks2x` return series. Non-recognized leveraged
+  // equity (TQQQ/UPRO/SOXL/etc.) stays in the regular stocks bucket;
+  // the warning card surfaces those positions separately.
+  const leveragedBuckets = useMemo(
+    () => computeLeveragedEquityBuckets(scopedHousehold),
+    [scopedHousehold],
+  );
+  const stocks2xFraction =
+    portfolio.netWorthUSD > 0
+      ? leveragedBuckets.stocks2xUSD / portfolio.netWorthUSD
+      : 0;
+  const regularStocksFraction = Math.max(
+    0,
+    portfolio.classes.equityShare - stocks2xFraction,
+  );
   const allocation = useMemo(
     () => ({
-      stocksFraction: portfolio.classes.equityShare,
+      stocksFraction: regularStocksFraction,
+      stocks2xFraction,
       bondsFraction: portfolio.classes.bondShare,
       cashFraction: portfolio.classes.cashShare,
       commodityFraction: commodityShare,
@@ -252,7 +271,8 @@ export function HistoricalMonteCarloCard() {
       otherFraction: otherAltsShare,
     }),
     [
-      portfolio.classes.equityShare,
+      regularStocksFraction,
+      stocks2xFraction,
       portfolio.classes.bondShare,
       portfolio.classes.cashShare,
       commodityShare,
