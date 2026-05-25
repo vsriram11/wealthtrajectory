@@ -2,7 +2,12 @@
 
 import { useState } from "react";
 import { useAppStore } from "@/lib/store";
-import { pullFromDrive, pushToDrive } from "@/lib/sync/cloudSync";
+import {
+  pullFromDrive,
+  pushToDrive,
+  SHRINKAGE_GUARDED_ARRAY_COLLECTIONS,
+  SHRINKAGE_GUARDED_MAP_COLLECTIONS,
+} from "@/lib/sync/cloudSync";
 
 /**
  * Banner that surfaces when an inbound Drive import was refused
@@ -70,15 +75,23 @@ export function SyncShrinkageBanner() {
     });
     // Zero out the local collections so the next pull doesn't
     // detect "local has data Drive doesn't" again — the user has
-    // explicitly opted to discard local.
-    useAppStore.setState((s) => ({
-      ...s,
-      scenarios: [],
-      goals: [],
-      budgetItems: [],
-      healthPlans: [],
-      healthImportanceWeights: {},
-    }));
+    // explicitly opted to discard local. Iterate over the
+    // SHRINKAGE_GUARDED constants exported from cloudSync.ts so
+    // this list stays exactly in sync with what the guard checks
+    // — the previous hardcoded version was missing
+    // `incomeStreams`, which left users in a loop where every
+    // re-pull re-fired the guard against a collection they
+    // thought they'd cleared.
+    useAppStore.setState((s) => {
+      const cleared: Record<string, unknown> = { ...s };
+      for (const k of SHRINKAGE_GUARDED_ARRAY_COLLECTIONS) {
+        cleared[k] = [];
+      }
+      for (const k of SHRINKAGE_GUARDED_MAP_COLLECTIONS) {
+        cleared[k] = {};
+      }
+      return cleared as typeof s;
+    });
     const result = await pullFromDrive(useAppStore, { silent: true });
     setBusy(null);
     if (result !== "ok" && result !== "no-backup") {

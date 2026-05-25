@@ -69,57 +69,48 @@ const DEFAULT_THROTTLE_MS = 60 * 1000;
  *     pushes local to Drive, replacing the stale Drive copy) or
  *     accept Drive (acknowledged data loss, manual override).
  */
+// Re-export from syncSafety.ts so the recovery banner has a
+// stable import path. The canonical definition lives in
+// syncSafety.ts because that's the lower-level module that owns
+// the outbound-shrinkage guard; this file owns the inbound
+// (download) guard and inherits the same collection list.
+export {
+  SHRINKAGE_GUARDED_ARRAY_COLLECTIONS,
+  SHRINKAGE_GUARDED_MAP_COLLECTIONS,
+} from "@/lib/sync/syncSafety";
+import {
+  SHRINKAGE_GUARDED_ARRAY_COLLECTIONS,
+  SHRINKAGE_GUARDED_MAP_COLLECTIONS,
+} from "@/lib/sync/syncSafety";
+type ShrinkageGuardedArrayCollection =
+  (typeof SHRINKAGE_GUARDED_ARRAY_COLLECTIONS)[number];
+type ShrinkageGuardedMapCollection =
+  (typeof SHRINKAGE_GUARDED_MAP_COLLECTIONS)[number];
+
 function isInboundShrinkage(
-  drivePayload: {
-    scenarios?: unknown[];
-    goals?: unknown[];
-    budgetItems?: unknown[];
-    incomeStreams?: unknown[];
-    healthPlans?: unknown[];
-    healthImportanceWeights?: Record<string, unknown>;
-  },
-  localState: {
-    scenarios: unknown[];
-    goals: unknown[];
-    budgetItems: unknown[];
-    incomeStreams: unknown[];
-    healthPlans: unknown[];
-    healthImportanceWeights: Record<string, unknown>;
-  },
+  drivePayload: Partial<
+    Record<ShrinkageGuardedArrayCollection, unknown[]>
+  > &
+    Partial<Record<ShrinkageGuardedMapCollection, Record<string, unknown>>>,
+  localState: Record<ShrinkageGuardedArrayCollection, unknown[]> &
+    Record<ShrinkageGuardedMapCollection, Record<string, unknown>>,
 ): { shrinking: string[] } | null {
   const shrinking: string[] = [];
-  const check = <
-    K extends
-      | "scenarios"
-      | "goals"
-      | "budgetItems"
-      | "incomeStreams"
-      | "healthPlans",
-  >(
-    k: K,
-  ) => {
-    const driveLen = Array.isArray(drivePayload[k]) ? drivePayload[k]!.length : 0;
+  for (const k of SHRINKAGE_GUARDED_ARRAY_COLLECTIONS) {
+    const driveArr = drivePayload[k];
+    const driveLen = Array.isArray(driveArr) ? driveArr.length : 0;
     const localLen = localState[k].length;
     if (localLen > 0 && driveLen === 0) shrinking.push(k);
-  };
-  check("scenarios");
-  check("goals");
-  check("budgetItems");
-  check("incomeStreams");
-  check("healthPlans");
-  // Sparse-map collection: N→0 wipe protection on healthImportanceWeights.
-  const driveWeights = drivePayload.healthImportanceWeights;
-  const driveWeightCount =
-    driveWeights &&
-    typeof driveWeights === "object" &&
-    !Array.isArray(driveWeights)
-      ? Object.keys(driveWeights).length
-      : 0;
-  const localWeightCount = Object.keys(
-    localState.healthImportanceWeights,
-  ).length;
-  if (localWeightCount > 0 && driveWeightCount === 0)
-    shrinking.push("healthImportanceWeights");
+  }
+  for (const k of SHRINKAGE_GUARDED_MAP_COLLECTIONS) {
+    const driveMap = drivePayload[k];
+    const driveCount =
+      driveMap && typeof driveMap === "object" && !Array.isArray(driveMap)
+        ? Object.keys(driveMap).length
+        : 0;
+    const localCount = Object.keys(localState[k]).length;
+    if (localCount > 0 && driveCount === 0) shrinking.push(k);
+  }
   return shrinking.length > 0 ? { shrinking } : null;
 }
 
