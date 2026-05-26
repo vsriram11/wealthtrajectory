@@ -5,7 +5,7 @@ import {
   concentrationFindings,
   type ConcentrationFinding,
 } from "@/lib/insights/concentration";
-import { useActiveProjection } from "@/lib/projection/useActiveProjection";
+import { useAllocationView } from "@/lib/portfolio/useAllocationView";
 import { formatPercent, formatUSDCompact } from "@/lib/format";
 
 /**
@@ -22,7 +22,12 @@ import { formatPercent, formatUSDCompact } from "@/lib/format";
  * concentration is the first-order intervention.
  */
 export function ConcentrationRiskCard() {
-  const { household } = useActiveProjection();
+  // Use the shared allocation view so when the user toggles
+  // "Apply +Ny" on the future-composition card, this card's
+  // concentration findings reflect the aged-forward household —
+  // not stale today's holdings. Without this, the future view
+  // was inconsistent across cards on the same page.
+  const { household } = useAllocationView();
   const findings = useMemo(
     () => concentrationFindings(household),
     [household],

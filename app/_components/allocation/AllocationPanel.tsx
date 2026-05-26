@@ -2,7 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useAppStore } from "@/lib/store";
-import { ageHousehold } from "@/lib/portfolio/futureAllocation";
+import { useAllocationView } from "@/lib/portfolio/useAllocationView";
 import {
   computePortfolio,
   sliceMetrics,
@@ -22,7 +22,6 @@ import {
   type Household,
   type TaxTreatment,
 } from "@/lib/types";
-import { useActiveProjection } from "@/lib/projection/useActiveProjection";
 import {
   filterHouseholdByClass,
   leverageBuckets,
@@ -54,18 +53,16 @@ export function AllocationPanel() {
   // (issue #11) — scenario contribution / CAGR overrides never
   // reached the allocation views because the scenario merge happens
   // inside `useActiveProjection`, not on the raw store slice.
-  const { household: baseHousehold } = useActiveProjection();
+  // Shared allocation view: rollup → member → liquidity →
+  // scenario → appliedFutureYears all composed in one hook used
+  // by every card on this page. Without this shared anchor,
+  // AllocationPanel + its sibling cards (Leveraged warning,
+  // Concentration risk, Fee drag, Asset location) drifted out of
+  // sync when the user time-traveled the page.
+  const { household: householdMemberLiquid, appliedFutureYears } =
+    useAllocationView();
   const basis = useAppStore((s) => s.viewBasis);
   const setBasis = useAppStore((s) => s.setViewBasis);
-  // When the user has tapped "Apply above" on AllocationFutureCard,
-  // re-root every downstream calculation to the household as it
-  // would look `appliedFutureYears` years from now (every holding
-  // aged forward at its expectedRealCAGR, contributions
-  // accumulated, liabilities amortized). The future projection
-  // composes cleanly with member + liquidity + tax-bucket filters
-  // — we age the already-filtered subset, so a member-scoped
-  // future view reflects what that member will look like.
-  const appliedFutureYears = useAppStore((s) => s.appliedFutureYears);
   const setAppliedFutureYears = useAppStore(
     (s) => s.setAppliedFutureYears,
   );
@@ -74,26 +71,10 @@ export function AllocationPanel() {
   // page: the user taps a bucket in the TaxBuckets card to scope
   // every downstream number — NW, leverage breakdown, class
   // breakdown, metrics — to just that tax treatment. Composable
-  // with member + liquid + scenario filters that
-  // `useActiveProjection()` already applied upstream.
+  // with the upstream rollup → member → liquidity → future-age
+  // filters that `useAllocationView()` already applied.
   const [selectedTaxBucket, setSelectedTaxBucket] =
     useState<TaxTreatment | null>(null);
-
-  // Two-stage filtering: the "pre-tax-bucket" view feeds the
-  // TaxBuckets card itself (it needs to show ALL buckets so the
-  // user can pick from them — otherwise selecting one would
-  // collapse the picker). The "fully filtered" view feeds every
-  // other card on the page (NW, leverage, allocation, metrics).
-  const householdMemberLiquid = useMemo(() => {
-    let h = baseHousehold;
-    // Age forward when the user has applied a future state. The
-    // member + liquidity + scenario filters are already baked into
-    // `baseHousehold` via the resolver.
-    if (appliedFutureYears != null && appliedFutureYears > 0) {
-      h = ageHousehold(h, appliedFutureYears);
-    }
-    return h;
-  }, [baseHousehold, appliedFutureYears]);
 
   const filteredHousehold = useMemo(
     () =>

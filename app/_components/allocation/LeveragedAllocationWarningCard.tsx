@@ -1,9 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
-import { useAppStore } from "@/lib/store";
-import { useActiveProjection } from "@/lib/projection/useActiveProjection";
-import { ageHousehold } from "@/lib/portfolio/futureAllocation";
+import { useAllocationView } from "@/lib/portfolio/useAllocationView";
 import {
   computeLeveragedEquityBuckets,
   type DeleverageStrategy,
@@ -31,28 +29,21 @@ import { formatUSDCompact } from "@/lib/format";
  * Renders nothing when no affected holdings exist.
  */
 export function LeveragedAllocationWarningCard() {
-  const { household, assumptions } = useActiveProjection();
-  // Honor the AllocationPanel's "Apply above" future-composition
-  // toggle. When the user is viewing the portfolio aged +N years,
-  // this warning's bucket sizing + tax-hit math should reflect
-  // THAT future state, not today's. Without this the user sees a
-  // future-composition view in AllocationPanel that doesn't agree
-  // with the warning card sitting right below it — leveraged ETFs
-  // compound aggressively (3x daily-reset RY series, +9pt drag),
-  // so the tax-at-restructure differs materially between today
-  // and +5y / +10y.
-  const appliedFutureYears = useAppStore((s) => s.appliedFutureYears);
-  const projected = useMemo(() => {
-    if (appliedFutureYears == null || appliedFutureYears <= 0) return household;
-    return ageHousehold(household, appliedFutureYears);
-  }, [household, appliedFutureYears]);
+  // Shared allocation view: household is already aged-forward by
+  // `appliedFutureYears` when the user has time-traveled the page.
+  // Leveraged ETFs compound aggressively (3x daily-reset on the
+  // RYTNX series, +9pt drag depending on volatility regime), so
+  // tax-at-restructure differs materially between today and +5y /
+  // +10y. The hook also surfaces the same `appliedFutureYears`
+  // value for the header chip below.
+  const { household, assumptions, appliedFutureYears } = useAllocationView();
   const buckets = useMemo(
     () =>
       computeLeveragedEquityBuckets(
-        projected,
+        household,
         assumptions.retirementTaxRate,
       ),
-    [projected, assumptions.retirementTaxRate],
+    [household, assumptions.retirementTaxRate],
   );
 
   if (buckets.nonRecognizedHoldings.length === 0) return null;

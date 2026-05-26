@@ -187,6 +187,40 @@ export function parseImport(text: string): ExportPayload {
   ) {
     coerced.glidePath = null;
   }
+  // Range-validate `retirementFixedNominalYears` on Assumptions
+  // and on every memberAssumptions override. The engine has a
+  // finite/positive guard but consumer UIs (AssumptionsPanel
+  // slider, MC card chips) display the field verbatim — a
+  // corrupted Drive payload with `-50` or `NaN` would render
+  // garbage in the slider. Coerce non-numeric / non-finite /
+  // out-of-range values back to undefined so the assumption
+  // falls back to "no freeze."
+  const sanitizeFreezeYears = (obj: Record<string, unknown>): void => {
+    const v = obj.retirementFixedNominalYears;
+    if (v == null) return;
+    if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > 60) {
+      delete obj.retirementFixedNominalYears;
+    } else {
+      // Round to integer (the slider stores integers; a fractional
+      // year would behave oddly in the engine's geometric decay).
+      obj.retirementFixedNominalYears = Math.round(v);
+    }
+  };
+  if (coerced.assumptions && typeof coerced.assumptions === "object") {
+    sanitizeFreezeYears(coerced.assumptions as Record<string, unknown>);
+  }
+  if (
+    coerced.memberAssumptions &&
+    typeof coerced.memberAssumptions === "object" &&
+    !Array.isArray(coerced.memberAssumptions)
+  ) {
+    for (const k of Object.keys(coerced.memberAssumptions)) {
+      const m = (coerced.memberAssumptions as Record<string, unknown>)[k];
+      if (m && typeof m === "object" && !Array.isArray(m)) {
+        sanitizeFreezeYears(m as Record<string, unknown>);
+      }
+    }
+  }
   if (
     coerced.householdAnnualIncomeUSD !== undefined &&
     coerced.householdAnnualIncomeUSD !== null &&

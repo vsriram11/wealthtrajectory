@@ -170,6 +170,21 @@ export function aggregateAssumptions(
   const anyDownYearOnly = effective.some(
     (a) => a.retirementVariableHaircutOnDownYearOnly === true,
   );
+  // Fixed-nominal years (SORR mitigation, drawdown-phase) aggregates
+  // by MAX rather than mean — if any member opted into a freeze,
+  // the household view should at least show that freeze worth of
+  // protection. A mean would dilute one member's 10-year freeze
+  // with another's 0 into 5y, which is neither what either member
+  // configured nor a meaningful blend. Max preserves opt-in.
+  // Coerced to undefined when nobody opted in so the consumption
+  // site can distinguish "explicit zero" from "unset."
+  const fixedNominalValues = effective
+    .map((a) => a.retirementFixedNominalYears)
+    .filter((v): v is number => v != null && Number.isFinite(v) && v > 0);
+  const maxFixedNominalYears =
+    fixedNominalValues.length > 0
+      ? Math.max(...fixedNominalValues)
+      : undefined;
 
   return {
     ...household,
@@ -182,6 +197,7 @@ export function aggregateAssumptions(
     retirementVariableHaircutOnDownYearOnly: anyDownYearOnly,
     retirementVariableShare: meanVariableShare,
     retirementTaxRate: meanTax,
+    retirementFixedNominalYears: maxFixedNominalYears,
   };
 }
 

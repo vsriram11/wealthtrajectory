@@ -16,6 +16,7 @@ function makeFakeStore() {
     set: (patch: Partial<TargetAllocationSliceState>) => {
       state = { ...state, ...patch };
     },
+    get_: () => state,
   };
 }
 
@@ -27,7 +28,7 @@ describe("TargetAllocation slice", () => {
 
   it("setTargetAllocation stores and clears", () => {
     const s = makeFakeStore();
-    const a = createTargetAllocationSliceActions(s.set);
+    const a = createTargetAllocationSliceActions(s.set, s.get_);
     const target: TargetAllocation = {
       equity: 0.7,
       bond: 0.2,
@@ -41,7 +42,7 @@ describe("TargetAllocation slice", () => {
 
   it("setGlidePath stores and clears, independent of static target", () => {
     const s = makeFakeStore();
-    const a = createTargetAllocationSliceActions(s.set);
+    const a = createTargetAllocationSliceActions(s.set, s.get_);
     const gp: GlidePath = { waypoints: [] } as GlidePath;
     a.setTargetAllocation({ equity: 1, bond: 0, cash: 0 } as TargetAllocation);
     a.setGlidePath(gp);
@@ -62,7 +63,7 @@ describe("TargetAllocation slice", () => {
     // that invariant: an unsorted + duplicated input must come
     // out sorted + collapsed.
     const s = makeFakeStore();
-    const a = createTargetAllocationSliceActions(s.set);
+    const a = createTargetAllocationSliceActions(s.set, s.get_);
     a.setGlidePath({
       waypoints: [
         { age: 60, allocation: { equity: 0.5, bond: 0.5 } },

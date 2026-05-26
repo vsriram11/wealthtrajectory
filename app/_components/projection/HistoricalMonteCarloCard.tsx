@@ -190,10 +190,38 @@ export function HistoricalMonteCarloCard() {
   //     years. ageHousehold uses each holding's expectedRealCAGR
   //     (already scenario-merged through useActiveProjection), so
   //     scenarios cascade in automatically.
+  // Pass income streams into projectIndependence so monthsToTarget
+  // is computed against the user's ACTUAL cash flow, not a stream-
+  // less idealization. This matters most for partial-coast users
+  // with NEGATIVE income streams (sabbatical / step-down bridges
+  // that drain the portfolio during accumulation) — without
+  // streams, monthsToTarget is too short, and the at-target
+  // composition we project for the MC sim reflects an unrealistic
+  // date. The Outlook tab already feeds streams into its projection;
+  // we match that here.
+  const streamsScoped = useMemo(
+    () =>
+      filterIncomeStreamsForRollups(
+        incomeStreams,
+        memberId,
+        activeMemberIds(scopedHousehold),
+      ),
+    [incomeStreams, memberId, scopedHousehold],
+  );
   const monthsToTarget = useMemo(
     () =>
-      projectIndependence(scopedHousehold, effective).monthsToIndependence,
-    [scopedHousehold, effective],
+      projectIndependence(scopedHousehold, effective, undefined, {
+        // Project across the same horizon the simulator uses; ~70y
+        // covers any realistic Independence path. The engine
+        // tolerates a shorter or longer array — extras are ignored,
+        // misses default to 0.
+        incomePerYearUSD: incomePerYearUSD(
+          streamsScoped,
+          new Date().getFullYear(),
+          70,
+        ),
+      }).monthsToIndependence,
+    [scopedHousehold, effective, streamsScoped],
   );
   const yearsToTarget =
     monthsToTarget != null && monthsToTarget > 0 ? monthsToTarget / 12 : 0;
@@ -205,6 +233,18 @@ export function HistoricalMonteCarloCard() {
   const portfolio = useMemo(
     () => computePortfolio(projectedHousehold),
     [projectedHousehold],
+  );
+  // Today's (un-aged) cash share, used ONLY for the bucket-
+  // strategy "configure a cash slice" warning. The simulator
+  // consumes the AGED `portfolio.classes.cashShare`, but the
+  // warning text says "your cash allocation" — and the user's
+  // mental model is "what I configured today," not "what my
+  // portfolio will look like at retirement." A user with 5% cash
+  // today and 20y of equity-compounding ahead would correctly
+  // see <1% cash at target but the warning shouldn't nag them.
+  const cashShareToday = useMemo(
+    () => computePortfolio(scopedHousehold).classes.cashShare,
+    [scopedHousehold],
   );
   // Detect whether the user has any mortgaged RE in the current
   // scope. Damodaran's RE series is UNLEVERED price return — for a
@@ -780,7 +820,7 @@ export function HistoricalMonteCarloCard() {
             />
           </div>
         </div>
-        {rebalance === "bucket" && allocation.cashFraction < 0.005 && (
+        {rebalance === "bucket" && cashShareToday < 0.005 && (
           <div className="mt-2 rounded-md border border-amber-300/40 bg-amber-300/5 px-2.5 py-1.5 text-[10px] leading-snug text-amber-200">
             Bucket strategy is on but your cash allocation is
             essentially 0%. With no cash to drain, the policy

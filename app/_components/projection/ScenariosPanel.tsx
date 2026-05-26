@@ -305,6 +305,9 @@ function OverrideSummary({ overrides }: { overrides: ScenarioOverrides }) {
   if (overrides.targetNetWorthUSD != null) {
     parts.push(`${formatUSDCompact(overrides.targetNetWorthUSD)} target`);
   }
+  if (overrides.legacyFloorUSD != null) {
+    parts.push(`${formatUSDCompact(overrides.legacyFloorUSD)} legacy`);
+  }
   return (
     <div className="mt-0.5 text-[11px] text-text-muted">
       {parts.length === 0 ? "No overrides" : parts.join(" · ")}

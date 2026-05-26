@@ -509,6 +509,104 @@ describe("monteCarlo.ts — yearly + ending percentile ordering", () => {
       { numRuns: 8 },
     );
   });
+
+  it("bucket policy with 0% cash ≡ annual policy (silent degrade)", () => {
+    // Invariant: the bucket strategy needs a cash slice to do
+    // anything. With cashFraction = 0, the policy must produce
+    // results indistinguishable from annual rebalance — bucket
+    // mode must NEVER make a zero-cash portfolio WORSE through
+    // its skip-the-snap branch (which could happen if a refactor
+    // mishandled the no-cash case). Pinning this catches that
+    // class of regression even with all-stocks portfolios.
+    fc.assert(
+      fc.property(
+        startingNWArb,
+        annualSpendArb,
+        horizonArb,
+        (startingNW, annualSpend, horizonYears) => {
+          // 100% stocks: no cash → bucket has nothing to do.
+          const allStocks = {
+            stocksFraction: 1,
+            bondsFraction: 0,
+            cashFraction: 0,
+          };
+          const annual = runHistoricalSequences({
+            startingNetWorthUSD: startingNW,
+            allocation: allStocks,
+            annualSpendUSD: annualSpend,
+            retirementHorizonYears: horizonYears,
+          });
+          const bucket = runHistoricalSequences(
+            {
+              startingNetWorthUSD: startingNW,
+              allocation: allStocks,
+              annualSpendUSD: annualSpend,
+              retirementHorizonYears: horizonYears,
+            },
+            { rebalance: "bucket" },
+          );
+          // Single-class portfolio: there's literally nothing to
+          // rebalance to/from, so bucket's skip-the-snap and
+          // cash-first-draw branches are no-ops. Trajectories
+          // must match within float tolerance.
+          expectRelClose(
+            bucket.successRate,
+            annual.successRate,
+            1e-9,
+          );
+          expectRelClose(
+            bucket.endingNetWorthPercentiles.p50,
+            annual.endingNetWorthPercentiles.p50,
+            1e-9,
+          );
+        },
+      ),
+      { numRuns: 8 },
+    );
+  });
+
+  it("bucket policy with up-only stock sequences ≡ annual policy", () => {
+    // Invariant: the bucket-fire trigger requires `stocks[y-1] < 0`.
+    // An up-only sequence never triggers it, so bucket must
+    // behave exactly like annual rebalance. Forcing this via a
+    // synthetic monotone-up dataset isn't simple (the engine
+    // draws from the real historical dataset), but a 1-year
+    // horizon trivially has no firing year (year 0 of retirement
+    // can't read a prior retirement year). Pin THAT here as the
+    // simpler invariant.
+    fc.assert(
+      fc.property(
+        startingNWArb,
+        annualSpendArb,
+        allocationArb,
+        (startingNW, annualSpend, allocation) => {
+          const annual = runHistoricalSequences({
+            startingNetWorthUSD: startingNW,
+            allocation,
+            annualSpendUSD: annualSpend,
+            retirementHorizonYears: 1,
+          });
+          const bucket = runHistoricalSequences(
+            {
+              startingNetWorthUSD: startingNW,
+              allocation,
+              annualSpendUSD: annualSpend,
+              retirementHorizonYears: 1,
+            },
+            { rebalance: "bucket" },
+          );
+          // 1-year horizon: bucket never fires (y > 0 false for
+          // the only retirement year). Must match annual exactly.
+          expectRelClose(
+            bucket.successRate,
+            annual.successRate,
+            1e-9,
+          );
+        },
+      ),
+      { numRuns: 8 },
+    );
+  });
 });
 
 /* ============================================================ */

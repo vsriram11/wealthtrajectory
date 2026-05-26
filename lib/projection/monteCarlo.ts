@@ -718,13 +718,11 @@ export function simulatePath(
       // Spillover: take what's left from non-cash classes
       // proportionally. Per-class accounting asymmetry: the
       // WITHDRAWAL is sourced cash-first by design (the strategy's
-      // whole point), but INCOME is credited proportionally to
-      // every class (it isn't a draw the user controls the source
-      // of; it's an inflow that should land where new
-      // contributions would). The two operations use different
-      // denominators on purpose. Aggregate `nw` is consistent
-      // either way; the asymmetry only shows up if someone
-      // inspects the per-class balances mid-year.
+      // whole point), but POSITIVE INCOME is credited
+      // proportionally to every class (it isn't a draw the user
+      // controls the source of; it's an inflow that should land
+      // where new contributions would). The two operations use
+      // different denominators on purpose.
       const nonCashTotal = sB + bB + gB + rB + lB;
       if (drawRemaining > 0 && nonCashTotal > 0) {
         sB -= drawRemaining * (sB / nonCashTotal);
@@ -734,7 +732,8 @@ export function simulatePath(
         lB -= drawRemaining * (lB / nonCashTotal);
       }
       if (incomeAtMidYear > 0) {
-        // Distribute income to ALL classes by current weights.
+        // Positive income: distribute to ALL classes by current
+        // weights.
         const totalNow = sB + bB + cB + gB + rB + lB;
         if (totalNow > 0) {
           sB += incomeAtMidYear * (sB / totalNow);
@@ -744,11 +743,55 @@ export function simulatePath(
           rB += incomeAtMidYear * (rB / totalNow);
           lB += incomeAtMidYear * (lB / totalNow);
         }
+      } else if (incomeAtMidYear < 0) {
+        // NEGATIVE income (partial-coast distribution, sabbatical
+        // bridge — see lib/budget/incomeStreams.ts signed
+        // semantics). This is a SECOND withdrawal in everything-
+        // but-name; route it through the same cash-first → spill
+        // logic so the bucket strategy actually shields equity
+        // from BOTH the planned retirement spend AND any
+        // negative-income overlay. Without this branch, the
+        // negative income would be silently dropped (the per-
+        // class nw re-derive at the end would erase the signed
+        // cfWithGrowth from earlier). Real bug caught in audit.
+        const distributionAmount = -incomeAtMidYear;
+        const distFromCash = Math.min(Math.max(0, cB), distributionAmount);
+        cB = Math.max(0, cB) - distFromCash;
+        const distRemaining = distributionAmount - distFromCash;
+        const nonCashAfter = sB + bB + gB + rB + lB;
+        if (distRemaining > 0 && nonCashAfter > 0) {
+          sB -= distRemaining * (sB / nonCashAfter);
+          bB -= distRemaining * (bB / nonCashAfter);
+          gB -= distRemaining * (gB / nonCashAfter);
+          rB -= distRemaining * (rB / nonCashAfter);
+          lB -= distRemaining * (lB / nonCashAfter);
+        }
       }
+      // Clamp each non-cash class at 0 — the proportional spillover
+      // subtraction can leave one slightly negative if a class went
+      // close to zero through prior compounding. Matches the
+      // bust-clamp pattern in the snap-year branch below.
+      if (sB < 0) sB = 0;
+      if (bB < 0) bB = 0;
+      if (gB < 0) gB = 0;
+      if (rB < 0) rB = 0;
+      if (lB < 0) lB = 0;
       // Re-derive nw from per-class balances so the aggregate is
       // exactly internally-consistent (avoid `cfWithGrowth`-derived
       // value drifting from the per-class accounting).
       nw = sB + bB + cB + gB + rB + lB;
+      // If the portfolio bust this year, zero everything so the
+      // next iteration starts from clean (negative) zero. The
+      // trailing nw<=0 check at the end of the loop will mark
+      // failedAtYear; this branch must mirror it.
+      if (nw <= 0) {
+        sB = 0;
+        bB = 0;
+        cB = 0;
+        gB = 0;
+        rB = 0;
+        lB = 0;
+      }
     } else if (rebalancePolicy === "none" || rebalancePolicy === "bucket") {
       // Both modes maintain per-class balances across years.
       // - "none": balances drift purely from differential class
