@@ -15,16 +15,26 @@ import { StressTestCard } from "@/app/_components/projection/StressTestCard";
 import { WhatIfSavingsCard } from "@/app/_components/projection/WhatIfSavingsCard";
 
 type ProjectionsSubTab =
-  | "outlook"
   | "stress"
-  | "levers"
-  | "scenarios";
+  | "scenarios"
+  | "outlook"
+  | "levers";
 
+// Tab order chosen to land the user on the most decision-grade
+// surface first:
+//   1. Stress   — the "is my plan robust?" question (the most
+//                 frequently-asked, most-impactful question on this
+//                 page; deserves first read).
+//   2. Scenarios — compare alternate plans side by side; the
+//                  natural next step after seeing baseline stress.
+//   3. Outlook   — future-dollar framing + trailing reality checks.
+//   4. Levers    — interactive what-if controls (savings slider,
+//                  sensitivity); used less often, lives last.
 const SUB_TABS: { id: ProjectionsSubTab; label: string }[] = [
-  { id: "outlook", label: "Outlook" },
   { id: "stress", label: "Stress" },
-  { id: "levers", label: "Levers" },
   { id: "scenarios", label: "Scenarios" },
+  { id: "outlook", label: "Outlook" },
+  { id: "levers", label: "Levers" },
 ];
 
 /**
@@ -56,7 +66,9 @@ const SUB_TABS: { id: ProjectionsSubTab; label: string }[] = [
  * cards now live on their respective semantic homes.
  */
 export function ProjectionsPage() {
-  const [tab, setTab] = useState<ProjectionsSubTab>("outlook");
+  // Default to "stress" since it's now first in SUB_TABS and the
+  // most decision-grade landing surface (matches the array order).
+  const [tab, setTab] = useState<ProjectionsSubTab>("stress");
 
   return (
     <>
