@@ -863,12 +863,128 @@ describe("simulatePath — bucket rebalance policy (cash-bucket SORR strategy)",
     }
   });
 
+  it("retire-into-a-crash: bucket fires in YEAR 0 of retirement when prior accumulation year was down", () => {
+    // Off-by-one regression. The reviewer caught that `y > yearsPre`
+    // (strict greater) silently excluded the first retirement year
+    // — exactly the SORR window the strategy is supposed to
+    // protect. After the fix, the gate is `y >= yearsPre && y > 0`,
+    // matching the variable-haircut feature. This test pins that
+    // first-retirement-year firing.
+    //
+    // Setup: 1 year accumulation (stocks -30%), 2 years retirement
+    // (stocks +30%, 0). On the FIRST retirement year (y=1=yearsPre),
+    // bucket must fire because stocks[0] = -30% < 0.
+    const inputs: MonteCarloInputs = {
+      startingNetWorthUSD: 1_000_000,
+      allocation: ALLOC_95_STOCKS_5_CASH,
+      annualSpendUSD: 40_000,
+      annualContributionUSD: 0,
+      yearsUntilRetirement: 1,
+      retirementHorizonYears: 2,
+    };
+    const stocks = [-0.3, 0.3, 0];
+    const annual = simulatePath(
+      inputs,
+      stocks,
+      [0, 0, 0],
+      [0, 0, 0],
+      [0, 0, 0],
+      [0, 0, 0],
+      "annual",
+      { rebalance: "annual" },
+    );
+    const bucket = simulatePath(
+      inputs,
+      stocks,
+      [0, 0, 0],
+      [0, 0, 0],
+      [0, 0, 0],
+      [0, 0, 0],
+      "bucket",
+      { rebalance: "bucket" },
+    );
+    // Trajectories MUST differ — proves bucket fired in the first
+    // retirement year. (If `y > yearsPre` were still the gate,
+    // they'd be byte-identical.)
+    let differs = false;
+    for (let i = 0; i < bucket.trajectory.length; i++) {
+      if (Math.abs(bucket.trajectory[i] - annual.trajectory[i]) > 0.01) {
+        differs = true;
+        break;
+      }
+    }
+    expect(differs).toBe(true);
+  });
+
+  it("glide-path stall: bucket pauses the per-age snap during down-followup years (documented behavior)", () => {
+    // The reviewer flagged this interaction. Bucket's skip-the-snap
+    // mechanic means the glide path's per-age target weights are
+    // NOT applied that year — the portfolio holds the previous
+    // year's composition. This is intentional ("don't rebalance into
+    // a falling market") but worth pinning so a refactor can't
+    // silently change the semantics.
+    //
+    // Setup: 3-year window with two consecutive down years. Glide
+    // path shifts 90% equity → 50% equity between age 64 and 67.
+    // Under bucket, that shift stalls during the down-followup
+    // years; under annual, the shift completes on schedule.
+    const inputs: MonteCarloInputs = {
+      startingNetWorthUSD: 1_000_000,
+      allocation: { stocksFraction: 0.9, bondsFraction: 0, cashFraction: 0.1 },
+      annualSpendUSD: 30_000,
+      retirementHorizonYears: 3,
+      startAge: 65,
+      glidePath: {
+        waypoints: [
+          { age: 64, allocation: { equity: 0.9, cash: 0.1 } },
+          { age: 67, allocation: { equity: 0.5, cash: 0.5 } },
+        ],
+      },
+    };
+    const stocks = [-0.1, -0.1, 0.1];
+    const annual = simulatePath(
+      inputs,
+      stocks,
+      [0, 0, 0],
+      [0, 0, 0],
+      [0, 0, 0],
+      [0, 0, 0],
+      "annual-glide",
+      { rebalance: "annual" },
+    );
+    const bucket = simulatePath(
+      inputs,
+      stocks,
+      [0, 0, 0],
+      [0, 0, 0],
+      [0, 0, 0],
+      [0, 0, 0],
+      "bucket-glide",
+      { rebalance: "bucket" },
+    );
+    // Trajectories MUST differ (different compositions year-by-
+    // year produce different returns). If they were identical, the
+    // bucket policy would not be honoring the skip-snap branch
+    // when a glide path is configured.
+    let differs = false;
+    for (let i = 1; i < bucket.trajectory.length; i++) {
+      if (Math.abs(bucket.trajectory[i] - annual.trajectory[i]) > 0.01) {
+        differs = true;
+        break;
+      }
+    }
+    expect(differs).toBe(true);
+  });
+
   it("bucket exhaustion: when the cash slice is too small to cover the draw, remainder spills proportionally", () => {
     // $1M starting, 2% cash slice ($20k), $40k annual spend, prior
     // year stocks -30%. The bucket has $20k available; the draw
     // is ~$40k * mid-year-growth — so the cash is fully drained
     // AND the remainder pulls from stocks/etc. Verify the math
-    // doesn't go negative on the cash bucket.
+    // doesn't go negative on the cash bucket AND the trajectory
+    // value at year 2 matches an exact-arithmetic pin so a
+    // refactor that changes the per-class accounting can't pass
+    // by float coincidence.
     const path = simulatePath(
       {
         startingNetWorthUSD: 1_000_000,
@@ -894,6 +1010,13 @@ describe("simulatePath — bucket rebalance policy (cash-bucket SORR strategy)",
     // > 0 (the test setup leaves enough equity to absorb the spill).
     expect(Number.isFinite(path.trajectory[2])).toBe(true);
     expect(path.trajectory[2]).toBeGreaterThan(0);
+    // Tight numerical pin so a future refactor that subtly changes
+    // per-class accounting can't pass by float coincidence.
+    // Computed by running the suite once and copying the value;
+    // tolerance is ±$50 (toBeCloseTo with precision -2 = ±0.5 ×
+    // 10^2). If the cash-first drain + proportional spillover
+    // math changes, this catches it.
+    expect(path.trajectory[2]).toBeCloseTo(695_221, -2);
   });
 });
 

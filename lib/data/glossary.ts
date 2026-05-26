@@ -159,11 +159,12 @@ export const GLOSSARY: GlossarySection[] = [
       {
         term: "Drawdown phases",
         definition:
-          "Distinct life stages of retirement spending — the 'go-go / slow-go / no-go' pattern researchers consistently observe. Active early retirement spends more on travel; later years spend less on activities but more on healthcare. The app lets you model phase shifts so the projection doesn't assume a single flat withdrawal forever.",
-        source: {
-          label: "Kitces on go-go/slow-go/no-go",
-          href: "https://www.kitces.com/blog/the-extraordinary-upside-potential-of-sequence-of-return-risk-in-retirement/",
-        },
+          "Distinct life stages of retirement spending — the 'go-go / slow-go / no-go' pattern researchers consistently observe (Pfau / Blanchett / Drak). Active early retirement spends more on travel; later years spend less on activities but more on healthcare. The app lets you model phase shifts so the projection doesn't assume a single flat withdrawal forever.",
+        // (No source link: the file's own docstring says don't
+        // ship low-confidence URLs. The canonical academic
+        // citations are scattered across multiple Pfau and
+        // Blanchett papers — better to name the researchers than
+        // guess at a single article.)
       },
       {
         term: "Variable haircut",
@@ -182,11 +183,11 @@ export const GLOSSARY: GlossarySection[] = [
       {
         term: "Cash-bucket strategy",
         definition:
-          "Sometimes called the 'bond tent' or 'two-bucket' approach. Hold a small cash slice (typically 5%) at retirement; in years following a market drop, fund the year's spending from this bucket instead of selling equity at depressed prices. Next up-year's annual rebalance refills the bucket from appreciated equity. The MC stress test has a Bucket rebalance mode you can toggle.",
-        source: {
-          label: "Pfau / Kitces on rising-equity glide paths",
-          href: "https://www.kitces.com/blog/rising-equity-glidepaths-in-retirement/",
-        },
+          "Sometimes called the 'bond tent' or 'two-bucket' approach (originally popularized by Harold Evensky). Hold a small cash slice (typically 5%) at retirement; in years following a market drop, fund the year's spending from this bucket instead of selling equity at depressed prices. Next up-year's annual rebalance refills the bucket from appreciated equity. The MC stress test has a Bucket rebalance mode you can toggle.",
+        // (No source link: the bond-tent literature is spread
+        // across Evensky / Kitces / Pfau articles, no single
+        // canonical URL covers what THIS engine implements.
+        // Better to name the originator than guess at a link.)
         aliases: ["bond tent", "bucket strategy", "two-bucket"],
       },
       {
@@ -280,6 +281,7 @@ export const GLOSSARY: GlossarySection[] = [
           label: "Mad Fientist: Roth ladder explainer",
           href: "https://www.madfientist.com/how-to-access-retirement-funds-early/",
         },
+        aliases: ["roth ladder", "conversion ladder"],
       },
     ],
   },
@@ -383,13 +385,14 @@ export const GLOSSARY: GlossarySection[] = [
 ];
 
 /**
- * Flatten all entries for search. Each entry's metadata (section
- * title + section id) is attached so search results can show the
- * section context.
+ * Module-scope flattened cache. The glossary is static at build
+ * time; `searchGlossary` runs once per keystroke inside the page's
+ * useMemo, so rebuilding the flat array each call would allocate
+ * O(N) per stroke. Hoist + freeze once.
  */
-export function flattenGlossary(): Array<
+const FLATTENED: ReadonlyArray<
   GlossaryEntry & { sectionId: string; sectionTitle: string }
-> {
+> = (() => {
   const out: Array<GlossaryEntry & { sectionId: string; sectionTitle: string }> =
     [];
   for (const section of GLOSSARY) {
@@ -402,6 +405,17 @@ export function flattenGlossary(): Array<
     }
   }
   return out;
+})();
+
+/**
+ * Flatten all entries for search. Each entry's metadata (section
+ * title + section id) is attached so search results can show the
+ * section context.
+ */
+export function flattenGlossary(): ReadonlyArray<
+  GlossaryEntry & { sectionId: string; sectionTitle: string }
+> {
+  return FLATTENED;
 }
 
 /**
@@ -411,10 +425,10 @@ export function flattenGlossary(): Array<
  */
 export function searchGlossary(
   query: string,
-): Array<GlossaryEntry & { sectionId: string; sectionTitle: string }> {
+): ReadonlyArray<GlossaryEntry & { sectionId: string; sectionTitle: string }> {
   const q = query.trim().toLowerCase();
-  if (q.length === 0) return flattenGlossary();
-  return flattenGlossary().filter((e) => {
+  if (q.length === 0) return FLATTENED;
+  return FLATTENED.filter((e) => {
     if (e.term.toLowerCase().includes(q)) return true;
     if (e.definition.toLowerCase().includes(q)) return true;
     if (e.aliases?.some((a) => a.includes(q))) return true;

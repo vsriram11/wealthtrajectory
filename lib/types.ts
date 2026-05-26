@@ -287,10 +287,10 @@ export const EMPTY_GEOGRAPHY: GeographyAllocation = {
 /**
  * A single leg of a multi-asset ETF's composition. Used for funds like
  * NTSX (90% stocks + 60% bonds via Treasury futures), GDE (90% stocks +
- * 60% gold via futures), RSST (100% stocks + 100% managed futures), etc.
+ * 90% gold via futures), RSST (100% stocks + 100% managed futures), etc.
  * The sum of leg weights gives the fund's intrinsic leverage (NTSX = 1.5;
- * RSST = 2.0). Each leg's contribution to portfolio exposure is
- * weight × holding.valueUSD.
+ * GDE = 1.8; RSST = 2.0). Each leg's contribution to portfolio exposure
+ * is weight × holding.valueUSD.
  *
  * `kind` mirrors AssetClass for the leg's class. `commodity` is allowed
  * here (gold, etc.); it does not yet appear as a top-level AssetClass,

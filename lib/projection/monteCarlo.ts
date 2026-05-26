@@ -292,6 +292,18 @@ export type SimulationOptions = {
    *     equity. The user must configure a non-zero cash slice for
    *     this to matter; with zero cash the policy degrades silently
    *     to standard annual rebalance with proportional draw.
+   *
+   *     Interaction with glidePath: in a down-followup year the
+   *     bucket policy SKIPS the annual snap — which means the
+   *     per-age glide-path target is NOT applied that year. The
+   *     portfolio holds the previous year's composition. Over a
+   *     multi-year drawdown this can stall glide-path migration
+   *     for multiple consecutive years before the next up-year's
+   *     snap catches the portfolio up to the age-resolved target.
+   *     This is intended: the WHOLE POINT of bucket is "don't
+   *     rebalance into a falling market." A user who wants strict
+   *     glide-path adherence regardless of returns should use the
+   *     "annual" policy.
    */
   rebalance?: RebalancePolicy;
 };
@@ -540,9 +552,19 @@ export function simulatePath(
     // the equity slice can recover unsold AND the withdrawal is
     // taken from the cash bucket first. Compute the per-year
     // decision once so the snap branch + withdrawal branch agree.
+    //
+    // Trigger gate alignment with the variable-haircut feature:
+    // `y >= yearsPre` (first retirement year is eligible) AND
+    // `y > 0` (we need a prior-year stock return to read).
+    // CRUCIAL: this means a user who retires RIGHT AFTER a
+    // -30% accumulation-year crash IS protected by the bucket
+    // strategy in year 0 of retirement — the exact SORR window
+    // the strategy is designed for. An earlier off-by-one used
+    // `y > yearsPre` and silently excluded that case.
     const bucketFiresThisYear =
       rebalancePolicy === "bucket" &&
-      y > yearsPre &&
+      y >= yearsPre &&
+      y > 0 &&
       (stockReturns[y - 1] ?? 0) < 0;
 
     if (
@@ -684,13 +706,25 @@ export function simulatePath(
       const drawAtMidYear = withdrawal * (1 + rImplied / 2);
       const incomeAtMidYear = income * (1 + rImplied / 2);
       // Drain from cash first, capped at what's available.
-      const fromCash = Math.min(cB, drawAtMidYear);
-      cB -= fromCash;
+      // Floor cB at 0 defensively: a small negative drift from
+      // an earlier `factor` rescale would otherwise let the min
+      // return that negative, ADDING (subtracting-a-negative) to
+      // drawRemaining AND leaving cash more negative. Guard once
+      // here so the rest of the branch operates on clean inputs.
+      const available = Math.max(0, cB);
+      const fromCash = Math.min(available, drawAtMidYear);
+      cB = available - fromCash;
       const drawRemaining = drawAtMidYear - fromCash;
       // Spillover: take what's left from non-cash classes
-      // proportionally. Income separately credits proportionally
-      // to ALL classes (including cash, since the snap will
-      // refill it next year anyway).
+      // proportionally. Per-class accounting asymmetry: the
+      // WITHDRAWAL is sourced cash-first by design (the strategy's
+      // whole point), but INCOME is credited proportionally to
+      // every class (it isn't a draw the user controls the source
+      // of; it's an inflow that should land where new
+      // contributions would). The two operations use different
+      // denominators on purpose. Aggregate `nw` is consistent
+      // either way; the asymmetry only shows up if someone
+      // inspects the per-class balances mid-year.
       const nonCashTotal = sB + bB + gB + rB + lB;
       if (drawRemaining > 0 && nonCashTotal > 0) {
         sB -= drawRemaining * (sB / nonCashTotal);
@@ -715,34 +749,16 @@ export function simulatePath(
       // exactly internally-consistent (avoid `cfWithGrowth`-derived
       // value drifting from the per-class accounting).
       nw = sB + bB + cB + gB + rB + lB;
-    } else if (rebalancePolicy === "none") {
-      // Distribute cf proportionally to current (post-return)
-      // bucket weights so cf itself doesn't force a rebalance. The
-      // drift across years comes purely from differential class
-      // returns; this step just keeps the per-class balances
-      // consistent with the new total nw.
-      if (nwAfterReturns > 0 && nw > 0) {
-        const factor = nw / nwAfterReturns;
-        sB *= factor;
-        bB *= factor;
-        cB *= factor;
-        gB *= factor;
-        rB *= factor;
-        lB *= factor;
-      } else if (nw <= 0) {
-        sB = 0;
-        bB = 0;
-        cB = 0;
-        gB = 0;
-        rB = 0;
-        lB = 0;
-      }
-    } else if (rebalancePolicy === "bucket") {
-      // Bucket mode, snap-year (prior year was up OR first year).
-      // The withdrawal is applied proportionally to current weights
-      // (same as "none" mode logic here). Per-class balances must
-      // be maintained so the NEXT year — which may skip the snap —
-      // starts from real numbers, not stale year-start weights.
+    } else if (rebalancePolicy === "none" || rebalancePolicy === "bucket") {
+      // Both modes maintain per-class balances across years.
+      // - "none": balances drift purely from differential class
+      //   returns. Cash flow is distributed proportionally to
+      //   current weights so cf itself doesn't force a rebalance.
+      // - "bucket" (snap-year case — prior was up OR y=0): the
+      //   year-start snap above set balances to target weights;
+      //   here we just keep them consistent with the new total
+      //   nw after cf, since the NEXT year may skip the snap and
+      //   needs real per-class numbers to read from.
       if (nwAfterReturns > 0 && nw > 0) {
         const factor = nw / nwAfterReturns;
         sB *= factor;

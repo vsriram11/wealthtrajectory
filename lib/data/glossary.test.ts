@@ -100,11 +100,17 @@ describe("searchGlossary", () => {
     expect(r.length).toBe(0);
   });
 
-  it("is case-insensitive", () => {
+  it("is case-insensitive (same RESULT SET, not just same count)", () => {
     const upper = searchGlossary("MONTE CARLO");
     const lower = searchGlossary("monte carlo");
-    expect(upper.length).toBe(lower.length);
     expect(upper.length).toBeGreaterThan(0);
+    expect(lower.length).toBeGreaterThan(0);
+    // The vacuous-zero case (BOTH return 0) would pass a count-only
+    // check. Pin the actual term sets so a regression that breaks
+    // case-folding for one path can't silently pass.
+    const upperTerms = upper.map((e) => e.term).sort();
+    const lowerTerms = lower.map((e) => e.term).sort();
+    expect(upperTerms).toEqual(lowerTerms);
   });
 
   it("each result carries its source-section metadata", () => {
@@ -127,15 +133,21 @@ describe("GLOSSARY — Reddit-feedback coverage", () => {
   // visitor would search for.
   const REQUIRED_TERMS = [
     "Financial Independence",
+    "FIRE",
     "Net worth",
     "Safe Withdrawal Rate",
+    "4% rule",
     "Sequence-of-returns risk",
+    "SORR",
     "Monte Carlo simulation",
     "Asset class",
     "Allocation",
     "Glide path",
+    "Rebalance",
     "CAGR",
     "Real vs nominal",
+    "Roth ladder",
+    "RMD",
   ];
 
   for (const required of REQUIRED_TERMS) {

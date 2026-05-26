@@ -78,6 +78,7 @@ export function GlossaryPage() {
           href="https://en.wikipedia.org/wiki/Trinity_study"
           target="_blank"
           rel="noopener noreferrer"
+          aria-label="Trinity Study (Wikipedia, opens in new tab)"
           className="text-accent underline decoration-dotted underline-offset-2 hover:decoration-solid"
         >
           Trinity Study (Wikipedia)
@@ -87,6 +88,7 @@ export function GlossaryPage() {
           href="https://www.kitces.com/blog/"
           target="_blank"
           rel="noopener noreferrer"
+          aria-label="Michael Kitces' blog (opens in new tab)"
           className="text-accent underline decoration-dotted underline-offset-2 hover:decoration-solid"
         >
           Michael Kitces&apos; blog
@@ -129,11 +131,21 @@ function SectionedList() {
 function FilteredList({
   results,
 }: {
-  results: Array<GlossaryEntry & { sectionId: string; sectionTitle: string }>;
+  results: ReadonlyArray<
+    GlossaryEntry & { sectionId: string; sectionTitle: string }
+  >;
 }) {
   if (results.length === 0) {
+    // role="status" + aria-live="polite" so screen-readers
+    // announce the no-matches feedback when the user finishes
+    // typing. Without it, a SR user gets silence — they can't
+    // tell whether the search ran.
     return (
-      <div className="rounded-md border border-dashed border-border-strong bg-bg-elevated px-4 py-6 text-center text-[12px] text-text-dim">
+      <div
+        role="status"
+        aria-live="polite"
+        className="rounded-md border border-dashed border-border-strong bg-bg-elevated px-4 py-6 text-center text-[12px] text-text-dim"
+      >
         No matches. Try a broader term — &ldquo;equity&rdquo;,
         &ldquo;tax&rdquo;, &ldquo;withdrawal&rdquo;.
       </div>
@@ -177,6 +189,7 @@ function EntryCard({
           href={entry.source.href}
           target="_blank"
           rel="noopener noreferrer"
+          aria-label={`${entry.source.label} (opens in new tab)`}
           className="mt-2 inline-flex items-center gap-1 text-[11px] text-accent underline decoration-dotted underline-offset-2 hover:decoration-solid"
         >
           {entry.source.label}
