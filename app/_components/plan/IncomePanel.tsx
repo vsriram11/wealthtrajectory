@@ -221,6 +221,24 @@ function IncomeStreamRow({
   onRemove: () => void;
 }) {
   const [label, setLabel] = useState(stream.label);
+  // Resync the local `label` draft when the prop changes from
+  // outside (scenario switch, Drive cloud sync, another browser
+  // tab). Without this, the row's input shows the stale draft
+  // until the user re-focuses + blurs the field. Compare-then-set
+  // pattern: only fire setState when the prop genuinely differs
+  // from what we last echoed AND the user hasn't started editing
+  // (label === lastSyncedLabel means the local draft matches the
+  // last value the prop fed us → safe to accept the new prop).
+  const [lastSyncedLabel, setLastSyncedLabel] = useState(stream.label);
+  if (stream.label !== lastSyncedLabel) {
+    if (label === lastSyncedLabel) {
+      // No pending local edit — pick up the external update.
+      setLabel(stream.label);
+    }
+    // Always re-baseline so the next external change is detected
+    // even if the user's edit conflicted with this one.
+    setLastSyncedLabel(stream.label);
+  }
   const [confirming, setConfirming] = useState(false);
   const currentYear = new Date().getFullYear();
   const thisYear = incomeForYear(stream, currentYear);
@@ -241,8 +259,20 @@ function IncomeStreamRow({
           onChange={(e) => setLabel(e.target.value)}
           onBlur={() => {
             const trimmed = label.trim();
-            if (trimmed && trimmed !== stream.label) onChange({ label: trimmed });
-            else setLabel(stream.label);
+            // Commit the trimmed edit only when non-empty AND
+            // different. An empty / whitespace-only blur reverts
+            // visibly to the original — but only after the value
+            // has been blanked (so the user SEES the reversion
+            // instead of silently discarding text they thought
+            // they typed).
+            if (trimmed && trimmed !== stream.label) {
+              onChange({ label: trimmed });
+            } else if (label !== stream.label) {
+              // No commit happened — revert the draft. The user
+              // sees the original come back on blur, signaling
+              // their edit didn't take.
+              setLabel(stream.label);
+            }
           }}
           aria-label="Stream label"
           className="flex-1 rounded-md border border-border-strong bg-bg-surface px-3 py-2 text-sm text-text outline-none focus:border-accent"
