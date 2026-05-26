@@ -134,10 +134,11 @@ export function BackupDiscoverabilityBanner() {
               <button
                 type="button"
                 onClick={dismiss}
+                title="Hides for 30 days, then re-prompts in case your data has grown"
                 className="rounded-md border border-border-strong bg-bg-elevated px-3 py-1.5 text-[12px] font-medium text-text-muted active:opacity-70"
-                aria-label="Dismiss backup reminder"
+                aria-label="Dismiss backup reminder for 30 days"
               >
-                Dismiss
+                Dismiss for 30 days
               </button>
             </div>
           </div>

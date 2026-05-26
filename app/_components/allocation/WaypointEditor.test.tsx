@@ -224,6 +224,99 @@ describe("WaypointEditor — load-from-preset", () => {
   });
 });
 
+describe("WaypointEditor — multi-class consent (cash/alts protection)", () => {
+  it("REFUSES to seed from a custom glide-path with non-zero cash share until user accepts the collapse", () => {
+    // A custom glide-path with a 10% cash slice. The editor's
+    // equity/bond split would silently nuke the cash share on
+    // first edit — we render a consent notice instead.
+    render(
+      <WaypointEditor
+        initial={{
+          waypoints: [
+            {
+              age: 35,
+              allocation: { equity: 0.6, bond: 0.3, cash: 0.1 },
+            },
+            {
+              age: 70,
+              allocation: { equity: 0.4, bond: 0.5, cash: 0.1 },
+            },
+          ],
+        }}
+        onSave={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+    expect(
+      screen.getByText(/glide-path includes cash or alts/i),
+    ).toBeInTheDocument();
+    // Editor body NOT rendered — no waypoint rows.
+    expect(screen.queryByText(/Add waypoint/)).not.toBeInTheDocument();
+  });
+
+  it("accepting the collapse reveals the editor seeded with equity/bond only (cash dropped)", () => {
+    render(
+      <WaypointEditor
+        initial={{
+          waypoints: [
+            {
+              age: 35,
+              allocation: { equity: 0.6, bond: 0.3, cash: 0.1 },
+            },
+            {
+              age: 70,
+              allocation: { equity: 0.4, bond: 0.5, cash: 0.1 },
+            },
+          ],
+        }}
+        onSave={() => {}}
+        onCancel={() => {}}
+      />,
+    );
+    fireEvent.click(screen.getByText(/Continue \(lose cash\/alts detail\)/));
+    // Now the editor renders normally. Two waypoint rows.
+    const ageInputs = screen
+      .getAllByLabelText(/age/i)
+      .filter((el): el is HTMLInputElement => el instanceof HTMLInputElement);
+    expect(ageInputs.length).toBe(2);
+    // Equity values preserved from the original; bond = 1 - equity.
+    const equityInputs = screen
+      .getAllByLabelText(/equity/i)
+      .filter((el): el is HTMLInputElement => el instanceof HTMLInputElement);
+    expect(Number(equityInputs[0].value)).toBe(60);
+    expect(Number(equityInputs[1].value)).toBe(40);
+  });
+
+  it("cancel from the consent notice fires onCancel and does NOT seed the editor", () => {
+    let cancelled = false;
+    render(
+      <WaypointEditor
+        initial={{
+          waypoints: [
+            {
+              age: 35,
+              allocation: { equity: 0.6, bond: 0.3, cash: 0.1 },
+            },
+            {
+              age: 70,
+              allocation: { equity: 0.4, bond: 0.5, cash: 0.1 },
+            },
+          ],
+        }}
+        onSave={() => {}}
+        onCancel={() => {
+          cancelled = true;
+        }}
+      />,
+    );
+    // /Cancel/ matches both the notice body ("Cancel and edit via
+    // Presets…") and the button — scope to button role for the
+    // click target.
+    fireEvent.click(screen.getByRole("button", { name: /Cancel/ }));
+    expect(cancelled).toBe(true);
+  });
+});
+
 describe("WaypointEditor — validation hints", () => {
   it("surfaces a 'Duplicate age' warning when two rows share an age", () => {
     render(

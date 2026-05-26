@@ -49,11 +49,27 @@ export function WaypointEditor({
   onSave: (gp: GlidePath) => void;
   onCancel: () => void;
 }) {
+  // Detect a pre-existing glide-path that includes non-equity-non-
+  // bond classes (cash / commodity / alts). The editor's
+  // equity-fills-bond model would silently nuke those classes on
+  // first edit (set bond = 1 - equity, drop cash). Refuse to seed
+  // from such a path; the user must explicitly opt-in to the
+  // 2-class collapse OR continue editing it via the presets +
+  // static-target route.
+  const initialHasMultiClass = useMemo(
+    () => initial != null && hasNonEquityBondClasses(initial),
+    [initial],
+  );
+  const [seededFromMultiClass, setSeededFromMultiClass] = useState(false);
   // Seed from the active glide path; fall back to the Vanguard
   // preset so a first-time custom-editor user starts from a real
   // shape instead of an empty list.
   const [draft, setDraft] = useState<GlidePathWaypoint[]>(() => {
-    if (initial && initial.waypoints.length >= 2)
+    if (
+      initial &&
+      initial.waypoints.length >= 2 &&
+      !hasNonEquityBondClasses(initial)
+    )
       return initial.waypoints.map(cloneWaypoint);
     return GLIDE_PATH_PRESETS.vanguard_target_retirement.waypoints.map(
       cloneWaypoint,
@@ -62,6 +78,37 @@ export function WaypointEditor({
 
   const errors = useMemo(() => validateWaypoints(draft), [draft]);
   const canSave = errors.length === 0;
+
+  // Block the editor entirely until the user accepts the 2-class
+  // collapse. This avoids silent data loss on the cash/alts share
+  // of a custom path; the alternative (collapsing into the bond
+  // share at seed time) would silently rewrite the user's intent.
+  //
+  // The early-return must come AFTER all hooks so React's hook-
+  // ordering invariant holds across re-renders (rules-of-hooks).
+  if (initialHasMultiClass && !seededFromMultiClass) {
+    return (
+      <CollapseConsentNotice
+        onCancel={onCancel}
+        onAccept={() => {
+          // Seed with equity-only from the original path, dropping
+          // cash/alts. The user has now opted in to this collapse.
+          if (initial) {
+            setDraft(
+              initial.waypoints.map((w) => ({
+                age: w.age,
+                allocation: {
+                  equity: w.allocation.equity ?? 0,
+                  bond: 1 - (w.allocation.equity ?? 0),
+                },
+              })),
+            );
+          }
+          setSeededFromMultiClass(true);
+        }}
+      />
+    );
+  }
 
   const updateWaypoint = (idx: number, patch: Partial<WaypointEditState>) => {
     setDraft((cur) => {
@@ -249,6 +296,68 @@ type WaypointEditState = {
   age: number;
   equity: number;
 };
+
+/**
+ * True when ANY waypoint in the path carries a class other than
+ * equity/bond with a non-trivial share. The editor's "equity +
+ * bond = 1" model would silently drop those shares on first edit,
+ * so we refuse to seed from such a path without explicit consent.
+ */
+function hasNonEquityBondClasses(gp: GlidePath): boolean {
+  const allowed = new Set(["equity", "bond"]);
+  for (const w of gp.waypoints) {
+    for (const [cls, share] of Object.entries(w.allocation)) {
+      if (allowed.has(cls)) continue;
+      if ((share ?? 0) > 0.001) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Render-blocking notice surfaced when the user opens the editor
+ * against a multi-class custom glide-path. Forces an explicit
+ * choice rather than silently collapsing the cash / commodity /
+ * alts shares to bond.
+ */
+function CollapseConsentNotice({
+  onAccept,
+  onCancel,
+}: {
+  onAccept: () => void;
+  onCancel: () => void;
+}) {
+  return (
+    <div className="mt-3 rounded-md border border-amber-300/40 bg-amber-300/5 p-4">
+      <div className="text-sm font-semibold text-amber-200">
+        Your glide-path includes cash or alts
+      </div>
+      <p className="mt-1 text-[11px] leading-snug text-amber-200/80">
+        This editor only supports equity + bond. Continuing will
+        collapse cash / commodity / alts shares into bond at each
+        waypoint and lose the original detail. Cancel and edit via
+        Presets or the Static Target card to keep multi-class
+        allocations intact.
+      </p>
+      <div className="mt-3 flex gap-2">
+        <button
+          type="button"
+          onClick={onCancel}
+          className="flex-1 rounded-md border border-border-strong bg-bg-elevated px-3 py-2 text-[11px] font-medium text-text-muted active:opacity-70"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          onClick={onAccept}
+          className="flex-1 rounded-md bg-amber-300 px-3 py-2 text-[11px] font-semibold text-bg active:opacity-70"
+        >
+          Continue (lose cash/alts detail)
+        </button>
+      </div>
+    </div>
+  );
+}
 
 function cloneWaypoint(w: GlidePathWaypoint): GlidePathWaypoint {
   return {

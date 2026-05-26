@@ -552,6 +552,45 @@ describe("simulatePath — fixed-nominal freeze (SORR mitigation)", () => {
     );
   });
 
+  it("freeze + extreme variable haircut clamps at 0 (no negative-withdrawal deposit bug)", () => {
+    // Adversarial scenario: a long freeze + 100% haircut on a large
+    // variable slice can compute a negative `withdrawal` (freeze
+    // decays withdrawal below the haircut subtraction). Without a
+    // clamp, the engine would flip the cash-flow sign and SILENTLY
+    // DEPOSIT money into the portfolio during retirement — silently
+    // inflating ending NW and overstating plan survival. This test
+    // pins the clamp: extreme inputs produce zero-withdrawal years,
+    // not negative-withdrawal deposits.
+    const path = simulatePath(
+      {
+        startingNetWorthUSD: 1_000_000,
+        allocation: ALL_CASH,
+        annualSpendUSD: 30_000,
+        retirementHorizonYears: 3,
+        spending: {
+          variableUSD: 50_000, // larger than annualSpend
+          haircut: { rate: 1.0, onlyAfterDownYear: false },
+          fixedNominalFreeze: { years: 3, assumedInflationRate: 0.03 },
+        },
+      },
+      ALL_CASH_REAL_ZERO,
+      ALL_CASH_REAL_ZERO,
+      ALL_CASH_REAL_ZERO,
+      ALL_CASH_REAL_ZERO,
+      ALL_CASH_REAL_ZERO,
+      "clamp",
+    );
+    // With clamp: every year's net withdrawal is 0. NW stays at $1M
+    // for the whole horizon (0% real returns + 0 spend).
+    expect(path.trajectory[1]).toBeCloseTo(1_000_000, 0);
+    expect(path.trajectory[2]).toBeCloseTo(1_000_000, 0);
+    expect(path.trajectory[3]).toBeCloseTo(1_000_000, 0);
+    // Specifically: must NOT exceed the starting NW. If the clamp
+    // were missing, the negative-withdrawal cash flow would ADD to
+    // NW and this would be > 1M.
+    expect(path.trajectory[1]).toBeLessThanOrEqual(1_000_000);
+  });
+
   it("composes with variable-haircut — both adjustments apply", () => {
     // Engine contract: the freeze is multiplicative on the BASE
     // spend, applied first. Then the haircut subtracts the

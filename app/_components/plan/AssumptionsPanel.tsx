@@ -152,7 +152,7 @@ const fields: Field[] = [
     toDisplay: (n) => Math.round(n ?? 0),
     fromDisplay: (n) => Math.max(0, Math.min(15, Math.round(n))),
     helpFor: () =>
-      "Freeze withdrawals at their year-0 nominal amount for the first N retirement years (instead of inflating with CPI). Cuts cumulative real spend during the early-retirement SORR danger zone — 10 years at 3% inflation trims ~14% of one year's real spend, which buys meaningful tail-risk relief. 0 = disabled (default).",
+      "Freeze withdrawals at their year-0 nominal amount for the first N retirement years (instead of inflating with CPI). Cuts cumulative real spend during the early-retirement SORR danger zone — 10 years at 3% inflation trims ~14% of one year's real spend, which buys meaningful tail-risk relief. 0 = disabled (default). Applied in historical Monte Carlo only; the deterministic Independence projection assumes the post-freeze real-flat baseline.",
   },
   {
     // Variable-share input — companion to the haircut slider.

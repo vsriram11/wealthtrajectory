@@ -296,6 +296,21 @@ describe("monteCarlo.ts — yearly + ending percentile ordering", () => {
    * percentile sort. The structural invariant (lower-rank ≤
    * higher-rank) still holds modulo the float slack.
    */
+  /**
+   * Relative-tolerance close-enough check. Vitest's toBeCloseTo
+   * uses ABSOLUTE precision, which fails on the scale of NW
+   * percentiles ($100k-$10M). expectRelClose accepts a 1-part-in-
+   * 10^N tolerance and floors at an epsilon for near-zero values.
+   */
+  function expectRelClose(actual: number, expected: number, relTol: number) {
+    const slack = Math.max(1e-6, Math.abs(expected) * relTol);
+    if (Math.abs(actual - expected) > slack) {
+      throw new Error(
+        `expectRelClose failed: ${actual} != ${expected} (slack ${slack})`,
+      );
+    }
+  }
+
   function expectOrdered(label: string, values: number[]) {
     for (let i = 0; i < values.length - 1; i++) {
       const lo = values[i];
@@ -467,17 +482,27 @@ describe("monteCarlo.ts — yearly + ending percentile ordering", () => {
               },
             },
           });
-          expect(withZeroFreeze.successRate).toBeCloseTo(
-            baseline.successRate,
-            10,
-          );
-          expect(withZeroFreeze.endingNetWorthPercentiles.p50).toBeCloseTo(
+          // toBeCloseTo's precision arg is ABSOLUTE (±10^-precision),
+          // which is far too tight for NW percentiles in the
+          // $100k-$10M range. Use RELATIVE tolerance via
+          // Math.abs(a - b) <= max(epsilon, |b| * relTol). With
+          // relTol = 1e-9, two paths must agree to 9 significant
+          // digits — tight enough that any real divergence (a bug
+          // re-introducing the freeze decay when years=0) breaks the
+          // test, loose enough that FP-reordering refactors don't.
+          const RELTOL = 1e-9;
+          expect(
+            Math.abs(withZeroFreeze.successRate - baseline.successRate),
+          ).toBeLessThanOrEqual(1e-12);
+          expectRelClose(
+            withZeroFreeze.endingNetWorthPercentiles.p50,
             baseline.endingNetWorthPercentiles.p50,
-            1,
+            RELTOL,
           );
-          expect(withZeroFreeze.endingNetWorthPercentiles.p5).toBeCloseTo(
+          expectRelClose(
+            withZeroFreeze.endingNetWorthPercentiles.p5,
             baseline.endingNetWorthPercentiles.p5,
-            1,
+            RELTOL,
           );
         },
       ),

@@ -146,6 +146,27 @@ export function parseImport(text: string): ExportPayload {
   ) {
     coerced.incomeStreams = [];
   }
+  // Per-stream NaN-safety on import. The slice's coerceWritableFields
+  // only runs on UI-driven add/update — direct import / Drive
+  // hydration bypasses it. Strip non-finite annualUSD so a corrupted
+  // payload (or a payload that survived a `JSON.stringify` Infinity
+  // round-trip-as-null) can't poison downstream cash-flow accumulators.
+  // Signed values are preserved; only NaN / Infinity / non-number are
+  // coerced to 0 (matches the slice contract).
+  if (Array.isArray(coerced.incomeStreams)) {
+    coerced.incomeStreams = (coerced.incomeStreams as unknown[]).map((s) => {
+      if (s == null || typeof s !== "object") return s;
+      const stream = s as Record<string, unknown>;
+      if (
+        stream.annualUSD != null &&
+        (typeof stream.annualUSD !== "number" ||
+          !Number.isFinite(stream.annualUSD))
+      ) {
+        return { ...stream, annualUSD: 0 };
+      }
+      return stream;
+    });
+  }
   if (coerced.goals !== undefined && !Array.isArray(coerced.goals)) {
     coerced.goals = [];
   }

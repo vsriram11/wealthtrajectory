@@ -599,7 +599,14 @@ export function simulatePath(
           1 + assumedInflationRate,
           yearsIntoRetirement,
         );
-        if (decay > 0) withdrawal = withdrawal / decay;
+        // Defensive: pathological inflation rates (≤ -1, imported
+        // from corrupted Drive data despite UI bounds) would make
+        // 1 + r = 0 → decay = 0 → divide-by-zero → Infinity. Same
+        // for non-finite values. Engine NaN-safety contract says
+        // bad inputs degrade to no-op, not poison downstream.
+        if (Number.isFinite(decay) && decay > 0) {
+          withdrawal = withdrawal / decay;
+        }
       }
     }
     if (inputs.spending && y >= yearsPre) {
@@ -609,6 +616,16 @@ export function simulatePath(
         : true;
       if (fires) withdrawal -= variableUSD * haircut.rate;
     }
+    // Clamp at 0. The fixed-nominal freeze + a large variable haircut
+    // can compose to a negative `withdrawal`, which would flip the
+    // cash-flow sign (negative-withdrawal becomes a positive deposit
+    // in `cf = -withdrawal + income`). Engine should treat that as
+    // "user took no draw this year," not "the simulator deposited
+    // money into the portfolio." A user who configured a 100%
+    // variable-haircut with a deep freeze decay is asking for "as
+    // little spend as the haircut allows," not auto-saving. Clamp at
+    // 0 makes the floor explicit.
+    if (withdrawal < 0) withdrawal = 0;
 
     // Per-year income offset (consulting, pension, Social
     // Security, rental). Real dollars; ADDED to cash flow each
