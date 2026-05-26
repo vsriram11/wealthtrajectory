@@ -84,10 +84,19 @@ describe("runWithdrawalSequence — sequencing", () => {
         startingAge: 50, // no RMD
       }),
     );
-    // Year 0: gross 75k. Pretax has 30k → drains pretax to 0,
-    // remaining 45k from Roth.
+    // Year 0: target NET 60k at t=0.2. Pretax has 30k available.
+    // Drain it fully: gross 30k contributes 24k net (taxed at 20%).
+    // Remaining net needed: 60k − 24k = 36k. Roth is untaxed →
+    // draw 36k literally. Total withdrawn: 30k pretax + 36k Roth
+    // = 66k gross, 24k tax → 42k... wait, that doesn't work.
+    // Pretax 30k × 0.8 = 24k net. Roth 36k = 36k net. Total
+    // net = 24 + 36 = 60k = target. ✓
+    //
+    // The PRIOR over-grossed math drew 45k from Roth (was: $75k
+    // gross / target / regardless of bucket tax). That was a bug:
+    // Roth doesn't need grossing. Now the math is correct.
     expect(r.rows[0].withdrawalsByBucket.pretax).toBeCloseTo(30_000, 0);
-    expect(r.rows[0].withdrawalsByBucket.roth).toBeCloseTo(45_000, 0);
+    expect(r.rows[0].withdrawalsByBucket.roth).toBeCloseTo(36_000, 0);
   });
 });
 
@@ -214,16 +223,15 @@ describe("runWithdrawalSequence — tax math", () => {
         realCAGRByBucket: { taxable: 0, pretax: 0, roth: 0, hsa: 0 },
       }),
     );
-    // With tax=30% but only Roth withdrawals, taxesPaid should be 0.
-    // Wait — the engine computes gross = net/(1-tax) and then taxes
-    // (taxable + pretax) only. Gross from Roth alone = 50k/0.7 ≈ 71.4k.
-    // tax on Roth = 0, so net achieved = 71.4k, which is MORE than 50k target.
-    // This is a known simplification: gross is sized for the worst-case
-    // mix; Roth-only ends up "tax-free overdraw" — the user effectively
-    // saves on tax. That's the correct economic answer.
+    // With Roth-only assets, the engine should NOT gross-up the
+    // withdrawal — Roth contributes its literal value as net spend.
+    // For a $50k net target with 100% Roth assets: draw exactly $50k,
+    // pay $0 tax. The PRIOR bug grossed up uniformly (regardless of
+    // bucket) and drew $71.4k — silently over-depleting Roth.
     expect(r.rows[0].taxesPaidUSD).toBeCloseTo(0, 1);
-    // Roth withdrawn = full gross = 50k / 0.7 = ~71.4k.
-    expect(r.rows[0].withdrawalsByBucket.roth).toBeCloseTo(71_429, -1);
+    expect(r.rows[0].withdrawalsByBucket.roth).toBeCloseTo(50_000, 0);
+    // Sanity: net spend achieved exactly hits target (no over-draw).
+    expect(r.rows[0].netSpendAchievedUSD).toBeCloseTo(50_000, 0);
   });
 
   it("totalTaxesPaidUSD accumulates correctly across years", () => {
