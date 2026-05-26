@@ -15,6 +15,8 @@ import {
 } from "@/lib/projection/monteCarlo";
 import { computePortfolio } from "@/lib/portfolio/portfolio";
 import { computeLeveragedEquityBuckets } from "@/lib/portfolio/leveragedEquity";
+import { ageHousehold } from "@/lib/portfolio/futureAllocation";
+import { projectIndependence } from "@/lib/projection/independence";
 import {
   activeMemberIds,
   householdNetWorth,
@@ -166,9 +168,41 @@ export function HistoricalMonteCarloCard() {
   // glide-target snap.
   const [rebalance, setRebalance] = useState<"annual" | "none">("annual");
 
+  // Project the household forward to the date the user is expected
+  // to reach the Independence target — then derive allocation from
+  // THAT composition, not today's. This is what makes a CAGR-only
+  // scenario actually move the MC numbers: different per-holding
+  // CAGRs produce different growth trajectories, so by the time the
+  // user hits target the mix is different (e.g. a "stocks +2pt"
+  // scenario ends up more equity-heavy at retirement than today's
+  // 60/40 mix would suggest). The sim runs at the target NW, so its
+  // allocation should reflect target-date composition.
+  //
+  // Edge cases:
+  //   - Already at/past target (months == 0) → use today's mix.
+  //   - Unreachable target (null) → use today's mix; the MC is still
+  //     useful as "if I magically got there, would I survive?" — but
+  //     scenario CAGR effects won't propagate here (correct: the
+  //     plan doesn't reach the target either).
+  //   - Below target → age the scoped household by monthsToTarget/12
+  //     years. ageHousehold uses each holding's expectedRealCAGR
+  //     (already scenario-merged through useActiveProjection), so
+  //     scenarios cascade in automatically.
+  const monthsToTarget = useMemo(
+    () =>
+      projectIndependence(scopedHousehold, effective).monthsToIndependence,
+    [scopedHousehold, effective],
+  );
+  const yearsToTarget =
+    monthsToTarget != null && monthsToTarget > 0 ? monthsToTarget / 12 : 0;
+  const projectedHousehold = useMemo(() => {
+    if (yearsToTarget <= 0) return scopedHousehold;
+    return ageHousehold(scopedHousehold, yearsToTarget);
+  }, [scopedHousehold, yearsToTarget]);
+
   const portfolio = useMemo(
-    () => computePortfolio(scopedHousehold),
-    [scopedHousehold],
+    () => computePortfolio(projectedHousehold),
+    [projectedHousehold],
   );
   // Detect whether the user has any mortgaged RE in the current
   // scope. Damodaran's RE series is UNLEVERED price return — for a
@@ -242,13 +276,21 @@ export function HistoricalMonteCarloCard() {
   // applied to the deleveraging at the user's retirement tax rate
   // and SUBTRACTED from starting NW for the MC. Models the realistic
   // cost of restructuring a leveraged portfolio at retirement.
+  // Leveraged-ETF deleveraging tax is computed against the holdings
+  // as they exist AT retirement (projectedHousehold), not today —
+  // matches the rest of the card's "MC starts at target date"
+  // semantics. With a 20-year accumulation horizon, leveraged ETFs
+  // can balloon vs cost basis, so the tax hit on a +2pt-CAGR scenario
+  // is materially larger than on a baseline. Routing this through the
+  // projected household is what the user observed differing across
+  // scenarios already.
   const leveragedBuckets = useMemo(
     () =>
       computeLeveragedEquityBuckets(
-        scopedHousehold,
+        projectedHousehold,
         effective.retirementTaxRate,
       ),
-    [scopedHousehold, effective.retirementTaxRate],
+    [projectedHousehold, effective.retirementTaxRate],
   );
   // Decompose equity into face values to recompose post-tax.
   // `regular1xEquityUSD` is the equity that's neither recognized 2x
@@ -747,7 +789,10 @@ export function HistoricalMonteCarloCard() {
               nominal/CPI mixing.
             </li>
             <li>
-              <span className="text-text">Allocation inferred from your portfolio:</span>{" "}
+              <span className="text-text">
+                Allocation inferred from your portfolio
+                {yearsToTarget > 0 && " AT target date"}:
+              </span>{" "}
               {(allocation.stocksFraction * 100).toFixed(0)}% stocks /{" "}
               {(allocation.bondsFraction * 100).toFixed(0)}% bonds /{" "}
               {(allocation.cashFraction * 100).toFixed(0)}% cash
@@ -777,6 +822,22 @@ export function HistoricalMonteCarloCard() {
               )}
               .
             </li>
+            {yearsToTarget > 0 && (
+              <li>
+                <span className="text-text">
+                  Composition projected forward {yearsToTarget.toFixed(1)} yrs
+                  to target date.
+                </span>{" "}
+                The MC sim starts at your target NW, so the allocation it
+                uses reflects what the portfolio will look like AT
+                target — each holding aged at its own expected real
+                CAGR, contributions compounded in, liabilities amortized.
+                This is why scenario CAGR / contribution overrides shift
+                the MC results: they change the growth trajectory and
+                therefore the at-retirement mix, even though today&apos;s
+                holdings are unchanged.
+              </li>
+            )}
             {rebalance === "annual" ? (
               glidePathActive ? (
                 <li>
