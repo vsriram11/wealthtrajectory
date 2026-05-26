@@ -22,6 +22,7 @@ import { DataIO } from "./_components/data/DataIO";
 import { DataPageExtras } from "./_components/shell/DataPageExtras";
 import { EncryptionCard } from "./_components/data/EncryptionCard";
 import { DrawdownPhasesCard } from "./_components/projection/DrawdownPhasesCard";
+import { BackupDiscoverabilityBanner } from "./_components/data/BackupDiscoverabilityBanner";
 import { GoogleSyncCard } from "./_components/data/GoogleSyncCard";
 import { PlanPage } from "./_components/shell/PlanPage";
 import { ProjectionsPage } from "./_components/shell/ProjectionsPage";
@@ -92,6 +93,7 @@ export default function Home() {
       <EncryptionUnlockBanner />
       <SyncShrinkageBanner />
       <GlobalSyncBanner />
+      <BackupDiscoverabilityBanner />
       <MemberFilter />
       {page === "home" && (
         <>
