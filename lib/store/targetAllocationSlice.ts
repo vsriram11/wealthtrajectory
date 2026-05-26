@@ -14,7 +14,7 @@
  * computations.
  */
 
-import type { GlidePath } from "@/lib/portfolio/glidePath";
+import { normalizeGlidePath, type GlidePath } from "@/lib/portfolio/glidePath";
 import type { TargetAllocation } from "@/lib/portfolio/targetAllocation";
 
 export type TargetAllocationSliceState = {
@@ -37,6 +37,11 @@ export function createTargetAllocationSliceActions(
 ): TargetAllocationSliceActions {
   return {
     setTargetAllocation: (target) => set({ targetAllocation: target }),
-    setGlidePath: (gp) => set({ glidePath: gp }),
+    // Normalize on every set so any downstream consumer can assume
+    // ascending unique ages — the custom waypoint editor accepts
+    // edits in any order and we don't want every consumer to
+    // re-sort defensively.
+    setGlidePath: (gp) =>
+      set({ glidePath: gp == null ? null : normalizeGlidePath(gp) }),
   };
 }
