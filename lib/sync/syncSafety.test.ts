@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   DriveUnreadableError,
+  SHRINKAGE_GUARDED_ARRAY_COLLECTIONS,
+  SHRINKAGE_GUARDED_MAP_COLLECTIONS,
   checkShrinkage,
   checkShrinkageAgainstDrive,
 } from "@/lib/sync/syncSafety";
@@ -189,5 +191,71 @@ describe("checkShrinkageAgainstDrive: encryption fail-closed", () => {
     const r = await checkShrinkageAgainstDrive(drivePayload, null, empty);
     expect(r).not.toBeNull();
     expect(r!.shrinking).toContain("scenarios");
+  });
+});
+
+/**
+ * Regression suite for the "recovery banner doesn't clear every
+ * shrinkage-guarded collection" bug. The previous bug: the banner
+ * cleared scenarios/goals/budgetItems/healthPlans/healthImportanceWeights
+ * on "Accept Drive (lose local)" but FORGOT incomeStreams. Re-pull
+ * then re-fired the same guard, leaving users stuck.
+ *
+ * The fix routes both the guard and the banner through these
+ * exported constants. These tests pin the invariant that every
+ * collection in the constants list is actually a real shrinkage
+ * vector — if anyone removes a collection from the guard logic
+ * but forgets to update the constants (or vice versa), one of
+ * these tests breaks.
+ */
+describe("SHRINKAGE_GUARDED constants — symmetric coverage", () => {
+  function emptyState() {
+    return {
+      scenarios: [],
+      goals: [],
+      budgetItems: [],
+      incomeStreams: [],
+      healthPlans: [],
+      healthImportanceWeights: {},
+    };
+  }
+
+  it("array collections list includes incomeStreams (regression for the recovery-banner bug)", () => {
+    expect(
+      (SHRINKAGE_GUARDED_ARRAY_COLLECTIONS as readonly string[]).includes(
+        "incomeStreams",
+      ),
+    ).toBe(true);
+  });
+
+  it("every guarded array collection actually triggers checkShrinkage when populated locally and missing from drive", () => {
+    // For each collection in the list, construct a state where Drive
+    // is empty but local has one item of that collection. The guard
+    // must flag THAT collection by name. If we add a collection to
+    // the constant but forget to wire it into the loop, this test
+    // catches it.
+    for (const k of SHRINKAGE_GUARDED_ARRAY_COLLECTIONS) {
+      const populatedLocal = { ...emptyState(), [k]: [{ id: "x" }] };
+      // checkShrinkage compares (drive, current) flagging Drive>0 && current=0.
+      // The inbound-direction test uses the reverse — and is covered
+      // separately in cloudSync's path. Here we test the OUTBOUND
+      // direction: a previously-populated Drive vs an empty current
+      // state should flag the same collection.
+      const r = checkShrinkage(populatedLocal, emptyState());
+      expect(r, `should flag ${k}`).not.toBeNull();
+      expect(r!.shrinking).toContain(k);
+    }
+  });
+
+  it("every guarded map collection actually triggers checkShrinkage when populated", () => {
+    for (const k of SHRINKAGE_GUARDED_MAP_COLLECTIONS) {
+      const populatedLocal = {
+        ...emptyState(),
+        [k]: { someKey: "someValue" },
+      };
+      const r = checkShrinkage(populatedLocal, emptyState());
+      expect(r, `should flag ${k}`).not.toBeNull();
+      expect(r!.shrinking).toContain(k);
+    }
   });
 });

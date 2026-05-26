@@ -186,6 +186,79 @@ Effective exposure ÷ equity. A 2× leveraged ETF has leverage = 2; an
 80%-LTV mortgaged property has leverage ≈ 5×; cash and unlevered equity have
 leverage = 1.
 
+### Recognized 2x equity tickers
+The set `{ SSO, SPUU, QLD }` — daily-reset 2× SPY/Nasdaq LETFs the
+simulator routes to a dedicated `stocks2x` return series (RYTNX-derived
+for 2001-2025, formula-projected for 1928-2000). These positions are
+kept as-is in the stress test (no tax hit, no restructure).
+
+### Rebalance policy (MC stress test)
+Toggle on the historical-MC card with two modes:
+
+- **Annual** (default) — snap to target weights at the start of every
+  year, before returns are applied. The target is the static allocation
+  or the glide-path-resolved per-age allocation when a glide path is
+  configured. Matches Trinity Study / Bengen / cfiresim defaults; the
+  standard convention for retirement-survival research.
+- **None** ("set and forget") — initialize per-class balances at year
+  0 from the static / glide-path-year-0 allocation, then let returns
+  dictate composition. The portfolio drifts based on differential
+  class returns; cash flow is distributed proportionally to current
+  (post-return) weights so cf itself doesn't force a rebalance. When
+  a glide path is configured, only its year-0 waypoint is honored
+  under None — no rebalance means no glide-target snap.
+
+Drift effects over a 30+ year horizon are non-trivial: in stocks-
+outperform sequences, equity drifts up over time and raises both
+expected wealth AND sequence-risk exposure when the next crash
+arrives. Worth running both modes when stress-testing a plan that
+relies on long-duration drift assumptions.
+
+### Capital-efficient multi-asset wrappers
+A class of leveraged ETFs that combine equity with bonds, gold, or
+managed futures in a single product (NTSX 90/60 stocks/bonds, GDE
+90/90 stocks/gold, RSSB 100/100 stocks/bonds, RSST 100/100 stocks/
+managed-futures, NTSI/NTSE/NTSG international variants, AVGE multi-
+asset blend). Designed for long-term holding — their mild leverage
+(1.5×–2×) is offset by diversification across asset classes, so
+they're NOT flagged for the at-retirement deleveraging restructure.
+The simulator decomposes them across per-class return series via
+their composition spec; a defense-in-depth ticker check handles the
+edge case where a user enters one manually without the preset.
+
+### Deleveraging strategy (at-retirement portfolio restructure)
+For non-recognized leveraged equity positions, the historical-MC
+stress test models a realistic retirement-date restructure:
+
+- **3x S&P 500 → 2x S&P** (UPRO, SPXL → SSO/SPUU equivalent). Routes
+  to `stocks2x` bucket post-tax.
+- **3x Nasdaq-100 → 2x Nasdaq-100** (TQQQ → QLD equivalent). Routes
+  to `stocks2x` bucket post-tax. The 2x SPY series is used as the
+  closest long-history proxy.
+- **Other concentrated/sector leverage → 1x broad equity** (SOXL,
+  FAS, NAIL, TNA, TECL, TMF, etc.). Routes to `stocks` (1x) bucket
+  post-tax. Sector-leveraged products have catastrophic multi-decade
+  survival; we can't honestly project them backwards.
+
+The restructure incurs **capital-gains tax** for positions in taxable
+accounts, computed as `value × gainFraction × assumptions.retirementTaxRate`.
+Default `gainFraction` is 1.0 (treat all current value as gain — the
+conservative stress-test assumption since cost basis isn't tracked).
+The total tax hit reduces the MC simulation's starting NW. Tax-
+advantaged accounts (401K / IRA / HSA / Roth-anything / 529 / Trump
+Account) contribute zero tax.
+
+### `stocks2x` projection
+The historical-MC engine's 6th return series. Real-terms annual returns
+for a 2× daily-reset S&P 500 LETF. **Real RYTNX data** 2001-2025
+(CPI-deflated). **Projected** 1928-2000 via OLS-calibrated formula
+`r_2x ≈ 2.0·r + 0.82·r² - 0.05`, where the 0.82 coefficient captures
+daily-reset compounding (geometric bonus in bull years, drag mitigation
+in bear years) and -0.05 captures combined fee + financing-cost drag
+in real terms. Fit RMSE 3.93% / MAE 2.84% on the 25-year calibration
+window. Worst-case years are catastrophic: 1931 ~-69%, 1937 ~-68%,
+1974 ~-64%.
+
 ### Leverage buckets
 The app groups holdings into four buckets for risk visualization:
 - **0–1×** (inclusive): no leverage.

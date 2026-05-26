@@ -39,15 +39,45 @@ export type ShrinkageReport = {
   currentCounts: Partial<Record<Collection | MapCollection, number>>;
 };
 
-const TRACKED_COLLECTIONS: Collection[] = [
+/**
+ * Single source of truth for which ARRAY collections are
+ * shrinkage-guarded. Both the OUTBOUND guard (`checkShrinkage`,
+ * preventing a local-empty payload from wiping Drive on upload)
+ * and the INBOUND guard (`isInboundShrinkage` in cloudSync.ts,
+ * preventing a Drive-empty payload from wiping local on download)
+ * read from this list — so the two directions stay in lockstep
+ * automatically.
+ *
+ * The recovery banner (`SyncShrinkageBanner.tsx`) also imports
+ * this constant to drive its "Accept Drive (lose local)" clear
+ * step. Previously the banner's clear list and the inbound
+ * guard's check list had drifted (banner was missing
+ * `incomeStreams`), which left users in a "Re-pull failed
+ * (shrinkage-blocked)" loop. Driving everything from this one
+ * constant prevents the bug class.
+ *
+ * If you add a new shrinkage-guarded collection: append it here,
+ * ensure the store has the corresponding slice, and confirm the
+ * regression test in `syncSafety.test.ts` still pins the
+ * symmetric invariants.
+ */
+export const SHRINKAGE_GUARDED_ARRAY_COLLECTIONS = [
   "scenarios",
   "goals",
   "budgetItems",
   "incomeStreams",
   "healthPlans",
-];
+] as const satisfies readonly Collection[];
 
-const TRACKED_MAP_COLLECTIONS: MapCollection[] = ["healthImportanceWeights"];
+export const SHRINKAGE_GUARDED_MAP_COLLECTIONS = [
+  "healthImportanceWeights",
+] as const satisfies readonly MapCollection[];
+
+const TRACKED_COLLECTIONS: readonly Collection[] =
+  SHRINKAGE_GUARDED_ARRAY_COLLECTIONS;
+
+const TRACKED_MAP_COLLECTIONS: readonly MapCollection[] =
+  SHRINKAGE_GUARDED_MAP_COLLECTIONS;
 
 /**
  * Compare a parsed Drive payload to the current state. Reports any

@@ -110,6 +110,37 @@ describe("pullFromDrive — pre-flight guards", () => {
     expect(useAppStore.getState().googleUploadScheduled).toBe(true);
   });
 
+  it("force: true bypasses throttle / sync-in-flight / queued-upload checks", async () => {
+    // Used by SyncShrinkageBanner's "Accept Drive (lose local)"
+    // flow. The user has explicitly opted to overwrite local;
+    // a debounced CloudSyncer upload (scheduled by the very
+    // setState that cleared local for the override) would
+    // otherwise re-trigger the throttle check and block the
+    // consent. Regression for the bug where the shrinkage-
+    // recovery banner would loop on "Re-pull failed
+    // (shrinkage-blocked)" because the throttle returned first.
+    const { findBackupFile, downloadBackup } = await import(
+      "@/lib/sync/googleDrive"
+    );
+    (
+      findBackupFile as unknown as ReturnType<typeof vi.fn>
+    ).mockResolvedValue(null); // no Drive backup → "no-backup" result, but
+    // critically that means we got PAST the throttle checks. Existing
+    // test infra mocks Drive responses; what matters here is that
+    // googleUploadScheduled=true + googleSyncing=true don't short-
+    // circuit when force is set.
+    useAppStore.getState().setGoogleSyncState({
+      googleSyncing: true,
+      googleUploadScheduled: true,
+      googleLastSyncAt: Date.now(),
+    });
+    const result = await pullFromDrive(useAppStore, { force: true });
+    // We got past the throttle checks — result is "no-backup" because
+    // findBackupFile returned null, not "throttled".
+    expect(result).toBe("no-backup");
+    void downloadBackup; // referenced for type-only import below
+  });
+
   it("bails 'throttled' when last sync was within throttle window", async () => {
     useAppStore.getState().setGoogleSyncState({
       googleLastSyncAt: Date.now() - 10_000, // 10s ago
@@ -265,6 +296,56 @@ describe("pullFromDrive — main flow", () => {
     // Local scenarios preserved — the WHOLE point of the guard.
     expect(useAppStore.getState().scenarios).toHaveLength(1);
     expect(useAppStore.getState().scenarios[0].id).toBe("sc-local");
+  });
+
+  it("skipShrinkageCheck: true imports the Drive payload anyway, replacing local (Accept Drive recovery)", async () => {
+    // Regression for the bug where SyncShrinkageBanner's "Accept
+    // Drive (lose local)" looped on shrinkage-blocked because
+    // pre-clearing local collections couldn't reliably win the
+    // race against subscribers / timing. The semantic fix is
+    // for the caller to declare consent explicitly via
+    // skipShrinkageCheck, and for pullFromDrive to honor it.
+    findBackupFileMock.mockResolvedValueOnce({
+      id: "file-id",
+      modifiedTime: "2026-05-15T00:00:00Z",
+    });
+    const { exportData } = await import("@/lib/persistence/dataIO");
+    // Drive payload has empty scenarios; local has scenarios.
+    const payload = exportData({
+      household: {
+        id: "h-from-drive",
+        members: [{ id: "m", displayName: "FromDrive" }],
+        accounts: [],
+        liabilities: [],
+      },
+      assumptions: useAppStore.getState().assumptions,
+      scenarios: [],
+    });
+    downloadBackupMock.mockResolvedValueOnce(payload);
+    // Seed local scenarios — without skipShrinkageCheck this WOULD
+    // trip the guard.
+    useAppStore.setState({
+      scenarios: [
+        {
+          id: "sc-local",
+          name: "Local Scenario",
+          color: "#000",
+          createdAt: 0,
+          overrides: {},
+        },
+      ],
+    });
+
+    const out = await pullFromDrive(useAppStore, {
+      skipShrinkageCheck: true,
+    });
+    // Got past the guard and imported Drive's content.
+    expect(out).toBe("ok");
+    expect(useAppStore.getState().googleSyncBlockedReason).toBeNull();
+    // Local scenarios were OVERWRITTEN with Drive's empty array —
+    // exactly the "lose local" semantics the user opted into.
+    expect(useAppStore.getState().scenarios).toEqual([]);
+    expect(useAppStore.getState().household.id).toBe("h-from-drive");
   });
 
   it("returns 'error' when getAccessToken rejects (network / auth failure)", async () => {

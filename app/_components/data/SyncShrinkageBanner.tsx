@@ -37,6 +37,15 @@ export function SyncShrinkageBanner() {
   const keepLocal = async () => {
     setError(null);
     setBusy("keep");
+    // Yield once so React can paint the "Pushing…" state before we
+    // start the heavy crypto + network work. Otherwise the whole
+    // chain runs in one event-handler task and INP (Chrome's
+    // interaction-to-next-paint metric) registers the full delay
+    // as a frozen-UI event on the button — even though the user
+    // got immediate visual feedback intent. Real fix for the
+    // underlying ~1.5s would be moving PBKDF2 to a Web Worker;
+    // this is the cheap shim that buys good INP today.
+    await new Promise<void>((r) => setTimeout(r, 0));
     // Clear the import-shrinkage block so pushToDrive's encryption-
     // block check doesn't see a stale reason. The push helper will
     // re-set if it hits a different problem.
@@ -61,25 +70,38 @@ export function SyncShrinkageBanner() {
       return;
     setError(null);
     setBusy("accept");
-    // Temporarily clear the blocked reason so pullFromDrive
-    // doesn't immediately re-trigger the same guard against the
-    // user's explicit choice.
+    // Yield once so React can paint the "Pulling…" state before we
+    // start the heavy decryption + import work. See `keepLocal`
+    // for the same fix — both buttons trigger PBKDF2-heavy paths
+    // and need the browser to land a paint between the click and
+    // the crypto.
+    await new Promise<void>((r) => setTimeout(r, 0));
+    // Clear the blocked reason so any racing pullFromDrive call
+    // (e.g. tab-resume sync) doesn't immediately re-fire the
+    // banner against the user's explicit choice. Note we do NOT
+    // clear local collections here — that was the old approach,
+    // and it didn't work reliably because the setState mutation
+    // triggered CloudSyncer subscribers + reactivity races that
+    // left localState.incomeStreams populated by the time
+    // pullFromDrive read it. Instead we let pullFromDrive itself
+    // skip the shrinkage check via skipShrinkageCheck below;
+    // importPayload then overwrites local with Drive's payload,
+    // which is the actual semantics of "Accept Drive (lose
+    // local)".
     useAppStore.getState().setGoogleSyncState({
       googleSyncBlockedReason: null,
       googleSyncError: null,
     });
-    // Zero out the local collections so the next pull doesn't
-    // detect "local has data Drive doesn't" again — the user has
-    // explicitly opted to discard local.
-    useAppStore.setState((s) => ({
-      ...s,
-      scenarios: [],
-      goals: [],
-      budgetItems: [],
-      healthPlans: [],
-      healthImportanceWeights: {},
-    }));
-    const result = await pullFromDrive(useAppStore, { silent: true });
+    // Force bypasses the queued-upload throttle so a CloudSyncer-
+    // scheduled push from prior local edits doesn't block this
+    // pull. skipShrinkageCheck lets the inbound guard accept the
+    // smaller-than-local Drive payload — the whole point of
+    // this code path is that the user opted into that.
+    const result = await pullFromDrive(useAppStore, {
+      silent: true,
+      force: true,
+      skipShrinkageCheck: true,
+    });
     setBusy(null);
     if (result !== "ok" && result !== "no-backup") {
       setError(`Re-pull failed (${result}). Local data has been cleared.`);

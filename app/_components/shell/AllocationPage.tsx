@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { AllocationFutureCard } from "@/app/_components/allocation/AllocationFutureCard";
 import { AllocationPanel } from "@/app/_components/allocation/AllocationPanel";
+import { LeveragedAllocationWarningCard } from "@/app/_components/allocation/LeveragedAllocationWarningCard";
 import { GlidePathCard } from "@/app/_components/allocation/GlidePathCard";
 import { PositionsList } from "@/app/_components/allocation/PositionsList";
 import { SectionHeader } from "@/app/_components/ui/SectionHeader";
@@ -95,6 +96,11 @@ function SummaryView() {
   return (
     <>
       <AllocationPanel />
+
+      {/* Surfaces the warning for any non-recognized leveraged equity
+          (TQQQ / UPRO / SOXL etc). Renders nothing when there's no
+          such holding — silent for users without leveraged ETFs. */}
+      <LeveragedAllocationWarningCard />
 
       <SectionHeader
         label="Future composition"

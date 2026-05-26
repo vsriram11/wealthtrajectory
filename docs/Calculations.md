@@ -266,18 +266,95 @@ silently answers a different and less useful question ("can I retire
 that mislead the user.
 
 ### 7.5 Asset-class routing — which return series each bucket gets
-The simulator carries **four** real-return series per year (1928–2025):
+The simulator carries **six** real-return series per year (1928–2025):
 **stocks** (S&P 500), **bonds** (10Y US Treasury total return), **cash**
-(3-mo T-Bill), and **gold** (year-end physical gold price deflated by
-CPI). The user's portfolio is decomposed into these buckets:
+(3-mo T-Bill), **gold** (year-end physical gold price deflated by
+CPI), **real estate** (Case-Shiller-style price-return), and **stocks2x**
+(2x daily-reset SPY LETF — RYTNX-derived for 2001+, formula-projected
+for 1928–2000). The user's portfolio is decomposed into these buckets:
 
 | Portfolio class | Routes to | Notes |
 | --- | --- | --- |
-| Equity (incl. leveraged ETFs) | `stocks` | Face value, not exposure-weighted |
+| Equity (1x and unrecognized-leverage like TQQQ / UPRO / SOXL) | `stocks` | Face value, not exposure-weighted. Non-recognized leveraged ETFs are flattened to 1x for projection purposes — projecting 3x daily-reset behavior backwards across 1929-32 / 1937 / 1973-74 isn't feasible; the UI surfaces a warning. |
+| Equity in SSO / SPUU / QLD | `stocks2x` | Routed to the RYTNX-derived 2x return series. Real data 2001-2025, formula-projected 1928-2000 (RMSE 3.93% on the calibration window). See `LEVERAGED_2X_PROJECTION` for constants. |
 | Bond | `bonds` | All durations / credit grades collapse to 10Y Treasury |
 | Cash | `cash` | T-bills, money-market, checking, savings |
 | Commodity | `gold` | Silver / copper / industrial metals collapse into gold as a stand-in (known approximation) |
-| Crypto + direct RE + private stock + other | `otherFraction`, routed via UI toggle | Default `stocks`; user can pick `cash` for a conservative floor |
+| Direct real estate | `realEstate` | Case-Shiller price-return (no rental yield, no leverage adjustment) |
+| Crypto + private stock + other | `otherFraction`, routed via UI toggle | Default `stocks`; user can pick `cash` for a conservative floor |
+
+The `stocks2x` bucket is a SUBSET of total equity allocation, not an
+addition to it — for a user with 60% equity (of which 20% is SSO), the
+simulator sees `stocksFraction=0.40` + `stocks2xFraction=0.20`, summing
+to the same 0.60 equity exposure but with different return-series
+routing per portion. This preserves face-value invariants while
+modeling the leveraged-portion's catastrophic-year behavior honestly
+(e.g. 2x portfolio in 1931 loses ~69% real in that one year).
+
+#### At-retirement deleveraging of non-recognized leveraged ETFs
+
+3x daily-reset products (UPRO, SPXL, TQQQ, SOXL, FAS, NAIL, TMF, etc.)
+have catastrophic multi-decade survival rates and no defensible
+projection backwards. Rather than just modeling them as 1x equity for
+the stress test (the previous behavior, which silently understated
+their tax cost), the historical-MC engine now models a realistic
+**at-retirement portfolio restructure** for each non-recognized
+leveraged holding.
+
+Capital-efficient multi-asset wrappers — `NTSX` (90/60 stocks/bonds),
+`NTSI` / `NTSE` / `NTSG` (international/EM/global variants), `GDE`
+(90/90 stocks/gold), `RSST` / `RSSY` (100/100 stocks + managed
+futures), `RSSB` (100/100 stocks/bonds), `AVGE` — are intentionally
+**NOT flagged**: their mild leverage is offset by diversification
+across asset classes and they're designed for long-term holding.
+The simulator decomposes them across per-class return series via
+the composition spec. A defense-in-depth ticker check (see
+`MULTI_ASSET_WRAPPER_TICKERS` in `lib/portfolio/leveragedEquity.ts`)
+also handles the edge case where a user enters one manually without
+the preset.
+
+The restructure applies to single-asset leveraged products:
+
+- `UPRO`, `SPXL` (3x S&P 500) → 2x S&P (SSO/SPUU equivalent) → routes
+  to `stocks2x` bucket post-tax
+- `TQQQ` (3x Nasdaq-100) → 2x Nasdaq-100 (QLD equivalent) → routes to
+  `stocks2x` bucket post-tax (RYTNX is the closest long-history proxy;
+  Nasdaq-100 has been more volatile than S&P 500 so the modeled result
+  slightly understates true Nasdaq sequence risk)
+- Everything else leveraged (`SOXL`, `FAS`, `NAIL`, `TNA`, `TECL`,
+  `TMF`, etc.) → 1x broad equity → routes to `stocks` (1x) bucket
+  post-tax
+
+The deleveraging is modeled as a sell + rebuy at retirement. For
+holdings in **taxable** accounts (per `TAX_TREATMENT_BY_CATEGORY`,
+i.e. `BROKERAGE` / `SAVINGS` / `CHECKING` / `CRYPTO`/ `REAL_ESTATE` /
+`OTHER`), this incurs capital-gains tax at the user's configured
+retirement tax rate (`assumptions.retirementTaxRate`, default 20%).
+For holdings in **tax-advantaged** accounts (`401K`/`ROTH_401K`/
+`TRAD_IRA`/`ROTH_IRA`/`HSA`/`FIVE_29`/`TRUMP_ACCOUNT`), the tax is
+zero — the trade happens inside the wrapper.
+
+Cost-basis caveat: the app doesn't track cost basis per holding, so
+the gain fraction defaults to 1.0 (treat all current value as gain).
+This is the conservative stress-test assumption — long-held
+leveraged positions through an accumulation phase typically have very
+high gain-to-basis ratios anyway, and the resulting tax hit is the
+worst case the user actually faces. The MC card surfaces this
+assumption inline when the tax hit is non-zero.
+
+Mathematical effect on the simulator inputs:
+
+- `effectiveStartingNW = startingNW × (1 − taxHitFraction)` where
+  `taxHitFraction = totalTaxHit / portfolio.netWorthUSD`. Scales
+  with what-if startingNW overrides.
+- `stocks2xFraction` includes both recognized 2x (full face) AND
+  post-tax deleveraged 3x SPY/Nasdaq; `stocksFraction` includes
+  regular 1x equity (full face) AND post-tax diversified-to-1x.
+  Bonds, cash, commodity, real-estate fractions unchanged.
+
+Recognized 2x positions (SSO/SPUU/QLD) are NOT touched by the
+deleveraging — they're already at the target leverage, no tax cost,
+no restructure.
 
 Crypto is mapped via the toggle because its return history (2009-on) is
 too short to fit into a 1928-anchored simulator. Direct real estate (vs

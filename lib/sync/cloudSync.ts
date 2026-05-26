@@ -69,57 +69,48 @@ const DEFAULT_THROTTLE_MS = 60 * 1000;
  *     pushes local to Drive, replacing the stale Drive copy) or
  *     accept Drive (acknowledged data loss, manual override).
  */
+// Re-export from syncSafety.ts so the recovery banner has a
+// stable import path. The canonical definition lives in
+// syncSafety.ts because that's the lower-level module that owns
+// the outbound-shrinkage guard; this file owns the inbound
+// (download) guard and inherits the same collection list.
+export {
+  SHRINKAGE_GUARDED_ARRAY_COLLECTIONS,
+  SHRINKAGE_GUARDED_MAP_COLLECTIONS,
+} from "@/lib/sync/syncSafety";
+import {
+  SHRINKAGE_GUARDED_ARRAY_COLLECTIONS,
+  SHRINKAGE_GUARDED_MAP_COLLECTIONS,
+} from "@/lib/sync/syncSafety";
+type ShrinkageGuardedArrayCollection =
+  (typeof SHRINKAGE_GUARDED_ARRAY_COLLECTIONS)[number];
+type ShrinkageGuardedMapCollection =
+  (typeof SHRINKAGE_GUARDED_MAP_COLLECTIONS)[number];
+
 function isInboundShrinkage(
-  drivePayload: {
-    scenarios?: unknown[];
-    goals?: unknown[];
-    budgetItems?: unknown[];
-    incomeStreams?: unknown[];
-    healthPlans?: unknown[];
-    healthImportanceWeights?: Record<string, unknown>;
-  },
-  localState: {
-    scenarios: unknown[];
-    goals: unknown[];
-    budgetItems: unknown[];
-    incomeStreams: unknown[];
-    healthPlans: unknown[];
-    healthImportanceWeights: Record<string, unknown>;
-  },
+  drivePayload: Partial<
+    Record<ShrinkageGuardedArrayCollection, unknown[]>
+  > &
+    Partial<Record<ShrinkageGuardedMapCollection, Record<string, unknown>>>,
+  localState: Record<ShrinkageGuardedArrayCollection, unknown[]> &
+    Record<ShrinkageGuardedMapCollection, Record<string, unknown>>,
 ): { shrinking: string[] } | null {
   const shrinking: string[] = [];
-  const check = <
-    K extends
-      | "scenarios"
-      | "goals"
-      | "budgetItems"
-      | "incomeStreams"
-      | "healthPlans",
-  >(
-    k: K,
-  ) => {
-    const driveLen = Array.isArray(drivePayload[k]) ? drivePayload[k]!.length : 0;
+  for (const k of SHRINKAGE_GUARDED_ARRAY_COLLECTIONS) {
+    const driveArr = drivePayload[k];
+    const driveLen = Array.isArray(driveArr) ? driveArr.length : 0;
     const localLen = localState[k].length;
     if (localLen > 0 && driveLen === 0) shrinking.push(k);
-  };
-  check("scenarios");
-  check("goals");
-  check("budgetItems");
-  check("incomeStreams");
-  check("healthPlans");
-  // Sparse-map collection: N→0 wipe protection on healthImportanceWeights.
-  const driveWeights = drivePayload.healthImportanceWeights;
-  const driveWeightCount =
-    driveWeights &&
-    typeof driveWeights === "object" &&
-    !Array.isArray(driveWeights)
-      ? Object.keys(driveWeights).length
-      : 0;
-  const localWeightCount = Object.keys(
-    localState.healthImportanceWeights,
-  ).length;
-  if (localWeightCount > 0 && driveWeightCount === 0)
-    shrinking.push("healthImportanceWeights");
+  }
+  for (const k of SHRINKAGE_GUARDED_MAP_COLLECTIONS) {
+    const driveMap = drivePayload[k];
+    const driveCount =
+      driveMap && typeof driveMap === "object" && !Array.isArray(driveMap)
+        ? Object.keys(driveMap).length
+        : 0;
+    const localCount = Object.keys(localState[k]).length;
+    if (localCount > 0 && driveCount === 0) shrinking.push(k);
+  }
   return shrinking.length > 0 ? { shrinking } : null;
 }
 
@@ -139,24 +130,58 @@ export async function pullFromDrive(
     silent?: boolean;
     throttle?: boolean;
     throttleMs?: number;
+    /**
+     * Bypass the `googleSyncing` / `googleUploadScheduled` /
+     * throttle-window early-returns. ONLY for explicit user-
+     * consent flows like the shrinkage-recovery banner's
+     * "Accept Drive (lose local)" button, where the user has
+     * already chosen to overwrite local data and any concurrent
+     * upload would be racing the user's intent anyway. Other
+     * callers (AuthHydrator's tab-resume sync, EncryptionCard
+     * unlock) should leave this false so they cooperate with
+     * CloudSyncer's debounce.
+     */
+    force?: boolean;
+    /**
+     * Skip the inbound shrinkage guard (the check that refuses
+     * to import a Drive payload whose collections are smaller
+     * than local). Used by SyncShrinkageBanner's "Accept Drive
+     * (lose local)" — the user has explicitly opted to accept
+     * the smaller Drive payload AND lose any local-only items,
+     * so the guard's protection isn't wanted anymore.
+     *
+     * Critical: without this, no amount of pre-clearing local
+     * collections from the caller side reliably bypasses the
+     * guard, because the consent flow involves enough state
+     * mutations (clearing collections triggers CloudSyncer
+     * subscribers, etc.) that a race can repopulate or hold a
+     * reference to the populated state by the time pullFromDrive
+     * reads it. The semantically-correct fix is to let the
+     * caller declare intent directly.
+     */
+    skipShrinkageCheck?: boolean;
   } = {},
 ): Promise<PullResult> {
   const silent = options.silent ?? false;
   const throttle = options.throttle ?? false;
   const throttleMs = options.throttleMs ?? DEFAULT_THROTTLE_MS;
+  const force = options.force ?? false;
+  const skipShrinkageCheck = options.skipShrinkageCheck ?? false;
 
   const s = store.getState();
   if (!s.user) return "no-backup";
-  if (s.googleSyncing) return "throttled";
-  // Refuse to pull while a CloudSyncer upload is queued or
-  // executing. Otherwise a backgrounded tab whose setTimeout was
-  // throttled could be raced by the resume sync — the pull would
-  // overwrite local edits with stale Drive state, then the
-  // queued upload would push the overwritten payload out.
-  if (s.googleUploadScheduled) return "throttled";
-  if (throttle) {
-    const last = s.googleLastSyncAt ?? 0;
-    if (Date.now() - last < throttleMs) return "throttled";
+  if (!force) {
+    if (s.googleSyncing) return "throttled";
+    // Refuse to pull while a CloudSyncer upload is queued or
+    // executing. Otherwise a backgrounded tab whose setTimeout was
+    // throttled could be raced by the resume sync — the pull would
+    // overwrite local edits with stale Drive state, then the
+    // queued upload would push the overwritten payload out.
+    if (s.googleUploadScheduled) return "throttled";
+    if (throttle) {
+      const last = s.googleLastSyncAt ?? 0;
+      if (Date.now() - last < throttleMs) return "throttled";
+    }
   }
 
   s.setGoogleSyncState({ googleSyncing: true, googleSyncError: null });
@@ -211,26 +236,32 @@ export async function pullFromDrive(
     // class of inadvertent data loss when an upload didn't make
     // it from another device), refuse the import and surface a
     // recovery banner asking the user to choose.
-    const localNow = store.getState();
-    const shrinkage = isInboundShrinkage(parsed, {
-      healthImportanceWeights: localNow.healthImportanceWeights,
-      scenarios: localNow.scenarios,
-      goals: localNow.goals,
-      budgetItems: localNow.budgetItems,
-      incomeStreams: localNow.incomeStreams,
-      healthPlans: localNow.healthPlans,
-    });
-    if (shrinkage) {
-      s.setGoogleSyncState({
-        googleSyncing: false,
-        googleSyncError: `Drive is missing ${shrinkage.shrinking.join(", ")} that you have locally — refused to import. Open the recovery banner to keep local or accept Drive.`,
-        googleSyncBlockedReason: "import-shrinkage",
+    //
+    // Caller can opt out via skipShrinkageCheck — used by the
+    // recovery banner's "Accept Drive (lose local)" path where
+    // the user has explicitly consented to the data loss.
+    if (!skipShrinkageCheck) {
+      const localNow = store.getState();
+      const shrinkage = isInboundShrinkage(parsed, {
+        healthImportanceWeights: localNow.healthImportanceWeights,
+        scenarios: localNow.scenarios,
+        goals: localNow.goals,
+        budgetItems: localNow.budgetItems,
+        incomeStreams: localNow.incomeStreams,
+        healthPlans: localNow.healthPlans,
       });
-      console.warn(
-        "[pullFromDrive] aborted import to prevent data loss",
-        shrinkage,
-      );
-      return "shrinkage-blocked";
+      if (shrinkage) {
+        s.setGoogleSyncState({
+          googleSyncing: false,
+          googleSyncError: `Drive is missing ${shrinkage.shrinking.join(", ")} that you have locally — refused to import. Open the recovery banner to keep local or accept Drive.`,
+          googleSyncBlockedReason: "import-shrinkage",
+        });
+        console.warn(
+          "[pullFromDrive] aborted import to prevent data loss",
+          shrinkage,
+        );
+        return "shrinkage-blocked";
+      }
     }
     s.importPayload({
       household: parsed.household,

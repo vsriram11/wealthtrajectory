@@ -9,6 +9,7 @@ import {
 import {
   HISTORICAL_RETURNS_FIRST_YEAR,
   HISTORICAL_RETURNS_LAST_YEAR,
+  LEVERAGED_2X_REAL_DATA_START_YEAR,
 } from "@/lib/data/historicalReturns";
 import {
   runBootstrap,
@@ -17,6 +18,7 @@ import {
   type SimulationPath,
 } from "@/lib/projection/monteCarlo";
 import { computePortfolio } from "@/lib/portfolio/portfolio";
+import { computeLeveragedEquityBuckets } from "@/lib/portfolio/leveragedEquity";
 import {
   activeMemberIds,
   activeMembers,
@@ -43,6 +45,7 @@ import {
   PercentileBox,
 } from "./historical-mc/fields";
 import { worstPathContext } from "./historical-mc/worstPathContext";
+import { HistoricalReturnsTableModal } from "./HistoricalReturnsTableModal";
 
 /**
  * Historical Monte Carlo card — runs the user's plan against
@@ -171,12 +174,23 @@ export function HistoricalMonteCarloCard() {
       ? ("at_target" as const)
       : ("below_target" as const);
   const [mode, setMode] = useState<"historical" | "bootstrap">("historical");
+  // Reference-data viewer for the underlying historical-MC dataset.
+  // Opened from the "View year-by-year table →" affordance in the
+  // methodology footnote at the bottom of the card.
+  const [historicalTableOpen, setHistoricalTableOpen] = useState(false);
   const [bootstrapPaths, setBootstrapPaths] = useState(2000);
   // How to model the "other alts" bucket (crypto + direct RE +
   // private stock + plain "other"). Stocks is the more aggressive
   // assumption; cash is the conservative floor. Commodity is NOT in
   // this toggle — it has its own historical gold series.
   const [altsAs, setAltsAs] = useState<"stocks" | "cash">("stocks");
+  // Rebalancing policy for the stress test. Default "annual" matches
+  // standard retirement-survival convention (Trinity Study, Bengen,
+  // cfiresim). "none" lets the portfolio drift based on differential
+  // class returns — when a glide path is configured, only year 0 of
+  // the glide path is honored under "none" since no rebalance = no
+  // glide-target snap.
+  const [rebalance, setRebalance] = useState<"annual" | "none">("annual");
 
   const portfolio = useMemo(
     () => computePortfolio(scopedHousehold),
@@ -242,9 +256,71 @@ export function HistoricalMonteCarloCard() {
     portfolio.classes.cryptoShare +
     portfolio.classes.privateStockShare +
     portfolio.classes.otherShare;
+  // Model an at-retirement deleveraging of non-recognized leveraged
+  // ETFs:
+  //   - 3x S&P 500 (UPRO/SPXL) → 2x S&P (SSO/SPUU equivalent) →
+  //     stocks2x bucket post-tax
+  //   - 3x Nasdaq (TQQQ) → 2x Nasdaq (QLD equivalent) → stocks2x
+  //     bucket post-tax
+  //   - Other leveraged (SOXL/FAS/etc.) → 1x broad equity →
+  //     stocks (1x) bucket post-tax
+  // Capital-gains tax (only on holdings in TAXABLE accounts) is
+  // applied to the deleveraging at the user's retirement tax rate
+  // and SUBTRACTED from starting NW for the MC. Models the realistic
+  // cost of restructuring a leveraged portfolio at retirement.
+  const leveragedBuckets = useMemo(
+    () =>
+      computeLeveragedEquityBuckets(
+        scopedHousehold,
+        effective.retirementTaxRate,
+      ),
+    [scopedHousehold, effective.retirementTaxRate],
+  );
+  // Decompose equity into face values to recompose post-tax.
+  // `regular1xEquityUSD` is the equity that's neither recognized 2x
+  // nor leveraged-being-restructured — it stays at full face value.
+  const totalEquityFaceUSD =
+    portfolio.classes.equityShare * portfolio.netWorthUSD;
+  const regular1xEquityUSD = Math.max(
+    0,
+    totalEquityFaceUSD -
+      leveragedBuckets.stocks2xUSD -
+      leveragedBuckets.nonRecognizedLeveragedUSD,
+  );
+  // Bucket dollar amounts going into the MC sim:
+  //   stocks2x = recognized 2x face (unchanged) + post-tax 3x SPY/Nasdaq
+  //   stocks   = regular 1x face (unchanged)  + post-tax other-leveraged
+  const stocks2xBucketUSD =
+    leveragedBuckets.stocks2xUSD +
+    leveragedBuckets.postTaxDeleverageToStocks2xUSD;
+  const stocks1xBucketUSD =
+    regular1xEquityUSD + leveragedBuckets.postTaxDiversifyToStocks1xUSD;
+  // Fractions of pre-tax NW. `resolveWeights` inside the simulator
+  // normalizes these to sum-to-1, so a sub-1 raw sum (the tax-hit
+  // shrinkage) is handled correctly when applied to the post-tax
+  // `effectiveStartingNW` below — net effect: bucket dollars come
+  // out as bucket_face_or_post_tax × (startingNW / netWorthUSD),
+  // which scales correctly with what-if overrides.
+  const stocks2xFraction =
+    portfolio.netWorthUSD > 0
+      ? stocks2xBucketUSD / portfolio.netWorthUSD
+      : 0;
+  const regularStocksFraction =
+    portfolio.netWorthUSD > 0
+      ? stocks1xBucketUSD / portfolio.netWorthUSD
+      : 0;
+  // Tax hit as a fraction of total pre-tax NW. Scales with the
+  // user's startingNW override so what-if scenarios get proportional
+  // tax drag — the assumption is portfolio composition is held
+  // constant across what-if sizing.
+  const taxHitFraction =
+    portfolio.netWorthUSD > 0
+      ? leveragedBuckets.deleveragingTaxHitUSD / portfolio.netWorthUSD
+      : 0;
   const allocation = useMemo(
     () => ({
-      stocksFraction: portfolio.classes.equityShare,
+      stocksFraction: regularStocksFraction,
+      stocks2xFraction,
       bondsFraction: portfolio.classes.bondShare,
       cashFraction: portfolio.classes.cashShare,
       commodityFraction: commodityShare,
@@ -252,7 +328,8 @@ export function HistoricalMonteCarloCard() {
       otherFraction: otherAltsShare,
     }),
     [
-      portfolio.classes.equityShare,
+      regularStocksFraction,
+      stocks2xFraction,
       portfolio.classes.bondShare,
       portfolio.classes.cashShare,
       commodityShare,
@@ -261,7 +338,17 @@ export function HistoricalMonteCarloCard() {
     ],
   );
 
-  const effectiveStartingNW = Math.max(0, startingNW);
+  // Post-tax starting NW. When the user has leveraged ETFs that
+  // the stress test models as deleveraged-at-retirement, the
+  // capital-gains tax on that restructure comes out of starting NW.
+  // When there are no leveraged positions to deleverage (or all
+  // such positions are in tax-advantaged accounts),
+  // `taxHitFraction` is 0 and this reduces to the original
+  // `Math.max(0, startingNW)`.
+  const effectiveStartingNW = Math.max(
+    0,
+    startingNW * (1 - taxHitFraction),
+  );
   const effectiveWR =
     effectiveStartingNW > 0 ? annualSpend / effectiveStartingNW : 0;
 
@@ -322,11 +409,12 @@ export function HistoricalMonteCarloCard() {
         : {}),
     };
     if (mode === "historical") {
-      return runHistoricalSequences(inputs);
+      return runHistoricalSequences(inputs, { rebalance });
     }
     return runBootstrap(inputs, {
       paths: Math.max(100, Math.min(10000, bootstrapPaths)),
       seed: 1, // deterministic — UI feels stable across re-renders
+      rebalance,
     });
   }, [
     effectiveStartingNW,
@@ -344,6 +432,7 @@ export function HistoricalMonteCarloCard() {
     glidePathActive,
     glidePath,
     memberAge,
+    rebalance,
   ]);
 
   const successPct = (result.successRate * 100).toFixed(1);
@@ -453,6 +542,30 @@ export function HistoricalMonteCarloCard() {
               target?&rdquo; — is answered by the Outlook tab.
             </div>
           )}
+          {/* Deleveraging-at-retirement tax hit. Surfaces when the
+              user has non-recognized leveraged ETFs in taxable
+              accounts — the stress test models a retirement-date
+              restructure and applies capital-gains tax at the
+              configured retirement tax rate, reducing the starting
+              NW the sim runs from. Without this annotation, users
+              would see a smaller-than-expected starting NW and
+              wonder why. */}
+          {taxHitFraction > 0 && (
+            <div className="mt-2 rounded-md border border-amber-300/40 bg-amber-300/5 px-2.5 py-1.5 text-[10px] leading-snug text-amber-200">
+              Starting NW reflects a ~
+              <span className="num">
+                {formatUSDCompact(startingNW * taxHitFraction)}
+              </span>{" "}
+              capital-gains tax hit from deleveraging non-2x-SPY
+              leveraged ETFs at retirement (
+              <span className="num">
+                {((effective.retirementTaxRate ?? 0.2) * 100).toFixed(0)}%
+              </span>{" "}
+              retirement tax rate × 100% gain assumption × value in
+              taxable accounts). See the leveraged-allocation warning
+              on the Allocation page for the per-position breakdown.
+            </div>
+          )}
           {effectiveWR > 0.06 && (
             <div className="mt-2 rounded-md border border-amber-300/40 bg-amber-300/5 px-2.5 py-1.5 text-[10px] leading-snug text-amber-200">
               Starting WR is{" "}
@@ -493,7 +606,20 @@ export function HistoricalMonteCarloCard() {
         {worstPath && mode === "historical" && (
           <div className="mt-3 rounded-md border border-amber-300/40 bg-amber-300/5 px-3 py-2 text-[11px] leading-snug text-amber-200">
             Worst start:{" "}
-            <span className="font-semibold">{worstPath.id}</span> →{" "}
+            <span className="font-semibold">{worstPath.id}</span>
+            {/* When the user has 2x exposure and the worst-failure
+                start year predates the real RYTNX data (2001), flag
+                that the 2x return for that sequence came from the
+                projection formula, not direct observation. Keeps
+                the UI honest about what's measured vs modeled. */}
+            {stocks2xFraction > 0 &&
+              Number.isFinite(Number(worstPath.id)) &&
+              Number(worstPath.id) < LEVERAGED_2X_REAL_DATA_START_YEAR && (
+                <span className="ml-1.5 inline-flex items-center rounded border border-amber-300/40 bg-amber-300/10 px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-amber-300">
+                  Projected 2x
+                </span>
+              )}{" "}
+            →{" "}
             {worstPath.survived
               ? `survived but ended at ${formatUSDCompact(worstPath.endingNetWorthUSD)} real`
               : `ran out of money in year ${worstPath.failedAtYear}`}
@@ -588,8 +714,38 @@ export function HistoricalMonteCarloCard() {
           </div>
         )}
 
+        {/* Rebalancing-policy toggle. Default Annual matches standard
+            retirement-survival convention. None lets the portfolio
+            drift — when a glide path is configured, only year 0 is
+            honored under None (no rebalance = no glide-target snap).
+            Both modes go through the same simulator path; the choice
+            is part of the input bundle. */}
+        <div className="mt-3 flex items-center justify-between gap-2 rounded-md border border-border bg-bg-elevated px-3 py-2">
+          <div className="min-w-0 text-[10px] leading-snug text-text-dim">
+            <span className="text-text">Rebalance</span> between
+            asset classes
+          </div>
+          <div className="inline-flex shrink-0 gap-0.5 rounded-full border border-border bg-bg-surface p-0.5">
+            <ModeChip
+              label="Annual"
+              active={rebalance === "annual"}
+              onClick={() => setRebalance("annual")}
+            />
+            <ModeChip
+              label="None"
+              active={rebalance === "none"}
+              onClick={() => setRebalance("none")}
+            />
+          </div>
+        </div>
+
         <div className="mt-3 rounded-md border border-border bg-bg-elevated px-3 py-2 text-[10px] leading-snug text-text-dim">
-          <div className="font-medium text-text">What this is modeling</div>
+          <div className="text-[10px] uppercase tracking-wider text-text-muted">
+            Methodology
+          </div>
+          <div className="font-medium text-text">
+            What the stress test is actually doing
+          </div>
           <ul className="mt-1 space-y-1">
             <li>
               <span className="text-text">Real-terms throughout</span> —
@@ -601,6 +757,12 @@ export function HistoricalMonteCarloCard() {
               {(allocation.stocksFraction * 100).toFixed(0)}% stocks /{" "}
               {(allocation.bondsFraction * 100).toFixed(0)}% bonds /{" "}
               {(allocation.cashFraction * 100).toFixed(0)}% cash
+              {stocks2xFraction > 0.001 && (
+                <>
+                  {" "}/ {(stocks2xFraction * 100).toFixed(0)}% 2x equity
+                  (RYTNX series — real 2001+, projected pre-2001)
+                </>
+              )}
               {commodityShare > 0.001 && (
                 <>
                   {" "}/ {(commodityShare * 100).toFixed(0)}% commodity
@@ -621,23 +783,92 @@ export function HistoricalMonteCarloCard() {
               )}
               .
             </li>
-            {glidePathActive ? (
-              <li>
-                <span className="text-text">Glide path active.</span>{" "}
-                Allocation interpolates per year between your{" "}
-                {glidePath!.waypoints.length} waypoint
-                {glidePath!.waypoints.length === 1 ? "" : "s"} as you
-                age (currently {memberAge}). The percentages shown
-                above are <em>today&apos;s</em> mix; the simulator
-                resolves the actual mix for each future year.
-                Annual rebalancing assumed.
-              </li>
+            {rebalance === "annual" ? (
+              glidePathActive ? (
+                <li>
+                  <span className="text-text">
+                    Glide path active + annual rebalance.
+                  </span>{" "}
+                  Allocation interpolates per year between your{" "}
+                  {glidePath!.waypoints.length} waypoint
+                  {glidePath!.waypoints.length === 1 ? "" : "s"} as
+                  you age (currently {memberAge}). The percentages
+                  shown above are <em>today&apos;s</em> mix; the
+                  simulator resolves the per-year mix and snaps to
+                  it each year (rebalance-to-target — no drift
+                  tracking between rebalances).
+                </li>
+              ) : (
+                <li>
+                  <span className="text-text">
+                    Static allocation + annual rebalance-to-target.
+                  </span>{" "}
+                  The mix above is held constant across the horizon;
+                  the simulator snaps to it every year before applying
+                  that year&apos;s returns (no drift tracking between
+                  rebalances — matches Trinity Study / cfiresim
+                  defaults). Configure a glide path on the Allocation
+                  page and it&apos;ll honor that here instead.
+                </li>
+              )
             ) : (
               <li>
-                <span className="text-text">Static allocation, annual rebalance.</span>{" "}
-                The mix above is held constant across the horizon. If
-                you configure a glide-path on the Allocation page,
-                the simulator will honor it here.
+                <span className="text-text">
+                  Set-and-forget — no rebalancing across the horizon.
+                </span>{" "}
+                Initial weights are{" "}
+                {glidePathActive
+                  ? "drawn from your glide path's age-" +
+                    memberAge +
+                    " waypoint (later waypoints are ignored — no rebalance = no glide-target snap)"
+                  : "your current static allocation"}{" "}
+                and the portfolio drifts based on differential class
+                returns thereafter. Cash flow (spend / contributions)
+                is distributed proportionally to current weights each
+                year so it doesn&apos;t itself force a rebalance.
+                Drift can raise expected wealth in stocks-outperform
+                sequences AND raise sequence-risk exposure when
+                equity grows beyond your target — neither effect is
+                small over a 30+ year horizon.
+              </li>
+            )}
+            <li>
+              <span className="text-text">
+                Mid-year cash-flow timing.
+              </span>{" "}
+              Contributions (pre-retirement) and spend (retirement)
+              are applied at mid-year: a $40K real spend in a −10%
+              year reduces NW by $40K × (1 + −0.05) = $38K, not the
+              full $40K — the unspent half avoids the second half of
+              the drawdown. Matches the deterministic Independence
+              projection.
+            </li>
+            {(leveragedBuckets.stocks2xUSD +
+              leveragedBuckets.postTaxDeleverageToStocks2xUSD >
+              0) && (
+              <li>
+                <span className="text-text">
+                  2x equity routes to the stocks2x return series
+                </span>{" "}
+                — RYTNX-derived real data 2001+, formula-projected
+                pre-2001. Recognized 2x SPY positions (SSO/SPUU/QLD)
+                are kept at face value;{" "}
+                {leveragedBuckets.postTaxDeleverageToStocks2xUSD > 0 &&
+                  "3x SPY/Nasdaq positions (UPRO/SPXL/TQQQ) are modeled as deleveraged to 2x at retirement, post-tax."}
+              </li>
+            )}
+            {leveragedBuckets.deleveragingTaxHitUSD > 0 && (
+              <li>
+                <span className="text-text">
+                  At-retirement deleveraging restructure.
+                </span>{" "}
+                Non-recognized leveraged positions are modeled as
+                restructured at retirement (3x SPY/Nasdaq → 2x, other
+                concentrated leverage → 1x). Capital-gains tax on the
+                restructure (only for positions in taxable accounts)
+                is applied to starting NW at the retirement tax rate
+                — see the amber callout above the success-rate panel
+                for your scenario&apos;s numbers.
               </li>
             )}
             {commodityShare > 0.001 && (
@@ -671,14 +902,29 @@ export function HistoricalMonteCarloCard() {
             )}
             <li>
               <span className="text-text">Data source:</span> Damodaran
-              Jan 2026 refresh (committed at docs/histretSP.xls) —
-              S&amp;P 500, 10Y T-Bond, 3-mo T-Bill, Baa Corp, RE,
-              Gold — CPI-deflated to real returns. Past returns
-              don&apos;t predict future ones.
+              Jan 2026 refresh — S&amp;P 500, 10Y T-Bond, 3-mo T-Bill,
+              Baa Corp, RE, Gold, plus RYTNX-derived 2x SPY (projected
+              pre-2001). CPI-deflated to real returns. Past returns
+              don&apos;t predict future ones.{" "}
+              <button
+                type="button"
+                onClick={() => setHistoricalTableOpen(true)}
+                className="rounded-sm text-accent underline decoration-dotted underline-offset-2 hover:decoration-solid focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/60"
+              >
+                View year-by-year table →
+              </button>
             </li>
           </ul>
         </div>
       </div>
+
+      {/* Year-by-year historical-returns viewer. Renders nothing when
+          closed; the modal manages its own Escape / backdrop dismiss
+          handlers so we don't have to wire them up here. */}
+      <HistoricalReturnsTableModal
+        open={historicalTableOpen}
+        onClose={() => setHistoricalTableOpen(false)}
+      />
     </section>
   );
 }
