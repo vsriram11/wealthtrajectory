@@ -83,9 +83,11 @@ export function BulkHoldingImport() {
       </button>
       {open && (
         <div className="fixed inset-0 z-50">
+          {/* Decorative backdrop — no click-to-close to prevent
+              accidental data loss on an in-progress import. */}
           <div
             className="absolute inset-0 bg-black/60 backdrop-blur-sm"
-            onClick={() => setOpen(false)}
+            aria-hidden="true"
           />
           <div className="absolute inset-x-0 bottom-0 max-h-[92dvh] overflow-y-auto rounded-t-3xl border-t border-border-strong bg-bg-surface pb-10 sm:inset-x-auto sm:left-1/2 sm:top-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 sm:max-w-md sm:rounded-3xl sm:border">
             <div className="px-5 pt-3">

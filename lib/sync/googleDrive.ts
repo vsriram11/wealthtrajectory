@@ -5,6 +5,8 @@
  * created here.
  */
 
+import { encryptString, unwrapBackup } from "@/lib/sync/crypto";
+
 const STATE_FILE_NAME = "wealthtrajectory-real-state.json";
 const QUOTES_FILE_NAME = "wealthtrajectory-quotes.json";
 const SESSION_FILE_NAME = "wealthtrajectory-session.json";
@@ -184,17 +186,30 @@ export type QuoteCache = {
   bySymbol: Record<string, QuoteCacheEntry>;
 };
 
-export async function loadQuoteCache(token: string): Promise<QuoteCache | null> {
+export async function loadQuoteCache(
+  token: string,
+  passphrase: string | null = null,
+): Promise<QuoteCache | null> {
   try {
     const file = await findFile(token, QUOTES_FILE_NAME);
     if (!file) return null;
     const text = await downloadFile(token, file.id);
-    const parsed = JSON.parse(text) as Partial<QuoteCache>;
+    // Decrypt-if-encrypted. The quote cache carries the user's full
+    // ticker list + names + 5y price history — that's enough metadata
+    // to fingerprint the portfolio. The main backup is encrypted with
+    // the user's passphrase; this auxiliary file MUST match the same
+    // promise. `unwrapBackup` handles both fp-enc-v1 envelopes (with
+    // passphrase) and plaintext (back-compat for pre-fix saved files).
+    const plain = await unwrapBackup(text, passphrase);
+    const parsed = JSON.parse(plain) as Partial<QuoteCache>;
     if (parsed && parsed.schema === 1 && parsed.bySymbol) {
       return parsed as QuoteCache;
     }
     return null;
   } catch {
+    // Includes EncryptedRequiresPassphrase when the file is encrypted
+    // but no passphrase was provided — degrade silently to "no cache,"
+    // matching the existing "couldn't fetch from upstream" behavior.
     return null;
   }
 }
@@ -202,8 +217,15 @@ export async function loadQuoteCache(token: string): Promise<QuoteCache | null> 
 export async function saveQuoteCache(
   token: string,
   cache: QuoteCache,
+  passphrase: string | null = null,
 ): Promise<void> {
-  await uploadFile(token, QUOTES_FILE_NAME, JSON.stringify(cache));
+  const plain = JSON.stringify(cache);
+  // Encrypt-if-passphrase-set, mirroring the main backup envelope
+  // (lib/sync/cloudSync.ts pushToDrive). Without this, a user with
+  // encryption enabled silently leaks portfolio composition (ticker
+  // list + 5y prices) on every quote-cache write.
+  const body = passphrase ? await encryptString(plain, passphrase) : plain;
+  await uploadFile(token, QUOTES_FILE_NAME, body);
 }
 
 // Active-session marker ─────────────────────────────────────────────────

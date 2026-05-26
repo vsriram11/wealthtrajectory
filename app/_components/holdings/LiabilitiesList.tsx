@@ -35,8 +35,17 @@ export function LiabilitiesList() {
         </h2>
         <button
           type="button"
-          onClick={() => setCreating(true)}
-          className="rounded-md border border-border-strong bg-bg-elevated px-2.5 py-1 text-[11px] font-medium text-text-muted active:opacity-70 hover:text-text"
+          onClick={() => {
+            if (household.members.length === 0) return;
+            setCreating(true);
+          }}
+          disabled={household.members.length === 0}
+          className="rounded-md border border-border-strong bg-bg-elevated px-2.5 py-1 text-[11px] font-medium text-text-muted active:opacity-70 hover:text-text disabled:cursor-not-allowed disabled:opacity-40"
+          aria-label={
+            household.members.length === 0
+              ? "Add liability (disabled: add a household member first)"
+              : "Add liability"
+          }
         >
           + Add liability
         </button>
@@ -55,8 +64,12 @@ export function LiabilitiesList() {
           </div>
           <button
             type="button"
-            onClick={() => setCreating(true)}
-            className="mt-3 rounded-md border border-accent/40 bg-accent/10 px-3 py-1.5 text-xs font-medium text-accent active:opacity-70"
+            onClick={() => {
+              if (household.members.length === 0) return;
+              setCreating(true);
+            }}
+            disabled={household.members.length === 0}
+            className="mt-3 rounded-md border border-accent/40 bg-accent/10 px-3 py-1.5 text-xs font-medium text-accent active:opacity-70 disabled:cursor-not-allowed disabled:opacity-40"
           >
             Add your first liability
           </button>
@@ -88,10 +101,17 @@ export function LiabilitiesList() {
           ))}
         </ul>
       )}
-      {creating && (
+      {creating && household.members.length > 0 && (
+        // Resolve ownerId: explicit member filter wins; otherwise
+        // pick the first household member. The button is disabled
+        // when there are zero members so this never receives an
+        // empty string in practice — but the gate above plus the
+        // !members.length condition here is defense-in-depth
+        // against corruption of the rollup math by a phantom
+        // empty-string ownerId reaching the store.
         <LiabilityCreator
           onClose={() => setCreating(false)}
-          ownerId={memberId ?? household.members[0]?.id ?? ""}
+          ownerId={memberId ?? household.members[0].id}
         />
       )}
     </section>

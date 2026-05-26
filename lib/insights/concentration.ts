@@ -1,4 +1,9 @@
-import { accountValue, householdNetWorth, type Household } from "@/lib/types";
+import {
+  accountValue,
+  householdNetWorth,
+  isPricedHolding,
+  type Household,
+} from "@/lib/types";
 
 /**
  * Concentration-risk analyzer. Real-world wealth-management red
@@ -89,6 +94,16 @@ export function concentrationFindings(
     >();
     for (const a of household.accounts) {
       for (const h of a.holdings) {
+        // Restrict the "ticker concentration" finding to genuinely
+        // priced holdings (equity / bond / cash / crypto /
+        // commodity / private stock). Real-estate + "other"
+        // holdings have a `name` ("Primary residence", "Vintage
+        // watch") but it isn't a ticker — flagging "Primary
+        // residence is 90% of your portfolio" as a TICKER concern
+        // is a category error. Single-asset RE concentration is
+        // a legitimate concern but belongs under a different
+        // finding kind (out of scope for this fix).
+        if (!isPricedHolding(h)) continue;
         const key = tickerKeyForHolding(
           h as { symbol?: string; name?: string },
         );

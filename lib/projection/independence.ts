@@ -175,18 +175,25 @@ export function projectIndependence(
     // below; negative income simply makes the net withdrawal
     // larger).
     if (independenceMonth === null && monthlyIncome !== 0 && accounts.length > 0) {
-      if (monthlyIncome > 0) {
-        let biggest = accounts[0];
-        for (const a of accounts) if (a.balanceUSD > biggest.balanceUSD) biggest = a;
-        biggest.balanceUSD += monthlyIncome;
-      } else {
+      // Distribute proportionally to current balances — mirrors
+      // the draw path below. Concentrating income in the single
+      // biggest account silently violated the per-account CAGR
+      // assumption: $80k/yr consulting income on a household with
+      // $2M bonds (1.5% real) + $1.5M brokerage (7%) would land
+      // entirely in the brokerage at 7%, vastly overstating
+      // long-run growth on what was supposed to be SAVED, not
+      // PORTFOLIO-PUMPED income.
+      const total = sumAccounts();
+      if (monthlyIncome > 0 && total > 0) {
+        for (const a of accounts) {
+          const share = a.balanceUSD / total;
+          a.balanceUSD += monthlyIncome * share;
+        }
+      } else if (monthlyIncome < 0 && total > 0) {
         const draw = -monthlyIncome;
-        const total = sumAccounts();
-        if (total > 0) {
-          for (const a of accounts) {
-            const share = a.balanceUSD / total;
-            a.balanceUSD = Math.max(0, a.balanceUSD - draw * share);
-          }
+        for (const a of accounts) {
+          const share = a.balanceUSD / total;
+          a.balanceUSD = Math.max(0, a.balanceUSD - draw * share);
         }
       }
       // Signed update: positive contributes, negative subtracts
@@ -261,7 +268,11 @@ export function projectIndependence(
     if (
       independenceMonth !== null &&
       ruinMonthIndex === null &&
-      sumAccounts() <= 0 &&
+      // Use the just-computed `nw` (assets − liabilities), not
+      // raw account balances. A household with $500 left in cash
+      // but a $400k mortgage has nw = −$399,500 and is clearly
+      // ruined; `sumAccounts()` would report $500 and miss it.
+      nw <= 0 &&
       month - independenceMonth > 0
     ) {
       ruinMonthIndex = series.length - 1;

@@ -2,9 +2,9 @@
 
 import { useMemo, useState } from "react";
 import { useAppStore } from "@/lib/store";
+import { useAllocationView } from "@/lib/portfolio/useAllocationView";
 import {
   TAX_TREATMENT_LABELS,
-  filterHousehold,
   taxBucketTotals,
   type Household,
   type TaxTreatment,
@@ -72,12 +72,16 @@ export function TaxBuckets({
    */
   household?: Household;
 } = {}) {
-  const storeHousehold = useAppStore((s) => s.household);
-  const memberId = useAppStore((s) => s.selectedMemberId);
-  const filtered = useMemo(
-    () => householdProp ?? filterHousehold(storeHousehold, memberId),
-    [householdProp, storeHousehold, memberId],
-  );
+  // Use the shared allocation view (rollup → member → liquidity →
+  // scenario → appliedFutureYears) so the household view excludes
+  // members where `includeInRollup === false`. Previously, the
+  // default path used `filterHousehold(storeHousehold, memberId)`
+  // which only filters by member — when memberId was null
+  // (household-aggregate view), excluded-member accounts STILL
+  // contributed to bucket totals, violating the rollup-cascade
+  // contract enumerated in lib/rollupContract.test.ts.
+  const { household: viewHousehold } = useAllocationView();
+  const filtered = householdProp ?? viewHousehold;
   const buckets = useMemo(() => taxBucketTotals(filtered), [filtered]);
   const total = ORDER.reduce((s, t) => s + buckets[t], 0);
 

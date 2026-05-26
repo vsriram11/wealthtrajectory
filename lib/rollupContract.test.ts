@@ -60,6 +60,7 @@ import {
   householdForRollups,
   householdIncomeSum,
   householdNetWorth,
+  taxBucketTotals,
 } from "@/lib/types";
 import {
   filterIncomeStreamsForRollups,
@@ -120,6 +121,15 @@ function rollupSnapshot(streamsAll = useAppStore.getState().incomeStreams) {
         100,
       ),
     }).monthsToIndependence,
+    // Tax-bucket totals from the rollup-filtered household.
+    // Excluding a member with accounts MUST shrink the bucket(s)
+    // that member's accounts contribute to. A pre-rollup-cascade
+    // bug had `taxBucketTotals` callers passing the RAW household,
+    // so excluded-member accounts continued contributing to
+    // bucket totals — silently inflating the TaxBuckets card.
+    // Pin the cascade here.
+    taxBucketTotalsSum: Object.values(taxBucketTotals(filteredHousehold))
+      .reduce((s, v) => s + v, 0),
   };
 }
 
@@ -157,6 +167,14 @@ describe("rollup-include flag — full cascade through every rollup-touching sur
     expect(after.incomeSum!).toBeLessThan(before.incomeSum!);
     // (5) Stream count drops by exactly 1 — Jordan's SS leaves.
     expect(after.streamCount).toBe(before.streamCount - 1);
+    // (5b) Tax-bucket totals shrink — Jordan's accounts STOP
+    // contributing to bucket sums. Regression: the TaxBuckets
+    // card had been computing buckets on the raw household
+    // (not householdForRollups-filtered), inflating bucket
+    // totals when a member was excluded. Pinning the cascade
+    // here means a future caller that forgets `householdForRollups`
+    // breaks this contract test.
+    expect(after.taxBucketTotalsSum).toBeLessThan(before.taxBucketTotalsSum);
     // (6) Income-over-30y total drops — Jordan's SS isn't in
     // the simulator's per-year array anymore.
     expect(after.income60yTotal).toBeLessThan(before.income60yTotal);

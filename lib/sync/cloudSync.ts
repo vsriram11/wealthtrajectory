@@ -244,6 +244,7 @@ export async function pullFromDrive(
       const localNow = store.getState();
       const shrinkage = isInboundShrinkage(parsed, {
         healthImportanceWeights: localNow.healthImportanceWeights,
+        memberAssumptions: localNow.memberAssumptions,
         scenarios: localNow.scenarios,
         goals: localNow.goals,
         budgetItems: localNow.budgetItems,
@@ -394,6 +395,7 @@ export async function pushToDrive(
               incomeStreams: s.incomeStreams,
               healthPlans: s.healthPlans,
               healthImportanceWeights: s.healthImportanceWeights,
+              memberAssumptions: s.memberAssumptions,
             },
           );
           if (shrinkage) {
