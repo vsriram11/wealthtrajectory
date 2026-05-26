@@ -24,6 +24,7 @@ import { EncryptionCard } from "./_components/data/EncryptionCard";
 import { DrawdownPhasesCard } from "./_components/projection/DrawdownPhasesCard";
 import { BackupDiscoverabilityBanner } from "./_components/data/BackupDiscoverabilityBanner";
 import { GoogleSyncCard } from "./_components/data/GoogleSyncCard";
+import { GlossaryPage } from "./_components/shell/GlossaryPage";
 import { PlanPage } from "./_components/shell/PlanPage";
 import { ProjectionsPage } from "./_components/shell/ProjectionsPage";
 import { RothLadderCard } from "./_components/plan/RothLadderCard";
@@ -143,6 +144,7 @@ export default function Home() {
       {page === "allocation" && <AllocationPage />}
       {page === "projections" && <ProjectionsPage />}
       {page === "plan" && <PlanPage />}
+      {page === "glossary" && <GlossaryPage />}
       {page === "data" && (
         <>
           {/*

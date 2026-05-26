@@ -17,6 +17,7 @@ const PAGE_TITLES: Record<PageId, string> = {
   projections: "Projections",
   plan: "Plan",
   data: "Data",
+  glossary: "Glossary",
 };
 
 export function DemoHeader() {

@@ -35,6 +35,11 @@ const NAV: { id: PageId; label: string; sub: string; pro?: boolean }[] = [
     label: "Data",
     sub: "Backup, encryption, members, disclosures",
   },
+  {
+    id: "glossary",
+    label: "Glossary",
+    sub: "Plain-language definitions + sources for every term",
+  },
 ];
 
 export function NavDrawer() {
