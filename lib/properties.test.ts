@@ -565,48 +565,13 @@ describe("monteCarlo.ts — yearly + ending percentile ordering", () => {
     );
   });
 
-  it("bucket policy with up-only stock sequences ≡ annual policy", () => {
-    // Invariant: the bucket-fire trigger requires `stocks[y-1] < 0`.
-    // An up-only sequence never triggers it, so bucket must
-    // behave exactly like annual rebalance. Forcing this via a
-    // synthetic monotone-up dataset isn't simple (the engine
-    // draws from the real historical dataset), but a 1-year
-    // horizon trivially has no firing year (year 0 of retirement
-    // can't read a prior retirement year). Pin THAT here as the
-    // simpler invariant.
-    fc.assert(
-      fc.property(
-        startingNWArb,
-        annualSpendArb,
-        allocationArb,
-        (startingNW, annualSpend, allocation) => {
-          const annual = runHistoricalSequences({
-            startingNetWorthUSD: startingNW,
-            allocation,
-            annualSpendUSD: annualSpend,
-            retirementHorizonYears: 1,
-          });
-          const bucket = runHistoricalSequences(
-            {
-              startingNetWorthUSD: startingNW,
-              allocation,
-              annualSpendUSD: annualSpend,
-              retirementHorizonYears: 1,
-            },
-            { rebalance: "bucket" },
-          );
-          // 1-year horizon: bucket never fires (y > 0 false for
-          // the only retirement year). Must match annual exactly.
-          expectRelClose(
-            bucket.successRate,
-            annual.successRate,
-            1e-9,
-          );
-        },
-      ),
-      { numRuns: 8 },
-    );
-  });
+  // (A "1-year horizon ≡ annual" invariant was considered but is
+  // tautological — `bucketFiresThisYear` requires `y > 0`, so a
+  // 1-year horizon has no firing year by construction. The
+  // engine code path isn't exercised, so the property pins
+  // nothing observable. The zero-cash invariant above + the
+  // point-tests in monteCarlo.test.ts cover the meaningful
+  // bucket-policy cases.)
 });
 
 /* ============================================================ */

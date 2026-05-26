@@ -176,11 +176,16 @@ export function aggregateAssumptions(
   // protection. A mean would dilute one member's 10-year freeze
   // with another's 0 into 5y, which is neither what either member
   // configured nor a meaningful blend. Max preserves opt-in.
-  // Coerced to undefined when nobody opted in so the consumption
-  // site can distinguish "explicit zero" from "unset."
+  //
+  // Include EXPLICIT 0 in the candidate set so a unanimous opt-out
+  // (every member set 0) returns 0 instead of undefined. Without
+  // this, two members each opting out would fall through to the
+  // household default — silently restoring whatever the household
+  // template said. With 0 included: max([0, 0]) = 0 (correct
+  // unanimous opt-out); max([0, 5]) = 5 (opt-in wins).
   const fixedNominalValues = effective
     .map((a) => a.retirementFixedNominalYears)
-    .filter((v): v is number => v != null && Number.isFinite(v) && v > 0);
+    .filter((v): v is number => v != null && Number.isFinite(v) && v >= 0);
   const maxFixedNominalYears =
     fixedNominalValues.length > 0
       ? Math.max(...fixedNominalValues)

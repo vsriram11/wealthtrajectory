@@ -198,7 +198,12 @@ export function parseImport(text: string): ExportPayload {
   const sanitizeFreezeYears = (obj: Record<string, unknown>): void => {
     const v = obj.retirementFixedNominalYears;
     if (v == null) return;
-    if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > 60) {
+    // Range matches the AssumptionsPanel slider (0..15). A payload
+    // outside that range can't round-trip — the slider would
+    // truncate on next save, silently losing the user's number.
+    // Refuse out-of-range values rather than ship a silent
+    // truncation bug.
+    if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > 15) {
       delete obj.retirementFixedNominalYears;
     } else {
       // Round to integer (the slider stores integers; a fractional

@@ -653,6 +653,7 @@ function AssumptionOverrideRow({
           <button
             type="button"
             onClick={onClear}
+            aria-label={`Clear ${label} override (use base)`}
             className="text-[10px] text-text-muted hover:text-text active:opacity-70"
           >
             Use base
@@ -665,6 +666,7 @@ function AssumptionOverrideRow({
             onChange={onChange}
             precision={precision}
             allowNegative={false}
+            ariaLabel={`${label} override`}
             className={`num ${numberFieldClassName} bg-transparent text-right text-xs font-medium outline-none ${
               overridden ? "text-accent" : "text-text"
             }`}

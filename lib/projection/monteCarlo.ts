@@ -731,6 +731,18 @@ export function simulatePath(
         rB -= drawRemaining * (rB / nonCashTotal);
         lB -= drawRemaining * (lB / nonCashTotal);
       }
+      // Clamp non-cash classes BEFORE the income redistribution so
+      // the proportionality math (`sB / totalNow`) sees only non-
+      // negative weights. Without this, a class left slightly
+      // negative by the spillover above would corrupt the income
+      // distribution: `incomeAtMidYear * (-1e-12 / totalNow)`
+      // pushes that class further negative while the offset goes
+      // to nothing. Compounds across years.
+      if (sB < 0) sB = 0;
+      if (bB < 0) bB = 0;
+      if (gB < 0) gB = 0;
+      if (rB < 0) rB = 0;
+      if (lB < 0) lB = 0;
       if (incomeAtMidYear > 0) {
         // Positive income: distribute to ALL classes by current
         // weights.
@@ -767,10 +779,10 @@ export function simulatePath(
           lB -= distRemaining * (lB / nonCashAfter);
         }
       }
-      // Clamp each non-cash class at 0 — the proportional spillover
-      // subtraction can leave one slightly negative if a class went
-      // close to zero through prior compounding. Matches the
-      // bust-clamp pattern in the snap-year branch below.
+      // Final clamp after the negative-income spillover (which
+      // could also leave a class slightly negative through the
+      // proportional subtraction). Cash is already non-negative
+      // from `available = Math.max(0, cB)` upstream.
       if (sB < 0) sB = 0;
       if (bB < 0) bB = 0;
       if (gB < 0) gB = 0;

@@ -84,6 +84,15 @@ export function HistoricalMonteCarloCard() {
   } = useActiveProjection();
   const budgetItems = useAppStore((s) => s.budgetItems);
   const incomeStreams = useAppStore((s) => s.incomeStreams);
+  // Capture the calendar year ONCE per mount via useState
+  // initializer. Reading `new Date().getFullYear()` inside a
+  // render-time useMemo would (a) violate react-hooks/purity
+  // (impure call during render) and (b) make this component's
+  // output date-dependent — a snapshot test would differ across
+  // year boundaries. The session-scope capture is fine: nobody
+  // is going to keep this tab open across New Year's Eve and
+  // expect the income-streams baseYear to roll.
+  const [baseYear] = useState(() => new Date().getFullYear());
 
   // Default the spend from the budget-derived corpus when set;
   // otherwise fall back to (target × SWR) as a sensible starting
@@ -215,13 +224,9 @@ export function HistoricalMonteCarloCard() {
         // covers any realistic Independence path. The engine
         // tolerates a shorter or longer array — extras are ignored,
         // misses default to 0.
-        incomePerYearUSD: incomePerYearUSD(
-          streamsScoped,
-          new Date().getFullYear(),
-          70,
-        ),
+        incomePerYearUSD: incomePerYearUSD(streamsScoped, baseYear, 70),
       }).monthsToIndependence,
-    [scopedHousehold, effective, streamsScoped],
+    [scopedHousehold, effective, streamsScoped, baseYear],
   );
   const yearsToTarget =
     monthsToTarget != null && monthsToTarget > 0 ? monthsToTarget / 12 : 0;
@@ -443,14 +448,19 @@ export function HistoricalMonteCarloCard() {
         // configures both the freeze duration and the assumed
         // inflation on the AssumptionsPanel. When years is 0
         // (default), the simulator no-ops — back-compat.
-        ...((effective.retirementFixedNominalYears ?? 0) > 0
-          ? {
-              fixedNominalFreeze: {
-                years: effective.retirementFixedNominalYears!,
-                assumedInflationRate: effective.expectedInflationRate,
-              },
-            }
-          : {}),
+        ...(((): { fixedNominalFreeze?: {
+          years: number;
+          assumedInflationRate: number;
+        } } => {
+          const yearsRaw = effective.retirementFixedNominalYears;
+          if (yearsRaw == null || yearsRaw <= 0) return {};
+          return {
+            fixedNominalFreeze: {
+              years: yearsRaw,
+              assumedInflationRate: effective.expectedInflationRate,
+            },
+          };
+        })()),
       },
       // Future-income streams pre-computed into the per-year
       // array the simulator consumes. Filtered through the same
@@ -469,7 +479,7 @@ export function HistoricalMonteCarloCard() {
           // ids derived from it match the canonical resolver.
           activeMemberIds(scopedHousehold),
         ),
-        new Date().getFullYear(),
+        baseYear,
         Math.max(1, Math.min(60, horizonYears)),
       ),
       retirementHorizonYears: Math.max(1, Math.min(60, horizonYears)),
@@ -506,6 +516,7 @@ export function HistoricalMonteCarloCard() {
     glidePath,
     memberAge,
     rebalance,
+    baseYear,
   ]);
 
   const successPct = (result.successRate * 100).toFixed(1);

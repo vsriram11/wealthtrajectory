@@ -364,4 +364,78 @@ describe("parseImport defensive coercion (Round-2 hardening)", () => {
     expect(parsed.preferredMemberId).toBe("m1");
     expect(parsed.memberAssumptions?.m1?.targetNetWorthUSD).toBe(2_000_000);
   });
+
+  describe("retirementFixedNominalYears sanitation", () => {
+    // The engine has a NaN-safety guard (decay > 0 && finite) but
+    // UIs (AssumptionsPanel slider, MC card chips) read the field
+    // verbatim. A corrupted payload would surface garbage in the
+    // UI without these import-time coercions.
+    function payloadWith(over: Record<string, unknown>): string {
+      return JSON.stringify({
+        schema: 1,
+        exportedAt: Date.now(),
+        household: baseHousehold,
+        assumptions: { ...baseAssumptions, ...over },
+        scenarios: [],
+      });
+    }
+
+    it("strips negative retirementFixedNominalYears", () => {
+      const parsed = parseImport(payloadWith({ retirementFixedNominalYears: -5 }));
+      expect(parsed.assumptions.retirementFixedNominalYears).toBeUndefined();
+    });
+    it("strips out-of-range (>15) retirementFixedNominalYears", () => {
+      const parsed = parseImport(payloadWith({ retirementFixedNominalYears: 50 }));
+      expect(parsed.assumptions.retirementFixedNominalYears).toBeUndefined();
+    });
+    it("strips NaN retirementFixedNominalYears", () => {
+      // NaN serializes as null through JSON, so test via direct
+      // object → JSON; manual NaN injection via parseImport requires
+      // running through the JSON.parse coercion. Use a string sentinel
+      // that the type guard rejects.
+      const text = JSON.stringify({
+        schema: 1,
+        exportedAt: Date.now(),
+        household: baseHousehold,
+        assumptions: { ...baseAssumptions, retirementFixedNominalYears: "not-a-number" },
+        scenarios: [],
+      });
+      const parsed = parseImport(text);
+      expect(parsed.assumptions.retirementFixedNominalYears).toBeUndefined();
+    });
+    it("rounds fractional retirementFixedNominalYears to integer", () => {
+      const parsed = parseImport(payloadWith({ retirementFixedNominalYears: 3.7 }));
+      expect(parsed.assumptions.retirementFixedNominalYears).toBe(4);
+    });
+    it("preserves a valid in-range value", () => {
+      const parsed = parseImport(payloadWith({ retirementFixedNominalYears: 10 }));
+      expect(parsed.assumptions.retirementFixedNominalYears).toBe(10);
+    });
+    it("sanitizes member-level overrides independently", () => {
+      // One member's override is bad (-5); another is good (7).
+      // Only the bad one gets stripped.
+      const text = JSON.stringify({
+        schema: 1,
+        exportedAt: Date.now(),
+        household: {
+          ...baseHousehold,
+          members: [
+            { id: "m1", displayName: "A" },
+            { id: "m2", displayName: "B" },
+          ],
+        },
+        assumptions: baseAssumptions,
+        scenarios: [],
+        memberAssumptions: {
+          m1: { retirementFixedNominalYears: -5 },
+          m2: { retirementFixedNominalYears: 7 },
+        },
+      });
+      const parsed = parseImport(text);
+      expect(
+        parsed.memberAssumptions?.m1?.retirementFixedNominalYears,
+      ).toBeUndefined();
+      expect(parsed.memberAssumptions?.m2?.retirementFixedNominalYears).toBe(7);
+    });
+  });
 });

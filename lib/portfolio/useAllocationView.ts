@@ -39,7 +39,16 @@ export function useAllocationView(): {
   const appliedFutureYears = useAppStore((s) => s.appliedFutureYears);
 
   const household = useMemo(() => {
-    if (appliedFutureYears == null || appliedFutureYears <= 0) {
+    // NaN-safe early return. The type is `number | null` and the
+    // UI setter doesn't currently produce NaN, but a corrupted
+    // import or future setter bug could — and `ageHousehold(h, NaN)`
+    // poisons every downstream balance via NaN propagation. Treat
+    // NaN identically to null/zero: pass through today's mix.
+    if (
+      appliedFutureYears == null ||
+      !Number.isFinite(appliedFutureYears) ||
+      appliedFutureYears <= 0
+    ) {
       return baseHousehold;
     }
     return ageHousehold(baseHousehold, appliedFutureYears);
