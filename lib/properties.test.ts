@@ -431,6 +431,59 @@ describe("monteCarlo.ts — yearly + ending percentile ordering", () => {
       { numRuns: 8 },
     );
   });
+
+  it("fixedNominalFreeze.years=0 produces identical output to today's engine", () => {
+    // Back-compat invariant for the SORR-mitigation feature.
+    // When the freeze duration is 0, the engine must behave
+    // exactly as it did pre-feature — same successRate, same
+    // percentile bands. Without this property pinned, a future
+    // refactor of the freeze branch could subtly shift baseline
+    // results (e.g. divide-by-1 floating-point reordering) and
+    // every historical projection in the wild would drift.
+    fc.assert(
+      fc.property(
+        startingNWArb,
+        annualSpendArb,
+        horizonArb,
+        allocationArb,
+        (startingNW, annualSpend, horizonYears, allocation) => {
+          const baseline = runHistoricalSequences({
+            startingNetWorthUSD: startingNW,
+            allocation,
+            annualSpendUSD: annualSpend,
+            retirementHorizonYears: horizonYears,
+          });
+          const withZeroFreeze = runHistoricalSequences({
+            startingNetWorthUSD: startingNW,
+            allocation,
+            annualSpendUSD: annualSpend,
+            retirementHorizonYears: horizonYears,
+            spending: {
+              variableUSD: 0,
+              haircut: { rate: 0, onlyAfterDownYear: false },
+              fixedNominalFreeze: {
+                years: 0,
+                assumedInflationRate: 0.03,
+              },
+            },
+          });
+          expect(withZeroFreeze.successRate).toBeCloseTo(
+            baseline.successRate,
+            10,
+          );
+          expect(withZeroFreeze.endingNetWorthPercentiles.p50).toBeCloseTo(
+            baseline.endingNetWorthPercentiles.p50,
+            1,
+          );
+          expect(withZeroFreeze.endingNetWorthPercentiles.p5).toBeCloseTo(
+            baseline.endingNetWorthPercentiles.p5,
+            1,
+          );
+        },
+      ),
+      { numRuns: 8 },
+    );
+  });
 });
 
 /* ============================================================ */

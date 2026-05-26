@@ -397,6 +397,18 @@ export function HistoricalMonteCarloCard() {
           rate: haircutRate,
           onlyAfterDownYear: haircutOnDownYearOnly,
         },
+        // Fixed-nominal freeze (SORR mitigation). The user
+        // configures both the freeze duration and the assumed
+        // inflation on the AssumptionsPanel. When years is 0
+        // (default), the simulator no-ops — back-compat.
+        ...((effective.retirementFixedNominalYears ?? 0) > 0
+          ? {
+              fixedNominalFreeze: {
+                years: effective.retirementFixedNominalYears!,
+                assumedInflationRate: effective.expectedInflationRate,
+              },
+            }
+          : {}),
       },
       // Future-income streams pre-computed into the per-year
       // array the simulator consumes. Filtered through the same

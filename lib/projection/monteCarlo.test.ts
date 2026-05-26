@@ -417,6 +417,182 @@ describe("simulatePath — dynamic-spending haircut (down-year guardrail)", () =
   });
 });
 
+describe("simulatePath — fixed-nominal freeze (SORR mitigation)", () => {
+  // Reference values used by the freeze tests below — chosen so
+  // the arithmetic is hand-checkable.
+  const ALL_CASH_REAL_ZERO: number[] = [];
+  for (let i = 0; i < 12; i++) ALL_CASH_REAL_ZERO.push(0);
+  const ALL_CASH = { stocksFraction: 0, bondsFraction: 0, cashFraction: 1 };
+
+  it("freeze=0 (or undefined) produces identical results to today's behavior", () => {
+    // Back-compat invariant. The freeze logic must be a no-op
+    // when not configured — otherwise the entire historical
+    // success-rate baseline would shift. Compare two runs with
+    // identical inputs except the freeze configuration: one with
+    // no `spending` field, one with `spending` but `years: 0`.
+    const baseline = simulatePath(
+      {
+        startingNetWorthUSD: 1_000_000,
+        allocation: ALL_CASH,
+        annualSpendUSD: 40_000,
+        retirementHorizonYears: 5,
+      },
+      ALL_CASH_REAL_ZERO,
+      ALL_CASH_REAL_ZERO,
+      ALL_CASH_REAL_ZERO,
+      ALL_CASH_REAL_ZERO,
+      ALL_CASH_REAL_ZERO,
+      "baseline",
+    );
+    const withZero = simulatePath(
+      {
+        startingNetWorthUSD: 1_000_000,
+        allocation: ALL_CASH,
+        annualSpendUSD: 40_000,
+        retirementHorizonYears: 5,
+        spending: {
+          variableUSD: 0,
+          haircut: { rate: 0, onlyAfterDownYear: false },
+          fixedNominalFreeze: { years: 0, assumedInflationRate: 0.03 },
+        },
+      },
+      ALL_CASH_REAL_ZERO,
+      ALL_CASH_REAL_ZERO,
+      ALL_CASH_REAL_ZERO,
+      ALL_CASH_REAL_ZERO,
+      ALL_CASH_REAL_ZERO,
+      "withZero",
+    );
+    // Identical trajectories — the freeze must NOT alter math
+    // when years=0.
+    for (let i = 0; i < baseline.trajectory.length; i++) {
+      expect(withZero.trajectory[i]).toBeCloseTo(baseline.trajectory[i], 6);
+    }
+  });
+
+  it("freeze=3 with 3% inflation decays real withdrawal geometrically over the freeze window", () => {
+    // All-cash, 0% real returns → trajectory math reduces to
+    // "start - cumulative real withdrawal". With $100k base and
+    // 3% assumed inflation, real withdrawals in years 0-2 are:
+    //   y0: 100k / 1.03^0 = 100,000
+    //   y1: 100k / 1.03^1 = 97,087.38
+    //   y2: 100k / 1.03^2 = 94,259.59
+    //   y3: 100k (back to full real)
+    // Cumulative after 4 years: 391,346.97; nw = 1M − 391,346.97 ≈ 608,653.
+    const path = simulatePath(
+      {
+        startingNetWorthUSD: 1_000_000,
+        allocation: ALL_CASH,
+        annualSpendUSD: 100_000,
+        retirementHorizonYears: 4,
+        spending: {
+          variableUSD: 0,
+          haircut: { rate: 0, onlyAfterDownYear: false },
+          fixedNominalFreeze: { years: 3, assumedInflationRate: 0.03 },
+        },
+      },
+      ALL_CASH_REAL_ZERO,
+      ALL_CASH_REAL_ZERO,
+      ALL_CASH_REAL_ZERO,
+      ALL_CASH_REAL_ZERO,
+      ALL_CASH_REAL_ZERO,
+      "freeze-3",
+    );
+    // Per-year ending NW assertions. Tolerance 1 unit accounts
+    // for floating-point drift in the geometric chain.
+    expect(path.trajectory[1]).toBeCloseTo(900_000, 0); // y0 full
+    expect(path.trajectory[2]).toBeCloseTo(802_912.62, 0); // y1
+    expect(path.trajectory[3]).toBeCloseTo(708_653.03, 0); // y2
+    expect(path.trajectory[4]).toBeCloseTo(608_653.03, 0); // y3 full
+  });
+
+  it("freeze produces strictly higher ending NW than no-freeze (same inputs)", () => {
+    // Sanity invariant: a freeze withdraws LESS in early years
+    // (the whole point), so it must leave MORE money at the
+    // end. If this fails, the freeze is being applied with the
+    // wrong sign or to the wrong years.
+    //
+    // Use a SURVIVING plan ($2M / $40k / 30y at 0% real) so both
+    // arms end > 0 — the invariant is meaningless when both
+    // arms ran out of money mid-horizon.
+    const inputs: MonteCarloInputs = {
+      startingNetWorthUSD: 2_000_000,
+      allocation: ALL_CASH,
+      annualSpendUSD: 40_000,
+      retirementHorizonYears: 30,
+    };
+    const noFreeze = simulatePath(
+      inputs,
+      Array(30).fill(0),
+      Array(30).fill(0),
+      Array(30).fill(0),
+      Array(30).fill(0),
+      Array(30).fill(0),
+      "no-freeze",
+    );
+    const withFreeze = simulatePath(
+      {
+        ...inputs,
+        spending: {
+          variableUSD: 0,
+          haircut: { rate: 0, onlyAfterDownYear: false },
+          fixedNominalFreeze: { years: 10, assumedInflationRate: 0.03 },
+        },
+      },
+      Array(30).fill(0),
+      Array(30).fill(0),
+      Array(30).fill(0),
+      Array(30).fill(0),
+      Array(30).fill(0),
+      "with-freeze",
+    );
+    expect(noFreeze.endingNetWorthUSD).toBeGreaterThan(0);
+    expect(withFreeze.endingNetWorthUSD).toBeGreaterThan(
+      noFreeze.endingNetWorthUSD,
+    );
+  });
+
+  it("composes with variable-haircut — both adjustments apply", () => {
+    // Engine contract: the freeze is multiplicative on the BASE
+    // spend, applied first. Then the haircut subtracts the
+    // variable slice. Test: $100k base, 3% inflation, 2-year
+    // freeze, 50% haircut on $40k variable.
+    //
+    // Year 0 (full real, haircut on): 100k - 40k × 0.5 = 80k
+    // Year 1 (freeze decays to 97.087k, haircut on):
+    //   97.087k - 40k × 0.5 = 77.087k
+    //
+    // The haircut is on the FULL variable amount ($40k), not
+    // the frozen one — the implementation deliberately uses the
+    // original variableUSD rather than scaling it through the
+    // freeze, because the haircut intent is "cut by $20k of
+    // variable spend" which is dollar-anchored. If we want a
+    // share-anchored cut (% of frozen variable), that's a
+    // different feature.
+    const path = simulatePath(
+      {
+        startingNetWorthUSD: 1_000_000,
+        allocation: ALL_CASH,
+        annualSpendUSD: 100_000,
+        retirementHorizonYears: 2,
+        spending: {
+          variableUSD: 40_000,
+          haircut: { rate: 0.5, onlyAfterDownYear: false },
+          fixedNominalFreeze: { years: 2, assumedInflationRate: 0.03 },
+        },
+      },
+      Array(2).fill(0),
+      Array(2).fill(0),
+      Array(2).fill(0),
+      Array(2).fill(0),
+      Array(2).fill(0),
+      "compose",
+    );
+    expect(path.trajectory[1]).toBeCloseTo(920_000, 0); // y0
+    expect(path.trajectory[2]).toBeCloseTo(842_912.62, 0); // y1
+  });
+});
+
 describe("simulatePath — haircut mode comparison invariants", () => {
   // High-level invariants that compare the three modes (none /
   // always / down-year-only) on the same inputs. These pin the
