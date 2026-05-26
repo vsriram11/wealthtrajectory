@@ -78,7 +78,7 @@ export function GlossaryPage() {
           href="https://en.wikipedia.org/wiki/Trinity_study"
           target="_blank"
           rel="noopener noreferrer"
-          aria-label="Trinity Study (Wikipedia, opens in new tab)"
+          aria-label="Trinity Study (Wikipedia) (opens in new tab)"
           className="text-accent underline decoration-dotted underline-offset-2 hover:decoration-solid"
         >
           Trinity Study (Wikipedia)

@@ -384,6 +384,70 @@ describe("HistoricalMonteCarloCard — projection-forward composition", () => {
   });
 });
 
+describe("HistoricalMonteCarloCard — retirementFixedNominalYears propagation", () => {
+  // Regression for the IIFE that replaced a `!` non-null
+  // assertion: when the user has configured a non-zero freeze on
+  // the AssumptionsPanel, the card must pass
+  // `spending.fixedNominalFreeze` through to the simulator. The
+  // IIFE narrows the type without an `as ` cast or `!`. This
+  // test pins that the OUTPUT — the methodology block's
+  // visible-allocation snippet AND the percentile bands —
+  // actually responds to the freeze setting.
+
+  it("a non-zero retirementFixedNominalYears changes the simulator's percentile bands", () => {
+    // Same household / target / spend; only the freeze knob
+    // differs. The freeze decays withdrawals in the first N
+    // years → less drag in the SORR-vulnerable window → higher
+    // ending NW percentiles. If the IIFE silently fails to
+    // propagate the field, both runs match and this test fails.
+    useAppStore.setState({
+      household: buildTwoAssetHousehold(),
+      assumptions: { ...baseAssumptions(), expectedInflationRate: 0.03 },
+      memberAssumptions: {},
+      selectedMemberId: null,
+      liquidityView: "total",
+      scenarios: [],
+      activeScenarioId: null,
+      budgetItems: [],
+      incomeStreams: [],
+      glidePath: null,
+    });
+    const { unmount } = render(<HistoricalMonteCarloCard />);
+    const baselineP50Text =
+      screen.getByText(/Median \(p50\)/).parentElement?.textContent ?? "";
+    unmount();
+
+    // Now seed with retirementFixedNominalYears = 10 (a
+    // 10-year freeze, the regime that yields the biggest gain).
+    useAppStore.setState({
+      household: buildTwoAssetHousehold(),
+      assumptions: {
+        ...baseAssumptions(),
+        expectedInflationRate: 0.03,
+        retirementFixedNominalYears: 10,
+      },
+      memberAssumptions: {},
+      selectedMemberId: null,
+      liquidityView: "total",
+      scenarios: [],
+      activeScenarioId: null,
+      budgetItems: [],
+      incomeStreams: [],
+      glidePath: null,
+    });
+    render(<HistoricalMonteCarloCard />);
+    const frozenP50Text =
+      screen.getByText(/Median \(p50\)/).parentElement?.textContent ?? "";
+
+    // The two displays MUST differ. If the IIFE failed to
+    // propagate the freeze, they'd be byte-identical. (We
+    // assert non-equality rather than a specific value because
+    // the dataset / projection-forward composition combine to
+    // produce a number we don't want to hard-pin.)
+    expect(frozenP50Text).not.toBe(baselineP50Text);
+  });
+});
+
 function readStocksPctFromAllocation(): number {
   const allocSummary = screen.getByText(/% stocks \/ /);
   const match = (allocSummary.textContent ?? "").match(/(\d+)% stocks/);

@@ -75,17 +75,19 @@ describe("GlossaryPage — search", () => {
 describe("GlossaryPage — accessibility on external links", () => {
   it("external-source anchors carry an 'opens in new tab' aria-label", () => {
     render(<GlossaryPage />);
-    // A representative entry with a source link. Search for the
-    // Trinity Study via the SWR entry.
+    // The footer + the SWR entry both link to "Trinity Study
+    // (Wikipedia)"; both must carry the "(opens in new tab)"
+    // aria-label so SR users get the out-of-app navigation
+    // warning at either entry point.
     const search = screen.getByLabelText(/Search glossary/i);
     fireEvent.change(search, { target: { value: "Safe Withdrawal" } });
-    // The source link's aria-label includes "opens in new tab"
-    // so screen readers warn about the out-of-app navigation.
-    const trinityLink = screen.getByLabelText(
+    const trinityLinks = screen.getAllByLabelText(
       /Trinity Study \(Wikipedia\) \(opens in new tab\)/,
     );
-    expect(trinityLink).toBeInTheDocument();
-    expect(trinityLink.getAttribute("target")).toBe("_blank");
-    expect(trinityLink.getAttribute("rel")).toContain("noopener");
+    expect(trinityLinks.length).toBeGreaterThanOrEqual(1);
+    for (const link of trinityLinks) {
+      expect(link.getAttribute("target")).toBe("_blank");
+      expect(link.getAttribute("rel")).toContain("noopener");
+    }
   });
 });
