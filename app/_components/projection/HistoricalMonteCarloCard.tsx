@@ -166,7 +166,9 @@ export function HistoricalMonteCarloCard() {
   // class returns — when a glide path is configured, only year 0 of
   // the glide path is honored under "none" since no rebalance = no
   // glide-target snap.
-  const [rebalance, setRebalance] = useState<"annual" | "none">("annual");
+  const [rebalance, setRebalance] = useState<"annual" | "none" | "bucket">(
+    "annual",
+  );
 
   // Project the household forward to the date the user is expected
   // to reach the Independence target — then derive allocation from
@@ -745,12 +747,16 @@ export function HistoricalMonteCarloCard() {
           </div>
         )}
 
-        {/* Rebalancing-policy toggle. Default Annual matches standard
-            retirement-survival convention. None lets the portfolio
-            drift — when a glide path is configured, only year 0 is
-            honored under None (no rebalance = no glide-target snap).
-            Both modes go through the same simulator path; the choice
-            is part of the input bundle. */}
+        {/* Rebalancing-policy toggle.
+              - Annual: snap to target weights every year (Trinity
+                Study / cfiresim convention).
+              - None: set-and-forget; let weights drift.
+              - Bucket: annual rebalance EXCEPT in retirement years
+                following a market drop, where the simulator skips
+                the snap so equity can recover unsold AND draws the
+                spend from the cash slice first. Next up-year's
+                snap refills the cash slice. Requires a non-zero
+                cash allocation to do anything. */}
         <div className="mt-3 flex items-center justify-between gap-2 rounded-md border border-border bg-bg-elevated px-3 py-2">
           <div className="min-w-0 text-[10px] leading-snug text-text-dim">
             <span className="text-text">Rebalance</span> between
@@ -767,8 +773,22 @@ export function HistoricalMonteCarloCard() {
               active={rebalance === "none"}
               onClick={() => setRebalance("none")}
             />
+            <ModeChip
+              label="Bucket"
+              active={rebalance === "bucket"}
+              onClick={() => setRebalance("bucket")}
+            />
           </div>
         </div>
+        {rebalance === "bucket" && allocation.cashFraction < 0.005 && (
+          <div className="mt-2 rounded-md border border-amber-300/40 bg-amber-300/5 px-2.5 py-1.5 text-[10px] leading-snug text-amber-200">
+            Bucket strategy is on but your cash allocation is
+            essentially 0%. With no cash to drain, the policy
+            degrades to standard annual rebalance — set up a
+            small cash slice (5% is typical) for the strategy to
+            actually matter.
+          </div>
+        )}
 
         <div className="mt-3 rounded-md border border-border bg-bg-elevated px-3 py-2 text-[10px] leading-snug text-text-dim">
           <div className="text-[10px] uppercase tracking-wider text-text-muted">
@@ -878,6 +898,26 @@ export function HistoricalMonteCarloCard() {
                   page and it&apos;ll honor that here instead.
                 </li>
               )
+            ) : rebalance === "bucket" ? (
+              <li>
+                <span className="text-text">
+                  Cash-bucket strategy (Kitces &ldquo;bond tent&rdquo; / Pfau).
+                </span>{" "}
+                Annual rebalance in normal years; in retirement
+                years following a market drop, the simulator skips
+                the snap (equity stays unsold through the recovery)
+                and takes the whole withdrawal from the{" "}
+                <span className="num text-text">
+                  {(allocation.cashFraction * 100).toFixed(0)}%
+                </span>{" "}
+                cash slice first — only spilling proportionally to
+                other classes when cash runs dry. Next up-year&apos;s
+                annual snap refills the cash bucket from appreciated
+                equity. SORR-mitigation for multi-year downturns;
+                annual rebalance can still outperform on V-shaped
+                crash-and-bounce sequences (the rebalance-buy-the-
+                dip mechanic), so this isn&apos;t a free lunch.
+              </li>
             ) : (
               <li>
                 <span className="text-text">
