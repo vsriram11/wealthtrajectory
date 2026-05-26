@@ -20,26 +20,33 @@ const nextConfig = {
           },
           // CSP — minimal allowlist that supports the actual
           // outbound surface the app uses:
-          //   - Google sign-in + Drive APIs
+          //   - Google sign-in (GIS loads from accounts.google.com
+          //     AND pulls sub-resources from gstatic.com — both
+          //     allow-listed in script-src; oauth iframes go
+          //     through accounts.google.com)
+          //   - Google Drive APIs (googleapis.com, oauth2)
           //   - Yahoo Finance + Finnhub quote fallbacks
-          //   - inline scripts ONLY for Next.js hydration data
-          //     (avoidable in a future refactor; allowed via
-          //     'unsafe-inline' for now since stripping it
-          //     would require nonce-based hashing wired into
-          //     the Next.js runtime)
-          //   - workers (Web Worker for any future PWA path)
-          // Reports-only equivalent could be added later if we
-          // want to monitor without enforcing.
+          //   - inline scripts for Next.js hydration data
+          //     (avoidable in a future refactor via nonce-based
+          //     hashing wired into the Next.js runtime)
+          //
+          // One Tap is intentionally NOT used (we use the popup
+          // flow), so `frame-ancestors 'none'` is safe — no
+          // sign-in flow renders an iframe pointing back at us.
+          //
+          // CRITICAL: missing `gstatic.com` from script-src breaks
+          // Google sign-in for every user. Verified once at deploy
+          // by signing in on the preview URL.
           {
             key: "Content-Security-Policy",
             value: [
               "default-src 'self'",
-              "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://accounts.google.com",
-              "style-src 'self' 'unsafe-inline'",
-              "img-src 'self' data: https://lh3.googleusercontent.com",
+              "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://accounts.google.com https://*.gstatic.com",
+              "style-src 'self' 'unsafe-inline' https://accounts.google.com",
+              "img-src 'self' data: blob: https://lh3.googleusercontent.com https://*.googleusercontent.com",
               "font-src 'self' data:",
-              "connect-src 'self' https://accounts.google.com https://www.googleapis.com https://oauth2.googleapis.com https://query1.finance.yahoo.com https://query2.finance.yahoo.com https://finnhub.io",
-              "frame-src https://accounts.google.com",
+              "connect-src 'self' https://accounts.google.com https://www.googleapis.com https://oauth2.googleapis.com https://*.googleapis.com https://query1.finance.yahoo.com https://query2.finance.yahoo.com https://finnhub.io",
+              "frame-src https://accounts.google.com https://*.google.com",
               "object-src 'none'",
               "base-uri 'self'",
               "form-action 'self'",
