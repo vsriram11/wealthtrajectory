@@ -9,6 +9,7 @@ import { resolveAssumptionsForMember } from "@/lib/projection/useActiveProjectio
 import {
   filterHousehold,
   type Account,
+  type Assumptions,
   type Holding,
   type ScenarioOverrides,
 } from "@/lib/types";
@@ -16,6 +17,7 @@ import {
   formatMonthYear,
   formatPercent,
   formatUSD,
+  formatUSDCompact,
   formatYearsMonths,
 } from "@/lib/format";
 
@@ -79,9 +81,11 @@ export function ScenariosPanel() {
 
       <p className="mb-3 px-1 text-[11px] text-text-dim">
         Build alternate plans without changing your actual data. Each scenario
-        can override individual account contributions or per-holding expected
-        CAGR. Pick one from the chip row on the Home page to see the projection
-        through that lens.
+        can override individual account contributions, per-holding CAGR, your
+        target NW, or your withdrawal rate. Pick one from the chip row on the
+        Home page to see the projection through that lens — target NW + WR
+        overrides also flow into the Stress test&apos;s starting NW and annual
+        spend defaults.
       </p>
 
       <div className="rounded-2xl border border-border bg-bg-surface">
@@ -102,6 +106,7 @@ export function ScenariosPanel() {
             <ScenarioEditor
               key={run.scenario.id}
               filtered={filtered}
+              assumptions={assumptions}
               scenarioId={run.scenario.id}
               initialOverrides={run.scenario.overrides}
               initialName={run.scenario.name}
@@ -123,6 +128,7 @@ export function ScenariosPanel() {
         {creating && (
           <ScenarioEditor
             filtered={filtered}
+            assumptions={assumptions}
             scenarioId={null}
             initialOverrides={{}}
             initialName="What if I save more"
@@ -296,6 +302,9 @@ function OverrideSummary({ overrides }: { overrides: ScenarioOverrides }) {
   if (overrides.withdrawalRate != null) {
     parts.push(`${formatPercent(overrides.withdrawalRate)} draw`);
   }
+  if (overrides.targetNetWorthUSD != null) {
+    parts.push(`${formatUSDCompact(overrides.targetNetWorthUSD)} target`);
+  }
   return (
     <div className="mt-0.5 text-[11px] text-text-muted">
       {parts.length === 0 ? "No overrides" : parts.join(" · ")}
@@ -305,12 +314,14 @@ function OverrideSummary({ overrides }: { overrides: ScenarioOverrides }) {
 
 function ScenarioEditor({
   filtered,
+  assumptions,
   scenarioId,
   initialOverrides,
   initialName,
   onClose,
 }: {
   filtered: { accounts: Account[] };
+  assumptions: Assumptions;
   scenarioId: string | null;
   initialOverrides: ScenarioOverrides;
   initialName: string;
@@ -332,6 +343,18 @@ function ScenarioEditor({
   const [holdingCAGRs, setHoldingCAGRs] = useState<Record<string, number>>(
     initialOverrides.holdingCAGRs ?? {},
   );
+  // Plan-target overrides. `null` = inherit the user's base assumption;
+  // a number = override. Stored as nullable so the editor distinguishes
+  // "not overridden" from "overridden to the same value as base."
+  // Without that distinction, opening an unedited scenario and saving
+  // it would silently bake the current base value into the override,
+  // freezing it against future plan changes.
+  const [withdrawalRate, setWithdrawalRate] = useState<number | null>(
+    initialOverrides.withdrawalRate ?? null,
+  );
+  const [targetNetWorthUSD, setTargetNetWorthUSD] = useState<number | null>(
+    initialOverrides.targetNetWorthUSD ?? null,
+  );
 
   const submit = () => {
     if (name.trim().length === 0) return;
@@ -347,6 +370,12 @@ function ScenarioEditor({
     }
     if (Object.keys(holdingCAGRs).length > 0) {
       overrides.holdingCAGRs = holdingCAGRs;
+    }
+    if (withdrawalRate !== null) {
+      overrides.withdrawalRate = withdrawalRate;
+    }
+    if (targetNetWorthUSD !== null) {
+      overrides.targetNetWorthUSD = targetNetWorthUSD;
     }
     if (scenarioId) {
       updateScenario(scenarioId, { name: name.trim(), overrides });
@@ -414,6 +443,42 @@ function ScenarioEditor({
           max={5}
           step={0.5}
           format={(v) => `${v >= 0 ? "+" : ""}${v.toFixed(1)}pt`}
+        />
+      </div>
+
+      {/* Plan-target overrides. These are the ONLY scenario fields
+          that flow into the Stress test's Historical Monte Carlo (the
+          sim draws returns from the historical dataset, so CAGR /
+          contribution overrides have no effect there). Surfacing them
+          here lets users build MC-affecting scenarios — without these
+          controls, every scenario was silently a no-op for MC, which
+          felt like a broken cascade. */}
+      <div className="mt-5">
+        <SectionHead
+          title="Plan targets"
+          subtitle="Withdrawal rate + target NW (also flows into Stress test defaults)"
+        />
+        <AssumptionOverrideRow
+          label="Withdrawal rate"
+          baseLabel={formatPercent(assumptions.withdrawalRate)}
+          overridden={withdrawalRate !== null}
+          onClear={() => setWithdrawalRate(null)}
+          value={(withdrawalRate ?? assumptions.withdrawalRate) * 100}
+          onChange={(v) => setWithdrawalRate(v / 100)}
+          suffix="%"
+          precision={2}
+          numberFieldClassName="w-14"
+        />
+        <AssumptionOverrideRow
+          label="Target NW"
+          baseLabel={formatUSD(assumptions.targetNetWorthUSD)}
+          overridden={targetNetWorthUSD !== null}
+          onClear={() => setTargetNetWorthUSD(null)}
+          value={targetNetWorthUSD ?? assumptions.targetNetWorthUSD}
+          onChange={(v) => setTargetNetWorthUSD(v)}
+          prefix="$"
+          precision={0}
+          numberFieldClassName="w-24"
         />
       </div>
 
@@ -538,6 +603,72 @@ function HoldingCagrRow({
         />
         <span className="text-xs text-text-muted">%</span>
       </span>
+    </div>
+  );
+}
+
+/**
+ * Inline editor for a single plan-target override (withdrawal rate or
+ * target NW). Shows the base value as a hint + a NumberField that
+ * activates the override when edited. The "Use base" button clears
+ * the override so the scenario inherits any future changes to the
+ * user's base assumption (a stored numeric override would freeze the
+ * value against future plan tweaks, which is rarely what the user
+ * wants).
+ */
+function AssumptionOverrideRow({
+  label,
+  baseLabel,
+  overridden,
+  onClear,
+  value,
+  onChange,
+  prefix,
+  suffix,
+  precision,
+  numberFieldClassName,
+}: {
+  label: string;
+  baseLabel: string;
+  overridden: boolean;
+  onClear: () => void;
+  value: number;
+  onChange: (v: number) => void;
+  prefix?: string;
+  suffix?: string;
+  precision: number;
+  numberFieldClassName: string;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-md border border-border bg-bg-surface px-3 py-2">
+      <div className="min-w-0">
+        <div className="truncate text-xs font-medium text-text">{label}</div>
+        <div className="mt-0.5 text-[10px] text-text-dim">base {baseLabel}</div>
+      </div>
+      <div className="flex items-center gap-2">
+        {overridden && (
+          <button
+            type="button"
+            onClick={onClear}
+            className="text-[10px] text-text-muted hover:text-text active:opacity-70"
+          >
+            Use base
+          </button>
+        )}
+        <span className="flex items-center gap-1 rounded-md border border-border-strong bg-bg-elevated px-2 py-1">
+          {prefix && <span className="text-xs text-text-muted">{prefix}</span>}
+          <NumberField
+            value={value}
+            onChange={onChange}
+            precision={precision}
+            allowNegative={false}
+            className={`num ${numberFieldClassName} bg-transparent text-right text-xs font-medium outline-none ${
+              overridden ? "text-accent" : "text-text"
+            }`}
+          />
+          {suffix && <span className="text-xs text-text-muted">{suffix}</span>}
+        </span>
+      </div>
     </div>
   );
 }
