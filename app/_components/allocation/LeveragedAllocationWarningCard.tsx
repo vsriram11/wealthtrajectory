@@ -1,7 +1,9 @@
 "use client";
 
 import { useMemo } from "react";
+import { useAppStore } from "@/lib/store";
 import { useActiveProjection } from "@/lib/projection/useActiveProjection";
+import { ageHousehold } from "@/lib/portfolio/futureAllocation";
 import {
   computeLeveragedEquityBuckets,
   type DeleverageStrategy,
@@ -30,13 +32,27 @@ import { formatUSDCompact } from "@/lib/format";
  */
 export function LeveragedAllocationWarningCard() {
   const { household, assumptions } = useActiveProjection();
+  // Honor the AllocationPanel's "Apply above" future-composition
+  // toggle. When the user is viewing the portfolio aged +N years,
+  // this warning's bucket sizing + tax-hit math should reflect
+  // THAT future state, not today's. Without this the user sees a
+  // future-composition view in AllocationPanel that doesn't agree
+  // with the warning card sitting right below it — leveraged ETFs
+  // compound aggressively (3x daily-reset RY series, +9pt drag),
+  // so the tax-at-restructure differs materially between today
+  // and +5y / +10y.
+  const appliedFutureYears = useAppStore((s) => s.appliedFutureYears);
+  const projected = useMemo(() => {
+    if (appliedFutureYears == null || appliedFutureYears <= 0) return household;
+    return ageHousehold(household, appliedFutureYears);
+  }, [household, appliedFutureYears]);
   const buckets = useMemo(
     () =>
       computeLeveragedEquityBuckets(
-        household,
+        projected,
         assumptions.retirementTaxRate,
       ),
-    [household, assumptions.retirementTaxRate],
+    [projected, assumptions.retirementTaxRate],
   );
 
   if (buckets.nonRecognizedHoldings.length === 0) return null;
@@ -49,8 +65,15 @@ export function LeveragedAllocationWarningCard() {
   return (
     <section className="px-5 pt-3">
       <div className="rounded-2xl border border-amber-300/40 bg-amber-300/5 p-4 text-amber-200">
-        <div className="text-sm font-medium">
-          Leveraged ETFs in retirement are very risky
+        <div className="flex items-baseline justify-between gap-2">
+          <div className="text-sm font-medium">
+            Leveraged ETFs in retirement are very risky
+          </div>
+          {appliedFutureYears != null && appliedFutureYears > 0 && (
+            <span className="shrink-0 rounded-full bg-accent/20 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-accent">
+              future +{appliedFutureYears}y
+            </span>
+          )}
         </div>
         <div className="mt-2 text-[12px] leading-snug text-amber-200/90">
           3x daily-reset ETFs have catastrophic survival rates in
