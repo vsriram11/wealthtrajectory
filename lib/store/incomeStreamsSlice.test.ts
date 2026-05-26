@@ -70,7 +70,11 @@ describe("addIncomeStream", () => {
     expect(s.state.incomeStreams[1].label).toBe("Income");
   });
 
-  it("coerces non-finite / negative annualUSD to 0", () => {
+  it("coerces non-finite annualUSD to 0; preserves negatives (distribution semantics)", () => {
+    // Issue #6: negatives are first-class now — they model
+    // partial-coast distributions (recurring portfolio
+    // withdrawals during a sabbatical / step-down window before
+    // formal retirement). Only NaN / Infinity are stripped.
     const s = makeFakeStore();
     s.actions.addIncomeStream({
       label: "bad amount",
@@ -81,15 +85,15 @@ describe("addIncomeStream", () => {
       ownerId: "m1",
     });
     s.actions.addIncomeStream({
-      label: "negative",
+      label: "partial-coast bridge",
       startYear: 2030,
-      endYear: 2030,
+      endYear: 2034,
       annualUSD: -50_000,
       realGrowthRate: 0,
       ownerId: "m1",
     });
     expect(s.state.incomeStreams[0].annualUSD).toBe(0);
-    expect(s.state.incomeStreams[1].annualUSD).toBe(0);
+    expect(s.state.incomeStreams[1].annualUSD).toBe(-50_000);
   });
 
   it("coerces non-finite realGrowthRate to 0 (preserves valid negatives)", () => {

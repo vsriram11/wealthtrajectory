@@ -227,7 +227,13 @@ function IncomeStreamRow({
   const lifetime = lifetimeTotalReal(stream);
 
   return (
-    <li className="rounded-xl border border-border bg-bg-elevated p-3">
+    <li
+      className={`rounded-xl border bg-bg-elevated p-3 ${
+        stream.annualUSD < 0
+          ? "border-amber-300/40"
+          : "border-border"
+      }`}
+    >
       <div className="flex items-center gap-2">
         <input
           type="text"
@@ -241,6 +247,11 @@ function IncomeStreamRow({
           aria-label="Stream label"
           className="flex-1 rounded-md border border-border-strong bg-bg-surface px-3 py-2 text-sm text-text outline-none focus:border-accent"
         />
+        {stream.annualUSD < 0 && (
+          <span className="rounded-full bg-amber-300/15 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-amber-300">
+            Distribution
+          </span>
+        )}
         {!confirming && (
           <button
             type="button"
@@ -290,9 +301,11 @@ function IncomeStreamRow({
               value={stream.annualUSD}
               onChange={(v) => onChange({ annualUSD: v })}
               precision={0}
-              allowNegative={false}
-              ariaLabel="Annual amount in real dollars"
-              className="num w-full bg-transparent text-right text-sm font-medium text-text outline-none"
+              allowNegative={true}
+              ariaLabel="Annual amount in real dollars (negative = distribution)"
+              className={`num w-full bg-transparent text-right text-sm font-medium outline-none ${
+                stream.annualUSD < 0 ? "text-amber-300" : "text-text"
+              }`}
             />
           </span>
         </label>
@@ -375,14 +388,15 @@ function IncomeStreamCreator({
   const [label, setLabel] = useState("");
   const [startYear, setStartYear] = useState(currentYear + 1);
   const [endYear, setEndYear] = useState(currentYear + 5);
+  // Display the amount as a positive number; sign is applied via
+  // the kind chip at save time. Keeps the entry field intuitive
+  // ("enter $20k", not "enter −$20k") while the engine model stays
+  // signed.
   const [annualUSD, setAnnualUSD] = useState(50_000);
+  const [kind, setKind] = useState<"income" | "distribution">("income");
   const [growthPct, setGrowthPct] = useState(0);
   const [ownerId, setOwnerId] = useState(memberPreselect);
 
-  // Local validity gate — refuse the save when end < start so
-  // the user gets an immediate "fix the form" prompt rather than
-  // having the slice silently coerce. The slice's coercion is
-  // still the safety net for synced / imported data.
   const isValid =
     label.trim().length > 0 &&
     endYear >= startYear &&
@@ -428,11 +442,58 @@ function IncomeStreamCreator({
                 type="text"
                 value={label}
                 onChange={(e) => setLabel(e.target.value)}
-                placeholder="Consulting · Social Security · Rental"
+                placeholder={
+                  kind === "distribution"
+                    ? "Partial-coast bridge · Sabbatical"
+                    : "Consulting · Social Security · Rental"
+                }
                 aria-label="Stream label"
                 className="w-full rounded-md border border-border-strong bg-bg-elevated px-3 py-2 text-sm text-text outline-none placeholder:text-text-dim focus:border-accent"
               />
             </label>
+
+            {/* Type chip — income vs distribution. Sign is applied
+                at save time; the engine model is signed
+                annualUSD. Negative streams pull from the
+                portfolio (partial-coast / sabbatical / step-down
+                pattern). See incomeStreams.ts file-level
+                docstring for engine semantics. */}
+            <div className="mt-3">
+              <span className="mb-1 block text-[10px] uppercase tracking-wider text-text-dim">
+                Type
+              </span>
+              <div className="inline-flex gap-0.5 rounded-full border border-border bg-bg-elevated p-0.5">
+                <button
+                  type="button"
+                  onClick={() => setKind("income")}
+                  aria-pressed={kind === "income"}
+                  className={`rounded-full px-3 py-1 text-[11px] font-medium transition active:opacity-70 ${
+                    kind === "income"
+                      ? "bg-accent text-bg"
+                      : "text-text-muted"
+                  }`}
+                >
+                  Income
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setKind("distribution")}
+                  aria-pressed={kind === "distribution"}
+                  className={`rounded-full px-3 py-1 text-[11px] font-medium transition active:opacity-70 ${
+                    kind === "distribution"
+                      ? "bg-amber-300 text-bg"
+                      : "text-text-muted"
+                  }`}
+                >
+                  Distribution
+                </button>
+              </div>
+              <p className="mt-1 text-[10px] leading-snug text-text-dim">
+                {kind === "income"
+                  ? "Money flowing IN (consulting, pension, Social Security, rental). Offsets retirement withdrawals."
+                  : "Money flowing OUT (partial-coast bridge, sabbatical, step-down). Pulls from the portfolio in the active years."}
+              </p>
+            </div>
 
             <div className="mt-3 grid grid-cols-2 gap-2">
               <label className="block">
@@ -541,7 +602,11 @@ function IncomeStreamCreator({
                     label: label.trim(),
                     startYear,
                     endYear,
-                    annualUSD,
+                    // Sign the amount based on the kind chip.
+                    // Stored signed; UI surfaces re-derive the
+                    // chip via Math.sign for editing.
+                    annualUSD:
+                      kind === "distribution" ? -annualUSD : annualUSD,
                     realGrowthRate: growthPct / 100,
                     ownerId,
                   })

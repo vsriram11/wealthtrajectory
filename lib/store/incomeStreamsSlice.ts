@@ -14,7 +14,7 @@
  * Validation is at the action boundary:
  *
  *   - empty / whitespace-only `label`         → falls back to "Income"
- *   - non-finite or negative `annualUSD`      → 0
+ *   - non-finite `annualUSD`                  → 0 (sign preserved)
  *   - non-finite `realGrowthRate`             → 0
  *   - `endYear < startYear`                   → endYear coerced to startYear
  *
@@ -68,10 +68,11 @@ function coerceWritableFields(
   input: Omit<IncomeStream, "id">,
 ): Omit<IncomeStream, "id"> {
   const trimmedLabel = input.label.trim();
-  const annual =
-    Number.isFinite(input.annualUSD) && input.annualUSD >= 0
-      ? input.annualUSD
-      : 0;
+  // Signed: positive = income, negative = distribution (partial-
+  // coast / sabbatical pattern). Only non-finite values are
+  // stripped — see IncomeStream's file-level docstring for the
+  // engine semantics in each phase.
+  const annual = Number.isFinite(input.annualUSD) ? input.annualUSD : 0;
   const growth = Number.isFinite(input.realGrowthRate)
     ? input.realGrowthRate
     : 0;

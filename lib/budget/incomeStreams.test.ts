@@ -80,10 +80,19 @@ describe("incomeForYear — per-year math for a single stream", () => {
     // The engine boundary must never propagate NaN or Infinity
     // downstream — they'd poison every cash-flow accumulator that
     // sums incomeForYear into a running total.
-    it("returns 0 when annualUSD is non-finite or negative", () => {
+    it("returns 0 when annualUSD is non-finite", () => {
       expect(incomeForYear(s({ annualUSD: NaN }), 2030)).toBe(0);
       expect(incomeForYear(s({ annualUSD: Infinity }), 2030)).toBe(0);
-      expect(incomeForYear(s({ annualUSD: -1_000 }), 2030)).toBe(0);
+    });
+
+    it("preserves NEGATIVE annualUSD (distribution semantics)", () => {
+      // Issue #6: signed annualUSD lets one type model both
+      // POSITIVE income inflows AND NEGATIVE distributions
+      // (partial-coast / sabbatical pattern) without a separate
+      // primitive. The boundary still strips NaN / Infinity, but
+      // a finite negative number now flows through verbatim.
+      expect(incomeForYear(s({ annualUSD: -1_000 }), 2030)).toBe(-1_000);
+      expect(incomeForYear(s({ annualUSD: -20_000 }), 2032)).toBe(-20_000);
     });
 
     it("returns 0 when start/end year is non-finite", () => {

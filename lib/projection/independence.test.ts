@@ -362,6 +362,74 @@ describe("projectIndependence — incomePerYearUSD (future-income streams)", () 
       true,
     );
   });
+
+  it("NEGATIVE income during accumulation drains the portfolio (partial-coast)", () => {
+    // Issue #6: a negative income stream models the partial-coast
+    // pattern — user takes recurring portfolio distributions
+    // during a pre-retirement window (sabbatical / step-down /
+    // lifestyle business bridging the gap). The deterministic
+    // projection must reflect this as a DRAIN: relative to the
+    // no-stream baseline, NW at every accumulation milestone
+    // should be LOWER, and Independence (if still reachable)
+    // should arrive LATER.
+    const memberId = DEMO_HOUSEHOLD.members[0].id;
+    const household: import("@/lib/types").Household = {
+      id: "h",
+      members: DEMO_HOUSEHOLD.members,
+      accounts: [
+        {
+          id: "a",
+          displayName: "A",
+          category: "BROKERAGE",
+          ownerId: memberId,
+          holdings: [
+            {
+              kind: "cash",
+              id: "c",
+              valueUSD: 500_000,
+              expectedRealCAGR: 0.06,
+              geography: { US: 1, DEVELOPED: 0, EMERGING: 0 },
+            },
+          ],
+          monthlyContributionUSD: 2_000,
+        },
+      ],
+      liabilities: [],
+    };
+    const assumptions: import("@/lib/types").Assumptions = {
+      targetNetWorthUSD: 1_500_000,
+      withdrawalRate: 0.04,
+      legacyFloorUSD: 0,
+      drawdownHorizonYears: 30,
+      expectedInflationRate: 0.03,
+    };
+    const base = projectIndependence(household, assumptions);
+    const withDistribution = projectIndependence(
+      household,
+      assumptions,
+      undefined,
+      {
+        // $20k/yr distribution for 5 years — a typical partial-
+        // coast bridge during sabbatical years before formal
+        // retirement.
+        incomePerYearUSD: [
+          -20_000, -20_000, -20_000, -20_000, -20_000,
+        ],
+      },
+    );
+    expect(base.monthsToIndependence).not.toBeNull();
+    expect(withDistribution.monthsToIndependence).not.toBeNull();
+    // Distribution slows the path to Independence.
+    expect(withDistribution.monthsToIndependence!).toBeGreaterThan(
+      base.monthsToIndependence!,
+    );
+    // Mid-accumulation NW (year 5) is materially lower with the
+    // distribution — pull from the portfolio compounds against
+    // future growth.
+    const baseY5 = base.series[60]?.netWorthUSD ?? 0;
+    const distY5 = withDistribution.series[60]?.netWorthUSD ?? 0;
+    expect(distY5).toBeLessThan(baseY5);
+  });
 });
 
 describe("projectIndependence startup-already-Independence'd withdrawal (Round-1 fix)", () => {

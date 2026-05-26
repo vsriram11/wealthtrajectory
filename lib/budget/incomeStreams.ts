@@ -25,14 +25,34 @@
  *   - Side business that ramps and ends: 2027-2029, $15k/yr,
  *     5% real growth (early-stage growth)
  *
- * Engine contract: streams flow into rollups as POSITIVE cash
- * flow in their active years, reducing the net drawdown the
- * portfolio has to cover. This shows up in:
+ * Engine contract: streams flow into rollups as SIGNED cash flow
+ * in their active years. The historical / common case is POSITIVE
+ * (income offsetting a withdrawal), but NEGATIVE streams are also
+ * supported — the partial-coast / sabbatical / step-down pattern,
+ * where the user takes recurring portfolio DISTRIBUTIONS during a
+ * pre-retirement window (e.g. $20k/yr for 5 years while bridging
+ * to formal retirement). A negative stream:
  *
- *   - Monte Carlo survival rate (income years effectively lower
- *     the withdrawal — more sequences survive)
+ *   - Pulls from the portfolio during accumulation (proportional
+ *     drain across accounts, like a mini-drawdown).
+ *   - During formal retirement, increases the net withdrawal one-
+ *     for-one (the distribution adds to the SWR draw).
+ *
+ * Both directions flow through the same engine path — the SIGN is
+ * the only difference. This lets a user model a partial-coast
+ * window without a separate "distribution" primitive (which would
+ * duplicate the time-bounded, owner-scoped, both-engine-integrated
+ * machinery this type already provides). See issue #6 for the
+ * design rationale.
+ *
+ * Engine effects:
+ *
+ *   - Monte Carlo survival rate (positive income lowers
+ *     effective withdrawal → more sequences survive; negative
+ *     distribution raises it → fewer)
  *   - Independence projection (income offsets withdrawals month-
- *     by-month; corpus lasts longer in lost-decade stress)
+ *     by-month; distributions drain the portfolio across all
+ *     accounts proportionally)
  *   - Per-member rollup filtering (a stream owned by an
  *     excluded member doesn't count toward the household total)
  *
@@ -88,6 +108,11 @@ export type IncomeStream = {
    * dollars / inflation-adjusted). Stored as real $ to match
    * the rest of the projection engine, which works entirely in
    * real terms.
+   *
+   * Signed: positive = income inflow, negative = portfolio
+   * distribution (partial-coast / sabbatical / step-down
+   * pattern). See the file-level docstring for the engine
+   * semantics in each phase.
    */
   annualUSD: number;
   /**
@@ -138,7 +163,9 @@ export function incomeForYear(stream: IncomeStream, year: number): number {
     return 0;
   }
   if (year < stream.startYear || year > stream.endYear) return 0;
-  if (!Number.isFinite(stream.annualUSD) || stream.annualUSD < 0) return 0;
+  // Signed semantics: positive = income, negative = distribution.
+  // Only non-finite values are stripped (NaN-safety contract).
+  if (!Number.isFinite(stream.annualUSD)) return 0;
   const yearsFromStart = year - stream.startYear;
   const growthRate = Number.isFinite(stream.realGrowthRate)
     ? stream.realGrowthRate
