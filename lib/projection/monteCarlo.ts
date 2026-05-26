@@ -971,7 +971,15 @@ export function runBootstrap(
   const dataset = options.dataset ?? HISTORICAL_REAL_RETURNS;
   const paths = options.paths ?? 1000;
   const blockSize = Math.max(1, options.blockSize ?? 5);
-  const seed = options.seed ?? Math.floor(Math.random() * 2 ** 31);
+  // Default seed = 1 (deterministic). Engine purity rule
+  // (CLAUDE.md §1) forbids `Math.random()` in lib/; callers that
+  // want non-deterministic paths must pass a seed explicitly
+  // (e.g. `Math.floor(Math.random() * 2**31)` at the call site).
+  // In practice every in-tree caller already passes a seed, so
+  // this fallback is dead — but the prior `Math.random()` default
+  // was a latent purity violation that would have surfaced as
+  // non-reproducible output the moment a caller forgot.
+  const seed = options.seed ?? 1;
   const rand = makePrng(seed);
   const yearsPre = inputs.yearsUntilRetirement ?? 0;
   const totalYears = yearsPre + inputs.retirementHorizonYears;

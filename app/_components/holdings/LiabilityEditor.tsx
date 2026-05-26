@@ -30,7 +30,12 @@ export function LiabilityEditor() {
   if (!id || !liab) return null;
 
   return (
-    <div className="fixed inset-0 z-50">
+    <div
+      className="fixed inset-0 z-50"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Edit liability"
+    >
       {/* Decorative backdrop — no click-to-close to prevent
           accidental data loss on in-progress edits. */}
       <div

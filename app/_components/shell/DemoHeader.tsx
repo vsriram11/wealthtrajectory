@@ -43,6 +43,35 @@ export function DemoHeader() {
     return () => clearTimeout(t);
   }, [confirming]);
 
+  // Touch-device close paths for the account menu. The menu was
+  // originally closed only via `onMouseLeave` on the panel — which
+  // never fires on touch, leaving mobile users with no way to
+  // dismiss the menu once opened (a tap on the trigger toggles
+  // but a tap elsewhere did nothing). Add: outside-click (works
+  // on mouse + touch) and Escape (keyboard).
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onPointerDown = (e: PointerEvent) => {
+      const target = e.target as HTMLElement | null;
+      // The menu's accessible name is the user's email or "Account
+      // menu trigger" — but a simpler signal: any click that lands
+      // outside an element marked `data-account-menu` closes the
+      // menu. Mark both the trigger and the panel with that attr.
+      if (!target?.closest?.("[data-account-menu]")) {
+        setMenuOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenuOpen(false);
+    };
+    window.addEventListener("pointerdown", onPointerDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("pointerdown", onPointerDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [menuOpen]);
+
   // Briefly flash a "Synced" pill after a successful sync. We track
   // the last sync timestamp we've already "consumed" in state;
   // showJustSynced derives from `googleLastSyncAt !== lastSeenSyncAt`.
@@ -210,6 +239,9 @@ export function DemoHeader() {
             onClick={() => setMenuOpen((v) => !v)}
             className="relative flex items-center gap-1.5 rounded-full border border-border-strong bg-bg-elevated px-1 py-1 active:opacity-70"
             aria-label="Account menu"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            data-account-menu
           >
             {user.pictureUrl ? (
               // eslint-disable-next-line @next/next/no-img-element
@@ -235,6 +267,15 @@ export function DemoHeader() {
 
       {menuOpen && user && (
         <div
+          // Outside-click + Escape close are wired in a useEffect
+          // (touch devices never fire onMouseLeave). Keep onMouseLeave
+          // as a courtesy for mouse users who hover-and-roll-off.
+          // `data-account-menu` marks this panel + the trigger so the
+          // outside-click handler can distinguish "inside the menu
+          // surface" from "outside it."
+          data-account-menu
+          role="menu"
+          aria-label="Account menu"
           className="absolute right-5 top-14 z-40 w-60 rounded-xl border border-border-strong bg-bg-surface p-2 shadow-xl"
           onMouseLeave={() => setMenuOpen(false)}
         >

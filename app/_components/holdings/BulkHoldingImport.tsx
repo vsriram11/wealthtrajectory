@@ -82,7 +82,12 @@ export function BulkHoldingImport() {
         Bulk add
       </button>
       {open && (
-        <div className="fixed inset-0 z-50">
+        <div
+          className="fixed inset-0 z-50"
+          role="dialog"
+          aria-modal="true"
+          aria-label="Bulk import holdings"
+        >
           {/* Decorative backdrop — no click-to-close to prevent
               accidental data loss on an in-progress import. */}
           <div

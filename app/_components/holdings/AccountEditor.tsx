@@ -143,7 +143,12 @@ export function AccountEditor() {
   };
 
   return (
-    <div className="fixed inset-0 z-50">
+    <div
+      className="fixed inset-0 z-50"
+      role="dialog"
+      aria-modal="true"
+      aria-label={editingId ? "Edit account" : "Add account"}
+    >
       {/* Backdrop is decorative (no click-to-close) so a stray tap
           outside the sheet doesn't silently discard in-progress
           edits. Users close via the explicit Cancel button. */}
