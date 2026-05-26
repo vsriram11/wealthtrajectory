@@ -2,10 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useAppStore } from "@/lib/store";
-import {
-  effectiveHouseholdAssumptions,
-  resolveAssumptionsForMember,
-} from "@/lib/projection/useActiveProjection";
+import { useActiveProjection } from "@/lib/projection/useActiveProjection";
 import {
   HISTORICAL_RETURNS_FIRST_YEAR,
   HISTORICAL_RETURNS_LAST_YEAR,
@@ -15,17 +12,12 @@ import {
   runBootstrap,
   runHistoricalSequences,
   type MonteCarloResult,
-  type SimulationPath,
 } from "@/lib/projection/monteCarlo";
 import { computePortfolio } from "@/lib/portfolio/portfolio";
 import { computeLeveragedEquityBuckets } from "@/lib/portfolio/leveragedEquity";
 import {
   activeMemberIds,
-  activeMembers,
-  filterHousehold,
-  householdForRollups,
   householdNetWorth,
-  liquidHousehold,
 } from "@/lib/types";
 import {
   clampHaircut,
@@ -68,46 +60,28 @@ import { HistoricalReturnsTableModal } from "./HistoricalReturnsTableModal";
  * real-CAGR / real-SWR / today's-dollars model.
  */
 export function HistoricalMonteCarloCard() {
-  const household = useAppStore((s) => s.household);
-  const assumptions = useAppStore((s) => s.assumptions);
-  const memberAssumptions = useAppStore((s) => s.memberAssumptions);
-  const memberId = useAppStore((s) => s.selectedMemberId);
+  // Pull the fully-resolved projection inputs (rollup → member →
+  // liquidity → per-member assumption overrides → active scenario
+  // overrides) from the canonical resolver. Reading the raw store
+  // slices directly here was the historical bug — scenario overrides
+  // on `withdrawalRate` / `targetNetWorthUSD` / `legacyFloorUSD`
+  // never reached the MC card because the scenario merge happens
+  // inside `useActiveProjection`, not on `state.assumptions`. Same
+  // class of bug as #11 (AllocationPanel).
+  //
+  // (Note: scenario `holdingCAGRs` / `cagrDelta` are no-ops for the
+  // MC sim — it draws returns from the historical dataset, not from
+  // `expectedRealCAGR`. The methodology block calls that out so the
+  // user isn't surprised when a CAGR-only scenario leaves the
+  // success rate unchanged.)
+  const {
+    household: scopedHousehold,
+    assumptions: effective,
+    scenarioName,
+    memberId,
+  } = useActiveProjection();
   const budgetItems = useAppStore((s) => s.budgetItems);
   const incomeStreams = useAppStore((s) => s.incomeStreams);
-  const liquidityView = useAppStore((s) => s.liquidityView);
-
-  // Same effective-assumptions resolution as Plan tab uses.
-  const effective = memberId
-    ? resolveAssumptionsForMember(
-        assumptions,
-        memberAssumptions,
-        memberId,
-      )
-    : effectiveHouseholdAssumptions(
-        assumptions,
-        memberAssumptions,
-        // Pre-filter through activeMembers so blended assumptions
-        // honor the include-in-rollup flag (same filter used by
-        // income / age helpers — single source of truth).
-        activeMembers(household),
-      );
-
-  // Honor all three global filters: rollup-include → member →
-  // liquidity. When no specific member is selected, the rollup
-  // view is the default scoping (excluded members' accounts +
-  // liabilities drop out of NW + allocation). When a member IS
-  // explicitly selected, that filter wins — you see THAT person's
-  // view regardless of their rollup-include flag.
-  //
-  // (Mirrors the composition in `useActiveProjection`. Kept
-  // inline here because this card pre-computes inputs for the MC
-  // simulator separately from the projection hook.)
-  const scopedHousehold = useMemo(() => {
-    const scoped = memberId
-      ? filterHousehold(household, memberId)
-      : householdForRollups(household);
-    return liquidityView === "liquid" ? liquidHousehold(scoped) : scoped;
-  }, [household, memberId, liquidityView]);
 
   // Default the spend from the budget-derived corpus when set;
   // otherwise fall back to (target × SWR) as a sensible starting
@@ -394,7 +368,10 @@ export function HistoricalMonteCarloCard() {
         filterIncomeStreamsForRollups(
           incomeStreams,
           memberId,
-          activeMemberIds(household),
+          // scopedHousehold is already rollup-filtered when memberId
+          // is null (and member-sliced when set), so active member
+          // ids derived from it match the canonical resolver.
+          activeMemberIds(scopedHousehold),
         ),
         new Date().getFullYear(),
         Math.max(1, Math.min(60, horizonYears)),
@@ -422,7 +399,7 @@ export function HistoricalMonteCarloCard() {
     annualSpend,
     budgetItems,
     incomeStreams,
-    household,
+    scopedHousehold,
     memberId,
     effective,
     horizonYears,
@@ -747,6 +724,23 @@ export function HistoricalMonteCarloCard() {
             What the stress test is actually doing
           </div>
           <ul className="mt-1 space-y-1">
+            {scenarioName && (
+              <li>
+                <span className="text-text">
+                  Active scenario:{" "}
+                  <span className="rounded-sm bg-accent/15 px-1.5 py-0.5 text-accent">
+                    {scenarioName}
+                  </span>
+                </span>{" "}
+                — withdrawal rate / target NW / legacy floor overrides
+                propagate into the spend &amp; starting-NW defaults
+                above. Contribution multipliers don&apos;t apply (MC is
+                a drawdown-phase sim — contributions are accumulation-
+                phase). CAGR overrides don&apos;t apply either: this
+                sim draws returns from the historical dataset, not
+                from your expected-CAGR assumptions.
+              </li>
+            )}
             <li>
               <span className="text-text">Real-terms throughout</span> —
               returns, spend, and NW are all in today&apos;s dollars; no
