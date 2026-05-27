@@ -228,6 +228,21 @@ export function generateInsights(
     });
   }
 
+  // Real-estate double-counting check. The `RealEstateHolding`
+  // model stores `valueUSD` as the EQUITY stake (net of mortgage
+  // principal); `leverage` captures the fact that the gross asset
+  // is larger. If the user ALSO created a separate "mortgage" /
+  // "home loan" Liability for the same property, that mortgage
+  // gets subtracted AGAIN in `householdNetWorth` — silently
+  // making NW $400k lower than reality. Detect: a high-leverage
+  // RE holding (lev > 1.1) coexisting with a liability whose
+  // name suggests "mortgage". Heuristic, not perfect, but
+  // catches the obvious-bad-case.
+  const reDoubleCount = detectRealEstateDoubleCount(household);
+  if (reDoubleCount) {
+    out.push(reDoubleCount);
+  }
+
   return out;
 }
 
@@ -278,6 +293,45 @@ function taxBucketInsight(
     title: `${Math.round(topShare * 100)}% of net worth is in ${label}`,
     detail: suggestion,
     tone: "neutral",
+  };
+}
+
+/**
+ * Detect the "I entered my equity stake AND a separate mortgage
+ * liability" double-counting pattern. `RealEstateHolding.valueUSD`
+ * stores the equity (net of mortgage); the mortgage is implicit in
+ * the `leverage` field. A separately-entered "mortgage" Liability
+ * subtracts the principal AGAIN in `householdNetWorth`. The model
+ * relies on the holding-form copy to prevent this, but a real user
+ * who didn't read the help text gets silently-wrong net worth.
+ *
+ * Heuristic: any RE holding with `leverage > 1.1` (i.e. real
+ * mortgage exposure, not a paid-off-with-rounding entry) AND a
+ * liability whose name matches "mortgage" / "home loan" / "HELOC"
+ * → warn. Doesn't auto-fix; just surfaces the suspicion so the
+ * user can audit.
+ */
+function detectRealEstateDoubleCount(household: Household): Insight | null {
+  const mortgagedRE = household.accounts
+    .flatMap((a) => a.holdings)
+    .filter(
+      (h): h is import("@/lib/types").RealEstateHolding =>
+        h.kind === "real_estate" && h.leverage > 1.1,
+    );
+  if (mortgagedRE.length === 0) return null;
+  const mortgageRe = /\b(mortgage|home\s*loan|heloc|second\s*mortgage)\b/i;
+  const suspectLiabilities = household.liabilities.filter((l) =>
+    mortgageRe.test(l.name),
+  );
+  if (suspectLiabilities.length === 0) return null;
+  const propertyName = mortgagedRE[0].name || "your home";
+  const liabName = suspectLiabilities[0].name;
+  return {
+    id: "re-double-count",
+    title: `Probable double-counted mortgage — check ${propertyName} vs ${liabName}`,
+    detail:
+      "Real-estate holdings store the EQUITY stake (net of mortgage); the mortgage is already captured by the holding's leverage field. A separately-entered mortgage Liability subtracts the principal a SECOND time and underreports your net worth by the loan balance. Either delete the separate liability, OR change the holding's value to the full property price and leverage to 1×.",
+    tone: "warning",
   };
 }
 

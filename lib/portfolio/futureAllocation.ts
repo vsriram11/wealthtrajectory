@@ -114,8 +114,14 @@ export function ageHousehold(h: Household, years: number): Household {
   const liabilities = h.liabilities.map((l) => {
     let bal = l.balanceUSD;
     const rate = annualToMonthly(l.annualInterestRate);
+    // Clamp the payment at >= 0. A corrupted store / imported
+    // payload could carry a negative monthlyPaymentUSD; without
+    // the clamp it'd be ADDED to the balance every month and the
+    // mortgage would grow forever. Engine NaN-safety rule:
+    // bad input degrades to 0 (no payment, debt sits flat).
+    const payment = Math.max(0, l.monthlyPaymentUSD);
     for (let i = 0; i < months && bal > 0; i++) {
-      bal = Math.max(0, bal * (1 + rate) - l.monthlyPaymentUSD);
+      bal = Math.max(0, bal * (1 + rate) - payment);
     }
     return { ...l, balanceUSD: bal };
   });

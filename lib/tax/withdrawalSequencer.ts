@@ -129,9 +129,19 @@ const RMD_DIVISORS: Record<number, number> = {
 };
 
 function rmdDivisor(age: number): number {
-  if (age < 73) return Infinity;
-  if (age >= 110) return 3.5;
-  return RMD_DIVISORS[age] ?? 26.5;
+  // Floor to integer before lookup. The simulator advances age in
+  // fractional steps; without flooring, age 75.5 → table miss →
+  // the `?? 26.5` fallback (which is the age-73 divisor) silently
+  // applied to a 75-year-old, computing a ~3× too-large RMD
+  // ($1M / 26.5 = $37.7k instead of $1M / 24.6 = $40.7k). Worse:
+  // the fallback constant disguises the table miss as a "default,"
+  // so a future RMD-table update would also leave the off-integer
+  // ages broken. Drop the fallback — every integer age 73-110 is
+  // in the table.
+  const a = Math.floor(age);
+  if (a < 73) return Infinity;
+  if (a >= 110) return 3.5;
+  return RMD_DIVISORS[a];
 }
 
 function copyBalances(b: BucketBalances): BucketBalances {

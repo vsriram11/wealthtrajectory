@@ -138,6 +138,8 @@ export function Fan({
         viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`}
         className="mt-1 h-36 w-full touch-none select-none"
         preserveAspectRatio="none"
+        role="img"
+        aria-label="Monte Carlo outcome fan — percentile bands of simulated portfolio NW across the retirement horizon"
         onPointerMove={onPointerMove}
         onPointerDown={onPointerMove}
         onPointerLeave={() => setHoverIdx(null)}

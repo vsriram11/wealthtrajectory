@@ -63,9 +63,17 @@ export function createScenariosSliceActions(
 
     updateScenario: (id, patch) =>
       set((s) => ({
-        scenarios: s.scenarios.map((sc) =>
-          sc.id === id ? { ...sc, ...patch } : sc,
-        ),
+        scenarios: s.scenarios.map((sc) => {
+          if (sc.id !== id) return sc;
+          // Strip any `id` field from the patch — allowing it
+          // through silently corrupts scenario identity (the
+          // active-scenario ref, the persisted Drive payload's
+          // active-id pointer, and the OverrideSummary index
+          // would all drift). The id is immutable.
+          const { id: _ignored, ...rest } = patch;
+          void _ignored;
+          return { ...sc, ...rest };
+        }),
       })),
 
     removeScenario: (id) =>
