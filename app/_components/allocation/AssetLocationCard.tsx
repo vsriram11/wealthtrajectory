@@ -5,7 +5,7 @@ import {
   assetLocationFindings,
   type LocationFinding,
 } from "@/lib/tax/assetLocation";
-import { useActiveProjection } from "@/lib/projection/useActiveProjection";
+import { useAllocationView } from "@/lib/portfolio/useAllocationView";
 import { formatUSDCompact } from "@/lib/format";
 
 /**
@@ -21,7 +21,11 @@ import { formatUSDCompact } from "@/lib/format";
  * the value here is the audit, not the IP.
  */
 export function AssetLocationCard() {
-  const { household } = useActiveProjection();
+  // Shared allocation view so the location-audit findings reflect
+  // the time-traveled household when "Apply +Ny" is on. A 20-year-
+  // aged portfolio's tax-bucket placement is what the user is
+  // optimizing for, not today's snapshot.
+  const { household } = useAllocationView();
   const findings = useMemo(
     () => assetLocationFindings(household),
     [household],

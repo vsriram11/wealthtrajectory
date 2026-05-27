@@ -65,8 +65,16 @@ export function formatLeverage(n: number): string {
 
 export function formatYearsMonths(months: number): string {
   if (months <= 0) return "now";
-  const y = Math.floor(months / 12);
-  const m = Math.round(months % 12);
+  let y = Math.floor(months / 12);
+  let m = Math.round(months % 12);
+  // Carry: 23.5 months floors to 1 year + rounds remainder to 12 mo;
+  // 11.5 months floors to 0 + rounds remainder to 12 mo. Bubble
+  // the 12 up into another year so the output reads "2 yrs" /
+  // "1 yr" instead of "1 yr 12 mo" / "12 mo".
+  if (m === 12) {
+    m = 0;
+    y += 1;
+  }
   if (y === 0) return `${m} mo`;
   if (m === 0) return `${y} yr${y === 1 ? "" : "s"}`;
   return `${y} yr${y === 1 ? "" : "s"} ${m} mo`;

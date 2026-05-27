@@ -80,6 +80,12 @@ function isLowGrowth(h: Holding): boolean {
   // Anything with a real CAGR below 2% is "low growth" for our
   // purposes — bonds (~1-2% real), cash (~0%), high-yield savings.
   // Equity even with leverage isn't flagged.
+  //
+  // Real estate is excluded by kind: users set the CAGR on the
+  // EQUITY stake (net of mortgage), so a paid-off home at 1-2%
+  // real isn't "low-growth income kicking off tax drag" — it's
+  // its own asset class with its own tax treatment, distinct
+  // from the "bond → tax-deferred" intuition this helper drives.
   return h.expectedRealCAGR < 0.02 && h.kind !== "real_estate";
 }
 

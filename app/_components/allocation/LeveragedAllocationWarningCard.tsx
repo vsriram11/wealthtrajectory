@@ -1,7 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
-import { useActiveProjection } from "@/lib/projection/useActiveProjection";
+import { useAllocationView } from "@/lib/portfolio/useAllocationView";
 import {
   computeLeveragedEquityBuckets,
   type DeleverageStrategy,
@@ -29,7 +29,14 @@ import { formatUSDCompact } from "@/lib/format";
  * Renders nothing when no affected holdings exist.
  */
 export function LeveragedAllocationWarningCard() {
-  const { household, assumptions } = useActiveProjection();
+  // Shared allocation view: household is already aged-forward by
+  // `appliedFutureYears` when the user has time-traveled the page.
+  // Leveraged ETFs compound aggressively (3x daily-reset on the
+  // RYTNX series, +9pt drag depending on volatility regime), so
+  // tax-at-restructure differs materially between today and +5y /
+  // +10y. The hook also surfaces the same `appliedFutureYears`
+  // value for the header chip below.
+  const { household, assumptions, appliedFutureYears } = useAllocationView();
   const buckets = useMemo(
     () =>
       computeLeveragedEquityBuckets(
@@ -49,8 +56,15 @@ export function LeveragedAllocationWarningCard() {
   return (
     <section className="px-5 pt-3">
       <div className="rounded-2xl border border-amber-300/40 bg-amber-300/5 p-4 text-amber-200">
-        <div className="text-sm font-medium">
-          Leveraged ETFs in retirement are very risky
+        <div className="flex items-baseline justify-between gap-2">
+          <div className="text-sm font-medium">
+            Leveraged ETFs in retirement are very risky
+          </div>
+          {appliedFutureYears != null && appliedFutureYears > 0 && (
+            <span className="shrink-0 rounded-full bg-accent/20 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-accent">
+              future +{appliedFutureYears}y
+            </span>
+          )}
         </div>
         <div className="mt-2 text-[12px] leading-snug text-amber-200/90">
           3x daily-reset ETFs have catastrophic survival rates in

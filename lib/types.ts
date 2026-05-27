@@ -287,10 +287,10 @@ export const EMPTY_GEOGRAPHY: GeographyAllocation = {
 /**
  * A single leg of a multi-asset ETF's composition. Used for funds like
  * NTSX (90% stocks + 60% bonds via Treasury futures), GDE (90% stocks +
- * 60% gold via futures), RSST (100% stocks + 100% managed futures), etc.
+ * 90% gold via futures), RSST (100% stocks + 100% managed futures), etc.
  * The sum of leg weights gives the fund's intrinsic leverage (NTSX = 1.5;
- * RSST = 2.0). Each leg's contribution to portfolio exposure is
- * weight × holding.valueUSD.
+ * GDE = 1.8; RSST = 2.0). Each leg's contribution to portfolio exposure
+ * is weight × holding.valueUSD.
  *
  * `kind` mirrors AssetClass for the leg's class. `commodity` is allowed
  * here (gold, etc.); it does not yet appear as a top-level AssetClass,
@@ -835,6 +835,25 @@ export type Assumptions = {
    * zero when t = 1.
    */
   retirementTaxRate?: number;
+  /**
+   * SORR mitigation — freeze withdrawals in NOMINAL terms for the
+   * first N retirement years. In the engine's real-terms math this
+   * translates to a geometric decay of the real withdrawal during
+   * the freeze window:
+   *   real_y = annualSpend / (1 + expectedInflationRate) ** y
+   * for y ∈ [0, retirementFixedNominalYears), then snaps back to
+   * full real-flat. 10 years at 3% inflation cuts cumulative real
+   * spend by ~14% of one year's amount — meaningful relief during
+   * the early-retirement danger zone without permanently dropping
+   * the standard of living.
+   *
+   * 0 (default / undefined) → no freeze, identical to today's
+   * behavior. Per-member-overridable like every other field; the
+   * inflation rate consumed by the engine is the same
+   * `expectedInflationRate` on this assumptions object, so users
+   * don't have to set inflation twice.
+   */
+  retirementFixedNominalYears?: number;
 };
 
 export type ScenarioOverrides = {

@@ -189,6 +189,7 @@ export function CloudSyncer() {
                   incomeStreams: s.incomeStreams,
                   healthPlans: s.healthPlans,
                   healthImportanceWeights: s.healthImportanceWeights,
+                  memberAssumptions: s.memberAssumptions,
                 },
               );
               if (shrinkage) {

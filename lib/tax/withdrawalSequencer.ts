@@ -129,9 +129,19 @@ const RMD_DIVISORS: Record<number, number> = {
 };
 
 function rmdDivisor(age: number): number {
-  if (age < 73) return Infinity;
-  if (age >= 110) return 3.5;
-  return RMD_DIVISORS[age] ?? 26.5;
+  // Floor to integer before lookup. The simulator advances age in
+  // fractional steps; without flooring, age 75.5 → table miss →
+  // the `?? 26.5` fallback (which is the age-73 divisor) silently
+  // applied to a 75-year-old, computing a ~3× too-large RMD
+  // ($1M / 26.5 = $37.7k instead of $1M / 24.6 = $40.7k). Worse:
+  // the fallback constant disguises the table miss as a "default,"
+  // so a future RMD-table update would also leave the off-integer
+  // ages broken. Drop the fallback — every integer age 73-110 is
+  // in the table.
+  const a = Math.floor(age);
+  if (a < 73) return Infinity;
+  if (a >= 110) return 3.5;
+  return RMD_DIVISORS[a];
 }
 
 function copyBalances(b: BucketBalances): BucketBalances {
@@ -180,30 +190,49 @@ function simulateYear(
   const rmd =
     age >= rmdStartAge ? grown.pretax / rmdDivisor(age) : 0;
 
-  // 3. Target gross.
+  // 3. Target net spend, tracked as "net dollars still needed."
+  // The prior implementation grossed up ALL spend at the start
+  // (`targetGross = targetNet / (1 - taxRate)`) — which silently
+  // over-withdrew from Roth / HSA (untaxed) buckets by a factor
+  // of `1/(1-t)`. Real-money error: a $100k spend retiree at
+  // t=0.22 with Roth-only assets withdrew $128k/yr and "netted"
+  // $128k while drained Roth at the grossed-up rate. Decide the
+  // gross-up PER BUCKET, based on whether that bucket is taxed.
   const targetNet = Math.max(0, inputs.annualRealSpendUSD);
-  const targetGross = targetNet / (1 - taxRate);
-
-  // 4. Forced RMD reduces remaining gross.
-  // The RMD itself is taxable (ordinary income) and contributes
-  // toward covering the net spend.
-  let remainingGross = Math.max(0, targetGross - rmd);
 
   const withdrawals: BucketBalances = emptyBalances();
   // Apply the RMD first — it's compulsory.
   withdrawals.pretax += Math.min(grown.pretax, rmd);
   const balancesPost: BucketBalances = copyBalances(grown);
   balancesPost.pretax -= withdrawals.pretax;
+  // RMD covers SOME of the net target: its post-tax contribution
+  // is `rmd * (1 - taxRate)`.
+  let remainingNet = Math.max(
+    0,
+    targetNet - withdrawals.pretax * (1 - taxRate),
+  );
 
-  // 5. Walk the order to drain remaining gross.
+  // 5. Walk the order to drain remaining net. For TAXED buckets
+  // (taxable / pretax), gross up `1/(1-t)`; for UNTAXED buckets
+  // (roth / hsa), draw literally. Net-contribution math at the
+  // bottom mirrors the tax block in §6 so the two stay aligned.
   for (const bucket of order) {
-    if (remainingGross <= 0) break;
+    if (remainingNet <= 0) break;
     const available = balancesPost[bucket];
     if (available <= 0) continue;
-    const draw = Math.min(available, remainingGross);
-    withdrawals[bucket] += draw;
-    balancesPost[bucket] -= draw;
-    remainingGross -= draw;
+    const isTaxed = bucket === "pretax" || bucket === "taxable";
+    if (isTaxed) {
+      const grossNeeded = remainingNet / (1 - taxRate);
+      const draw = Math.min(available, grossNeeded);
+      withdrawals[bucket] += draw;
+      balancesPost[bucket] -= draw;
+      remainingNet -= draw * (1 - taxRate);
+    } else {
+      const draw = Math.min(available, remainingNet);
+      withdrawals[bucket] += draw;
+      balancesPost[bucket] -= draw;
+      remainingNet -= draw;
+    }
   }
 
   // 6. Compute tax. Pretax + RMD are fully taxed; taxable is

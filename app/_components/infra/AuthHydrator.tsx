@@ -5,12 +5,11 @@ import { useAppStore } from "@/lib/store";
 import { readProfile, getAccessToken, signOut } from "@/lib/sync/googleAuth";
 import {
   claimActiveSession,
-  downloadBackup,
   findBackupFile,
   loadActiveSession,
   uploadBackup,
 } from "@/lib/sync/googleDrive";
-import { exportData, parseImport } from "@/lib/persistence/dataIO";
+import { exportData } from "@/lib/persistence/dataIO";
 import { pullFromDrive, pushToDrive } from "@/lib/sync/cloudSync";
 import { isDemoHousehold } from "@/lib/types";
 import {
@@ -124,69 +123,34 @@ export function AuthHydrator() {
         if (cancelled) return;
         const s = useAppStore.getState();
         if (existing) {
-          const text = await downloadBackup(token, existing.id);
+          // Route through the canonical `pullFromDrive` helper. It
+          // handles ciphertext detection, encryption-requires-
+          // passphrase signaling, parse coercion, AND the inbound
+          // shrinkage guard that refuses to overwrite a populated
+          // local collection with a smaller Drive one. The earlier
+          // inline download/decrypt/import block silently bypassed
+          // that guard — a first sign-in on a device that already
+          // had local-only scenarios/goals/budget items could silent-
+          // wipe them. `pullFromDrive` is the single source of truth
+          // for safe Drive ingestion; AuthHydrator must use it too.
+          //
+          // `silent: true` keeps the SignInOutcomeBanner from
+          // double-flashing on initial sign-in (the dedicated
+          // shrinkage / encryption banners take over their own UX).
+          const outcome = await pullFromDrive(useAppStore, { silent: true });
           if (cancelled) return;
-          // When ciphertext is detected, try the in-memory
-          // encryptionPassphrase. If unset, surface a sync error so
-          // the user can enter it from the Data page rather than
-          // silently failing.
-          const { looksEncrypted, unwrapBackup } = await import(
-            "@/lib/sync/crypto"
-          );
-          // Persist "encryption is in use" the moment we see ciphertext,
-          // even on devices that have never enabled it locally. Closes
-          // the cross-device degradation where Device B (fresh IDB)
-          // would otherwise push plaintext on top of Device A's
-          // ciphertext.
-          if (
-            looksEncrypted(text) &&
-            !useAppStore.getState().driveEncryptionEnabled
-          ) {
-            useAppStore.setState({ driveEncryptionEnabled: true });
-          }
-          let plain: string;
-          try {
-            plain = await unwrapBackup(
-              text,
-              useAppStore.getState().encryptionPassphrase,
-            );
-          } catch (err) {
-            const needsPassphrase =
-              err instanceof Error &&
-              err.name === "EncryptedRequiresPassphrase";
-            s.setGoogleSyncState({
-              googleSyncing: false,
-              googleSyncError: needsPassphrase
-                ? "Your Drive backup is encrypted. Enter your passphrase to sync."
-                : err instanceof Error
-                  ? err.message
-                  : String(err),
-              googleSyncBlockedReason: needsPassphrase ? "encrypted" : null,
+          if (outcome === "ok") {
+            useAppStore.getState().setGoogleSyncState({
+              googleLastSyncAt: Date.now(),
+              googleSyncError: null,
+              googleSyncBlockedReason: null,
+              lastSyncOutcome: "imported",
             });
-            return;
           }
-          const parsed = parseImport(plain);
-          s.importPayload({
-            household: parsed.household,
-            assumptions: parsed.assumptions,
-            scenarios: parsed.scenarios ?? [],
-            memberAssumptions: parsed.memberAssumptions,
-            preferredMemberId: parsed.preferredMemberId,
-            targetAllocation: parsed.targetAllocation,
-            glidePath: parsed.glidePath,
-            householdAnnualIncomeUSD: parsed.householdAnnualIncomeUSD,
-            goals: parsed.goals,
-            budgetItems: parsed.budgetItems,
-            incomeStreams: parsed.incomeStreams,
-            healthPlans: parsed.healthPlans,
-            healthImportanceWeights: parsed.healthImportanceWeights,
-          });
-          s.setGoogleSyncState({
-            googleLastSyncAt: Date.now(),
-            googleSyncError: null,
-            googleSyncBlockedReason: null,
-            lastSyncOutcome: "imported",
-          });
+          // For "encrypted" / "shrinkage-blocked" / "error", the
+          // dedicated banners (EncryptionUnlockBanner /
+          // SyncShrinkageBanner / GlobalSyncBanner) own the recovery
+          // UX via the state pullFromDrive already set.
         } else if (
           s.mode === "real" &&
           s.household.accounts.length > 0 &&

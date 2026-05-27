@@ -15,6 +15,7 @@ describe("checkShrinkage", () => {
     incomeStreams: [],
     healthPlans: [],
     healthImportanceWeights: {},
+    memberAssumptions: {},
   };
 
   it("returns null when no shrinkage", () => {
@@ -30,6 +31,7 @@ describe("checkShrinkage", () => {
         incomeStreams: [],
         healthPlans: [],
         healthImportanceWeights: {},
+    memberAssumptions: {},
       }),
     ).toBeNull();
   });
@@ -45,6 +47,7 @@ describe("checkShrinkage", () => {
           incomeStreams: [],
           healthPlans: [],
           healthImportanceWeights: {},
+    memberAssumptions: {},
         },
       ),
     ).toBeNull();
@@ -93,6 +96,7 @@ describe("checkShrinkage", () => {
         incomeStreams: [],
         healthPlans: [],
         healthImportanceWeights: {},
+    memberAssumptions: {},
       },
     );
     expect(r).toBeNull();
@@ -144,6 +148,7 @@ describe("checkShrinkageAgainstDrive: encryption fail-closed", () => {
     incomeStreams: [],
     healthPlans: [],
     healthImportanceWeights: {},
+    memberAssumptions: {},
   };
 
   it("returns null when Drive content is null (no backup)", async () => {
@@ -217,6 +222,7 @@ describe("SHRINKAGE_GUARDED constants — symmetric coverage", () => {
       incomeStreams: [],
       healthPlans: [],
       healthImportanceWeights: {},
+    memberAssumptions: {},
     };
   }
 

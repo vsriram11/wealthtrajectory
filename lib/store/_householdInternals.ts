@@ -66,11 +66,17 @@ export function updateHoldingValue<Ctx extends { household: Household }>(
 ): { household: Household } {
   return mapHolding(state, id, (h) => {
     if (!isPricedHolding(h)) return { ...h, valueUSD: value };
-    const price = h.lastPriceUSD > 0 ? h.lastPriceUSD : 1;
-    if (h.isManualPrice) {
+    // Zero/negative-price priced holding (corrupted state, or a
+    // live-fetched holding whose upstream returned 0): treat as
+    // MANUAL so we don't compute `shares = value` (i.e. 50,000
+    // shares for a $50k edit) — that nonsense share count then
+    // poisons the next live-refresh as the live price gets
+    // multiplied by the fake share count. Fall through to the
+    // manual-price branch which writes shares=1.
+    if (h.lastPriceUSD <= 0 || h.isManualPrice) {
       return { ...h, valueUSD: value, lastPriceUSD: value, shares: 1 };
     }
-    return { ...h, valueUSD: value, shares: value / price };
+    return { ...h, valueUSD: value, shares: value / h.lastPriceUSD };
   });
 }
 

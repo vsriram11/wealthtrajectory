@@ -156,6 +156,27 @@ describe("GLIDE_PATH_PRESETS — sanity checks on shipped presets", () => {
     }
   });
 
+  it("rising_equity_pfau dips at FIRE retirement age, then climbs", () => {
+    // The Pfau/Kitces U-shape: equity dips around the typical
+    // FIRE retirement age (mid-40s) to mitigate sequence-of-
+    // returns risk, then ramps back up as survival becomes more
+    // established. The defining property is "min equity is in
+    // the early-retirement window, not at the start or end."
+    const r = GLIDE_PATH_PRESETS.rising_equity_pfau;
+    const at30 = allocationAtAge(r, 30)?.equity ?? 0;
+    const at45 = allocationAtAge(r, 45)?.equity ?? 0;
+    const at80 = allocationAtAge(r, 80)?.equity ?? 0;
+    // Trough at 45 is BELOW both bookends.
+    expect(at45).toBeLessThan(at30);
+    expect(at45).toBeLessThan(at80);
+    // Late-life is HIGHER than starting equity (the "rising" half).
+    expect(at80).toBeGreaterThan(at30);
+    // Numerical pins on the published shape: ~40% at 45 trough,
+    // ~80% at 80. Tight bounds catch silent edits to the preset.
+    expect(at45).toBeCloseTo(0.4, 1);
+    expect(at80).toBeCloseTo(0.8, 1);
+  });
+
   it("conservative tapers fastest after 50", () => {
     const c = GLIDE_PATH_PRESETS.conservative;
     const at50 = allocationAtAge(c, 50)?.equity ?? 0;

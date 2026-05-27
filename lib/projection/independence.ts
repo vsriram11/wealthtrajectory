@@ -159,14 +159,49 @@ export function projectIndependence(
         cumulativeContributionsUSD += a.monthlyContributionUSD;
       }
     }
-    // Future-income streams during ACCUMULATION: boost the
-    // largest account so the cash flow lands somewhere
-    // identifiable (mirrors the contribution flow). During
-    // drawdown, income offsets the withdrawal — handled below.
-    if (independenceMonth === null && monthlyIncome > 0 && accounts.length > 0) {
-      let biggest = accounts[0];
-      for (const a of accounts) if (a.balanceUSD > biggest.balanceUSD) biggest = a;
-      biggest.balanceUSD += monthlyIncome;
+    // Future-income / distribution streams during ACCUMULATION:
+    //   - POSITIVE monthlyIncome (the typical case — part-time
+    //     work, rental income, etc.) boosts the largest account
+    //     so the cash flow lands somewhere identifiable (mirrors
+    //     the contribution flow).
+    //   - NEGATIVE monthlyIncome (partial-coast distribution —
+    //     user pulls from the portfolio during a sabbatical or
+    //     step-down period before formal retirement) drains all
+    //     accounts proportionally, mirroring the drawdown-phase
+    //     logic below. Single-account concentration is avoided
+    //     so the distribution doesn't accidentally zero out one
+    //     bucket while leaving others intact.
+    // During drawdown, income offsets the withdrawal (handled
+    // below; negative income simply makes the net withdrawal
+    // larger).
+    if (independenceMonth === null && monthlyIncome !== 0 && accounts.length > 0) {
+      // Distribute proportionally to current balances — mirrors
+      // the draw path below. Concentrating income in the single
+      // biggest account silently violated the per-account CAGR
+      // assumption: $80k/yr consulting income on a household with
+      // $2M bonds (1.5% real) + $1.5M brokerage (7%) would land
+      // entirely in the brokerage at 7%, vastly overstating
+      // long-run growth on what was supposed to be SAVED, not
+      // PORTFOLIO-PUMPED income.
+      const total = sumAccounts();
+      if (monthlyIncome > 0 && total > 0) {
+        for (const a of accounts) {
+          const share = a.balanceUSD / total;
+          a.balanceUSD += monthlyIncome * share;
+        }
+      } else if (monthlyIncome < 0 && total > 0) {
+        const draw = -monthlyIncome;
+        for (const a of accounts) {
+          const share = a.balanceUSD / total;
+          a.balanceUSD = Math.max(0, a.balanceUSD - draw * share);
+        }
+      }
+      // Signed update: positive contributes, negative subtracts
+      // from the cumulative net inflow figure. Net read is
+      // "total real-dollar money flowing into the portfolio over
+      // accumulation, after offsetting any pre-retirement
+      // distributions" — which is what the ContributionMix
+      // breakdown wants to show for partial-coast scenarios.
       cumulativeContributionsUSD += monthlyIncome;
     }
     for (const l of liabilities) {
@@ -233,7 +268,11 @@ export function projectIndependence(
     if (
       independenceMonth !== null &&
       ruinMonthIndex === null &&
-      sumAccounts() <= 0 &&
+      // Use the just-computed `nw` (assets − liabilities), not
+      // raw account balances. A household with $500 left in cash
+      // but a $400k mortgage has nw = −$399,500 and is clearly
+      // ruined; `sumAccounts()` would report $500 and miss it.
+      nw <= 0 &&
       month - independenceMonth > 0
     ) {
       ruinMonthIndex = series.length - 1;

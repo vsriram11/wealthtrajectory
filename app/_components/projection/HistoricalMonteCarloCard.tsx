@@ -2,10 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { useAppStore } from "@/lib/store";
-import {
-  effectiveHouseholdAssumptions,
-  resolveAssumptionsForMember,
-} from "@/lib/projection/useActiveProjection";
+import { useActiveProjection } from "@/lib/projection/useActiveProjection";
 import {
   HISTORICAL_RETURNS_FIRST_YEAR,
   HISTORICAL_RETURNS_LAST_YEAR,
@@ -15,17 +12,14 @@ import {
   runBootstrap,
   runHistoricalSequences,
   type MonteCarloResult,
-  type SimulationPath,
 } from "@/lib/projection/monteCarlo";
 import { computePortfolio } from "@/lib/portfolio/portfolio";
 import { computeLeveragedEquityBuckets } from "@/lib/portfolio/leveragedEquity";
+import { ageHousehold } from "@/lib/portfolio/futureAllocation";
+import { projectIndependence } from "@/lib/projection/independence";
 import {
   activeMemberIds,
-  activeMembers,
-  filterHousehold,
-  householdForRollups,
   householdNetWorth,
-  liquidHousehold,
 } from "@/lib/types";
 import {
   clampHaircut,
@@ -68,46 +62,37 @@ import { HistoricalReturnsTableModal } from "./HistoricalReturnsTableModal";
  * real-CAGR / real-SWR / today's-dollars model.
  */
 export function HistoricalMonteCarloCard() {
-  const household = useAppStore((s) => s.household);
-  const assumptions = useAppStore((s) => s.assumptions);
-  const memberAssumptions = useAppStore((s) => s.memberAssumptions);
-  const memberId = useAppStore((s) => s.selectedMemberId);
+  // Pull the fully-resolved projection inputs (rollup → member →
+  // liquidity → per-member assumption overrides → active scenario
+  // overrides) from the canonical resolver. Reading the raw store
+  // slices directly here was the historical bug — scenario overrides
+  // on `withdrawalRate` / `targetNetWorthUSD` / `legacyFloorUSD`
+  // never reached the MC card because the scenario merge happens
+  // inside `useActiveProjection`, not on `state.assumptions`. Same
+  // class of bug as #11 (AllocationPanel).
+  //
+  // (Note: scenario `holdingCAGRs` / `cagrDelta` are no-ops for the
+  // MC sim — it draws returns from the historical dataset, not from
+  // `expectedRealCAGR`. The methodology block calls that out so the
+  // user isn't surprised when a CAGR-only scenario leaves the
+  // success rate unchanged.)
+  const {
+    household: scopedHousehold,
+    assumptions: effective,
+    scenarioName,
+    memberId,
+  } = useActiveProjection();
   const budgetItems = useAppStore((s) => s.budgetItems);
   const incomeStreams = useAppStore((s) => s.incomeStreams);
-  const liquidityView = useAppStore((s) => s.liquidityView);
-
-  // Same effective-assumptions resolution as Plan tab uses.
-  const effective = memberId
-    ? resolveAssumptionsForMember(
-        assumptions,
-        memberAssumptions,
-        memberId,
-      )
-    : effectiveHouseholdAssumptions(
-        assumptions,
-        memberAssumptions,
-        // Pre-filter through activeMembers so blended assumptions
-        // honor the include-in-rollup flag (same filter used by
-        // income / age helpers — single source of truth).
-        activeMembers(household),
-      );
-
-  // Honor all three global filters: rollup-include → member →
-  // liquidity. When no specific member is selected, the rollup
-  // view is the default scoping (excluded members' accounts +
-  // liabilities drop out of NW + allocation). When a member IS
-  // explicitly selected, that filter wins — you see THAT person's
-  // view regardless of their rollup-include flag.
-  //
-  // (Mirrors the composition in `useActiveProjection`. Kept
-  // inline here because this card pre-computes inputs for the MC
-  // simulator separately from the projection hook.)
-  const scopedHousehold = useMemo(() => {
-    const scoped = memberId
-      ? filterHousehold(household, memberId)
-      : householdForRollups(household);
-    return liquidityView === "liquid" ? liquidHousehold(scoped) : scoped;
-  }, [household, memberId, liquidityView]);
+  // Capture the calendar year ONCE per mount via useState
+  // initializer. Reading `new Date().getFullYear()` inside a
+  // render-time useMemo would (a) violate react-hooks/purity
+  // (impure call during render) and (b) make this component's
+  // output date-dependent — a snapshot test would differ across
+  // year boundaries. The session-scope capture is fine: nobody
+  // is going to keep this tab open across New Year's Eve and
+  // expect the income-streams baseYear to roll.
+  const [baseYear] = useState(() => new Date().getFullYear());
 
   // Default the spend from the budget-derived corpus when set;
   // otherwise fall back to (target × SWR) as a sensible starting
@@ -190,10 +175,80 @@ export function HistoricalMonteCarloCard() {
   // class returns — when a glide path is configured, only year 0 of
   // the glide path is honored under "none" since no rebalance = no
   // glide-target snap.
-  const [rebalance, setRebalance] = useState<"annual" | "none">("annual");
+  const [rebalance, setRebalance] = useState<"annual" | "none" | "bucket">(
+    "annual",
+  );
+
+  // Project the household forward to the date the user is expected
+  // to reach the Independence target — then derive allocation from
+  // THAT composition, not today's. This is what makes a CAGR-only
+  // scenario actually move the MC numbers: different per-holding
+  // CAGRs produce different growth trajectories, so by the time the
+  // user hits target the mix is different (e.g. a "stocks +2pt"
+  // scenario ends up more equity-heavy at retirement than today's
+  // 60/40 mix would suggest). The sim runs at the target NW, so its
+  // allocation should reflect target-date composition.
+  //
+  // Edge cases:
+  //   - Already at/past target (months == 0) → use today's mix.
+  //   - Unreachable target (null) → use today's mix; the MC is still
+  //     useful as "if I magically got there, would I survive?" — but
+  //     scenario CAGR effects won't propagate here (correct: the
+  //     plan doesn't reach the target either).
+  //   - Below target → age the scoped household by monthsToTarget/12
+  //     years. ageHousehold uses each holding's expectedRealCAGR
+  //     (already scenario-merged through useActiveProjection), so
+  //     scenarios cascade in automatically.
+  // Pass income streams into projectIndependence so monthsToTarget
+  // is computed against the user's ACTUAL cash flow, not a stream-
+  // less idealization. This matters most for partial-coast users
+  // with NEGATIVE income streams (sabbatical / step-down bridges
+  // that drain the portfolio during accumulation) — without
+  // streams, monthsToTarget is too short, and the at-target
+  // composition we project for the MC sim reflects an unrealistic
+  // date. The Outlook tab already feeds streams into its projection;
+  // we match that here.
+  const streamsScoped = useMemo(
+    () =>
+      filterIncomeStreamsForRollups(
+        incomeStreams,
+        memberId,
+        activeMemberIds(scopedHousehold),
+      ),
+    [incomeStreams, memberId, scopedHousehold],
+  );
+  const monthsToTarget = useMemo(
+    () =>
+      projectIndependence(scopedHousehold, effective, undefined, {
+        // Project across the same horizon the simulator uses; ~70y
+        // covers any realistic Independence path. The engine
+        // tolerates a shorter or longer array — extras are ignored,
+        // misses default to 0.
+        incomePerYearUSD: incomePerYearUSD(streamsScoped, baseYear, 70),
+      }).monthsToIndependence,
+    [scopedHousehold, effective, streamsScoped, baseYear],
+  );
+  const yearsToTarget =
+    monthsToTarget != null && monthsToTarget > 0 ? monthsToTarget / 12 : 0;
+  const projectedHousehold = useMemo(() => {
+    if (yearsToTarget <= 0) return scopedHousehold;
+    return ageHousehold(scopedHousehold, yearsToTarget);
+  }, [scopedHousehold, yearsToTarget]);
 
   const portfolio = useMemo(
-    () => computePortfolio(scopedHousehold),
+    () => computePortfolio(projectedHousehold),
+    [projectedHousehold],
+  );
+  // Today's (un-aged) cash share, used ONLY for the bucket-
+  // strategy "configure a cash slice" warning. The simulator
+  // consumes the AGED `portfolio.classes.cashShare`, but the
+  // warning text says "your cash allocation" — and the user's
+  // mental model is "what I configured today," not "what my
+  // portfolio will look like at retirement." A user with 5% cash
+  // today and 20y of equity-compounding ahead would correctly
+  // see <1% cash at target but the warning shouldn't nag them.
+  const cashShareToday = useMemo(
+    () => computePortfolio(scopedHousehold).classes.cashShare,
     [scopedHousehold],
   );
   // Detect whether the user has any mortgaged RE in the current
@@ -268,13 +323,21 @@ export function HistoricalMonteCarloCard() {
   // applied to the deleveraging at the user's retirement tax rate
   // and SUBTRACTED from starting NW for the MC. Models the realistic
   // cost of restructuring a leveraged portfolio at retirement.
+  // Leveraged-ETF deleveraging tax is computed against the holdings
+  // as they exist AT retirement (projectedHousehold), not today —
+  // matches the rest of the card's "MC starts at target date"
+  // semantics. With a 20-year accumulation horizon, leveraged ETFs
+  // can balloon vs cost basis, so the tax hit on a +2pt-CAGR scenario
+  // is materially larger than on a baseline. Routing this through the
+  // projected household is what the user observed differing across
+  // scenarios already.
   const leveragedBuckets = useMemo(
     () =>
       computeLeveragedEquityBuckets(
-        scopedHousehold,
+        projectedHousehold,
         effective.retirementTaxRate,
       ),
-    [scopedHousehold, effective.retirementTaxRate],
+    [projectedHousehold, effective.retirementTaxRate],
   );
   // Decompose equity into face values to recompose post-tax.
   // `regular1xEquityUSD` is the equity that's neither recognized 2x
@@ -381,6 +444,23 @@ export function HistoricalMonteCarloCard() {
           rate: haircutRate,
           onlyAfterDownYear: haircutOnDownYearOnly,
         },
+        // Fixed-nominal freeze (SORR mitigation). The user
+        // configures both the freeze duration and the assumed
+        // inflation on the AssumptionsPanel. When years is 0
+        // (default), the simulator no-ops — back-compat.
+        ...(((): { fixedNominalFreeze?: {
+          years: number;
+          assumedInflationRate: number;
+        } } => {
+          const yearsRaw = effective.retirementFixedNominalYears;
+          if (yearsRaw == null || yearsRaw <= 0) return {};
+          return {
+            fixedNominalFreeze: {
+              years: yearsRaw,
+              assumedInflationRate: effective.expectedInflationRate,
+            },
+          };
+        })()),
       },
       // Future-income streams pre-computed into the per-year
       // array the simulator consumes. Filtered through the same
@@ -394,9 +474,12 @@ export function HistoricalMonteCarloCard() {
         filterIncomeStreamsForRollups(
           incomeStreams,
           memberId,
-          activeMemberIds(household),
+          // scopedHousehold is already rollup-filtered when memberId
+          // is null (and member-sliced when set), so active member
+          // ids derived from it match the canonical resolver.
+          activeMemberIds(scopedHousehold),
         ),
-        new Date().getFullYear(),
+        baseYear,
         Math.max(1, Math.min(60, horizonYears)),
       ),
       retirementHorizonYears: Math.max(1, Math.min(60, horizonYears)),
@@ -422,7 +505,7 @@ export function HistoricalMonteCarloCard() {
     annualSpend,
     budgetItems,
     incomeStreams,
-    household,
+    scopedHousehold,
     memberId,
     effective,
     horizonYears,
@@ -433,6 +516,7 @@ export function HistoricalMonteCarloCard() {
     glidePath,
     memberAge,
     rebalance,
+    baseYear,
   ]);
 
   const successPct = (result.successRate * 100).toFixed(1);
@@ -714,12 +798,16 @@ export function HistoricalMonteCarloCard() {
           </div>
         )}
 
-        {/* Rebalancing-policy toggle. Default Annual matches standard
-            retirement-survival convention. None lets the portfolio
-            drift — when a glide path is configured, only year 0 is
-            honored under None (no rebalance = no glide-target snap).
-            Both modes go through the same simulator path; the choice
-            is part of the input bundle. */}
+        {/* Rebalancing-policy toggle.
+              - Annual: snap to target weights every year (Trinity
+                Study / cfiresim convention).
+              - None: set-and-forget; let weights drift.
+              - Bucket: annual rebalance EXCEPT in retirement years
+                following a market drop, where the simulator skips
+                the snap so equity can recover unsold AND draws the
+                spend from the cash slice first. Next up-year's
+                snap refills the cash slice. Requires a non-zero
+                cash allocation to do anything. */}
         <div className="mt-3 flex items-center justify-between gap-2 rounded-md border border-border bg-bg-elevated px-3 py-2">
           <div className="min-w-0 text-[10px] leading-snug text-text-dim">
             <span className="text-text">Rebalance</span> between
@@ -736,8 +824,22 @@ export function HistoricalMonteCarloCard() {
               active={rebalance === "none"}
               onClick={() => setRebalance("none")}
             />
+            <ModeChip
+              label="Bucket"
+              active={rebalance === "bucket"}
+              onClick={() => setRebalance("bucket")}
+            />
           </div>
         </div>
+        {rebalance === "bucket" && cashShareToday < 0.005 && (
+          <div className="mt-2 rounded-md border border-amber-300/40 bg-amber-300/5 px-2.5 py-1.5 text-[10px] leading-snug text-amber-200">
+            Bucket strategy is on but your cash allocation is
+            essentially 0%. With no cash to drain, the policy
+            degrades to standard annual rebalance — set up a
+            small cash slice (5% is typical) for the strategy to
+            actually matter.
+          </div>
+        )}
 
         <div className="mt-3 rounded-md border border-border bg-bg-elevated px-3 py-2 text-[10px] leading-snug text-text-dim">
           <div className="text-[10px] uppercase tracking-wider text-text-muted">
@@ -747,13 +849,33 @@ export function HistoricalMonteCarloCard() {
             What the stress test is actually doing
           </div>
           <ul className="mt-1 space-y-1">
+            {scenarioName && (
+              <li>
+                <span className="text-text">
+                  Active scenario:{" "}
+                  <span className="rounded-sm bg-accent/15 px-1.5 py-0.5 text-accent">
+                    {scenarioName}
+                  </span>
+                </span>{" "}
+                — withdrawal rate / target NW / legacy floor overrides
+                propagate into the spend &amp; starting-NW defaults
+                above. Contribution multipliers don&apos;t apply (MC is
+                a drawdown-phase sim — contributions are accumulation-
+                phase). CAGR overrides don&apos;t apply either: this
+                sim draws returns from the historical dataset, not
+                from your expected-CAGR assumptions.
+              </li>
+            )}
             <li>
               <span className="text-text">Real-terms throughout</span> —
               returns, spend, and NW are all in today&apos;s dollars; no
               nominal/CPI mixing.
             </li>
             <li>
-              <span className="text-text">Allocation inferred from your portfolio:</span>{" "}
+              <span className="text-text">
+                Allocation inferred from your portfolio
+                {yearsToTarget > 0 && " AT target date"}:
+              </span>{" "}
               {(allocation.stocksFraction * 100).toFixed(0)}% stocks /{" "}
               {(allocation.bondsFraction * 100).toFixed(0)}% bonds /{" "}
               {(allocation.cashFraction * 100).toFixed(0)}% cash
@@ -783,6 +905,22 @@ export function HistoricalMonteCarloCard() {
               )}
               .
             </li>
+            {yearsToTarget > 0 && (
+              <li>
+                <span className="text-text">
+                  Composition projected forward {yearsToTarget.toFixed(1)} yrs
+                  to target date.
+                </span>{" "}
+                The MC sim starts at your target NW, so the allocation it
+                uses reflects what the portfolio will look like AT
+                target — each holding aged at its own expected real
+                CAGR, contributions compounded in, liabilities amortized.
+                This is why scenario CAGR / contribution overrides shift
+                the MC results: they change the growth trajectory and
+                therefore the at-retirement mix, even though today&apos;s
+                holdings are unchanged.
+              </li>
+            )}
             {rebalance === "annual" ? (
               glidePathActive ? (
                 <li>
@@ -811,6 +949,26 @@ export function HistoricalMonteCarloCard() {
                   page and it&apos;ll honor that here instead.
                 </li>
               )
+            ) : rebalance === "bucket" ? (
+              <li>
+                <span className="text-text">
+                  Cash-bucket strategy (Kitces &ldquo;bond tent&rdquo; / Pfau).
+                </span>{" "}
+                Annual rebalance in normal years; in retirement
+                years following a market drop, the simulator skips
+                the snap (equity stays unsold through the recovery)
+                and takes the whole withdrawal from the{" "}
+                <span className="num text-text">
+                  {(allocation.cashFraction * 100).toFixed(0)}%
+                </span>{" "}
+                cash slice first — only spilling proportionally to
+                other classes when cash runs dry. Next up-year&apos;s
+                annual snap refills the cash bucket from appreciated
+                equity. SORR-mitigation for multi-year downturns;
+                annual rebalance can still outperform on V-shaped
+                crash-and-bounce sequences (the rebalance-buy-the-
+                dip mechanic), so this isn&apos;t a free lunch.
+              </li>
             ) : (
               <li>
                 <span className="text-text">

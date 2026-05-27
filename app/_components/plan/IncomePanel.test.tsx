@@ -160,6 +160,76 @@ describe("IncomePanel — empty state + creation", () => {
     const addInDialog = screen.getAllByRole("button", { name: /^Add$/i })[0];
     expect(addInDialog).toBeDisabled();
   });
+
+  it("distribution kind chip stores annualUSD as NEGATIVE (partial-coast semantics)", () => {
+    // Issue #6: the creator's Type chip (Income / Distribution)
+    // signs the stored `annualUSD` at save time. The engine model
+    // is signed — negative streams pull from the portfolio (the
+    // partial-coast / sabbatical / step-down pattern). Pin the
+    // chip-to-sign contract so a future refactor that decouples
+    // them (or removes the chip) can't silently regress the
+    // entire signed-stream feature.
+    seed({});
+    render(<IncomePanel />);
+    fireEvent.click(
+      screen.getByRole("button", { name: /Add an income stream/i }),
+    );
+    // Switch to Distribution mode.
+    fireEvent.click(
+      screen.getByRole("button", { name: /^Distribution$/ }),
+    );
+    fireEvent.change(screen.getByLabelText(/Stream label/i), {
+      target: { value: "Partial-coast bridge" },
+    });
+    fireEvent.change(screen.getByLabelText(/^Start year$/i), {
+      target: { value: "2030" },
+    });
+    fireEvent.change(screen.getByLabelText(/^End year$/i), {
+      target: { value: "2034" },
+    });
+    // The visible amount input is positive; sign is applied at save.
+    fireEvent.change(
+      screen.getByLabelText(/Annual amount in real dollars/i),
+      { target: { value: "50000" } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^Add$/i }));
+
+    const streams = useAppStore.getState().incomeStreams;
+    expect(streams).toHaveLength(1);
+    expect(streams[0].annualUSD).toBe(-50_000);
+    expect(streams[0].label).toBe("Partial-coast bridge");
+  });
+
+  it("income kind chip (default) stores annualUSD as POSITIVE", () => {
+    // Companion to the distribution test — make sure flipping
+    // back to Income keeps the positive sign. The chip pair must
+    // be exclusive (only one active at a time).
+    seed({});
+    render(<IncomePanel />);
+    fireEvent.click(
+      screen.getByRole("button", { name: /Add an income stream/i }),
+    );
+    // Touch Distribution then back to Income to exercise the toggle.
+    fireEvent.click(screen.getByRole("button", { name: /^Distribution$/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^Income$/ }));
+    fireEvent.change(screen.getByLabelText(/Stream label/i), {
+      target: { value: "Consulting" },
+    });
+    fireEvent.change(screen.getByLabelText(/^Start year$/i), {
+      target: { value: "2032" },
+    });
+    fireEvent.change(screen.getByLabelText(/^End year$/i), {
+      target: { value: "2037" },
+    });
+    fireEvent.change(
+      screen.getByLabelText(/Annual amount in real dollars/i),
+      { target: { value: "80000" } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^Add$/i }));
+
+    const streams = useAppStore.getState().incomeStreams;
+    expect(streams[0].annualUSD).toBe(80_000);
+  });
 });
 
 describe("IncomePanel — list row inline edits", () => {

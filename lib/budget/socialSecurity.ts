@@ -156,7 +156,12 @@ export function estimateSocialSecurityAtFRA(
   }
 
   const annualUSDAtFRA = pia * 12;
-  const fraYear = currentYear + (SS_FRA - currentAge);
+  // Clamp non-negative: when the user is already past FRA, the
+  // FRA year is "now or earlier." Return currentYear rather than
+  // a year in the past — a stream with `startYear < baseYear`
+  // would be silently skipped by `incomePerYearUSD`, hiding the
+  // expected benefit from every projection / MC run.
+  const fraYear = currentYear + Math.max(0, SS_FRA - currentAge);
 
   return { annualUSDAtFRA, fraYear };
 }

@@ -115,9 +115,9 @@ export function allocationAtAge(
 
 /**
  * Three named glide-path presets matching the major target-date
- * fund families. Numbers are simplified — the real funds tweak
- * yearly, but these capture the shape users mean when they say
- * "Vanguard-style glide-path."
+ * fund families, plus a Pfau/Kitces rising-equity shape. Numbers are
+ * simplified — the real funds tweak yearly, but these capture the
+ * shape users mean when they say "Vanguard-style glide-path."
  *
  * Vanguard Target Retirement (representative):
  *   age 25: 90/10 stocks/bonds
@@ -136,6 +136,18 @@ export function allocationAtAge(
  *   age 25: 90/10
  *   age 65: 80/20  (stays high; "perpetual portfolio" for Independence crowd)
  *   age 90: 80/20
+ *
+ * Rising-equity (Pfau/Kitces "U-shape"):
+ *   Dip equity at retirement to mitigate sequence-of-returns risk,
+ *   then ramp BACK UP as the portfolio survives the early-retirement
+ *   gauntlet. The original Pfau/Kitces paper (Reducing Retirement
+ *   Risk with a Rising Equity Glide Path, 2014) tests starts between
+ *   20-40% equity at retirement → 60-80% by end-of-life. We use a
+ *   FIRE-friendly shape: 60% equity in late-accumulation drifts down
+ *   to 40% at the typical FIRE retirement age, then rises back to
+ *   80% by age 80 as the portfolio's survival is increasingly
+ *   established. See https://www.kitces.com/blog/rising-equity-glidepaths-in-retirement/
+ *   for the research baseline.
  */
 export const GLIDE_PATH_PRESETS: Record<string, GlidePath> = {
   vanguard_target_retirement: {
@@ -160,6 +172,14 @@ export const GLIDE_PATH_PRESETS: Record<string, GlidePath> = {
       { age: 25, allocation: { equity: 0.9, bond: 0.1 } },
       { age: 65, allocation: { equity: 0.8, bond: 0.2 } },
       { age: 90, allocation: { equity: 0.8, bond: 0.2 } },
+    ],
+  },
+  rising_equity_pfau: {
+    waypoints: [
+      { age: 30, allocation: { equity: 0.6, bond: 0.4 } },
+      { age: 45, allocation: { equity: 0.4, bond: 0.6 } },
+      { age: 60, allocation: { equity: 0.6, bond: 0.4 } },
+      { age: 80, allocation: { equity: 0.8, bond: 0.2 } },
     ],
   },
 };

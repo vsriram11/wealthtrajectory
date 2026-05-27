@@ -29,8 +29,15 @@ type Collection =
  * but the underlying shape is `Record<string, ...>` instead of an
  * array. Tracked separately so the original array-based check
  * stays simple.
+ *
+ * `memberAssumptions` holds per-member overrides on every assumption
+ * field (target NW, withdrawal rate, fixed-nominal freeze, etc.).
+ * Losing a populated overrides map silently re-anchors every
+ * member to the household default — the user re-tunes everything
+ * and on next sync re-loses it. Same N→0 failure mode as the
+ * other guarded collections.
  */
-type MapCollection = "healthImportanceWeights";
+type MapCollection = "healthImportanceWeights" | "memberAssumptions";
 
 export type ShrinkageReport = {
   shrinking: (Collection | MapCollection)[];
@@ -71,6 +78,7 @@ export const SHRINKAGE_GUARDED_ARRAY_COLLECTIONS = [
 
 export const SHRINKAGE_GUARDED_MAP_COLLECTIONS = [
   "healthImportanceWeights",
+  "memberAssumptions",
 ] as const satisfies readonly MapCollection[];
 
 const TRACKED_COLLECTIONS: readonly Collection[] =
@@ -102,6 +110,7 @@ export function checkShrinkage(
     incomeStreams?: unknown[];
     healthPlans?: unknown[];
     healthImportanceWeights?: Record<string, unknown>;
+    memberAssumptions?: Record<string, unknown>;
   },
   currentState: {
     scenarios: unknown[];
@@ -110,6 +119,7 @@ export function checkShrinkage(
     incomeStreams: unknown[];
     healthPlans: unknown[];
     healthImportanceWeights: Record<string, unknown>;
+    memberAssumptions: Record<string, unknown>;
   },
 ): ShrinkageReport | null {
   const driveCounts: ShrinkageReport["driveCounts"] = {};
@@ -175,6 +185,7 @@ export async function checkShrinkageAgainstDrive(
     incomeStreams: unknown[];
     healthPlans: unknown[];
     healthImportanceWeights: Record<string, unknown>;
+    memberAssumptions: Record<string, unknown>;
   },
 ): Promise<ShrinkageReport | null> {
   if (!currentDriveContent) return null;

@@ -180,10 +180,17 @@ export function feeAnalysis(
         // Value-weight the CAGR so heterogeneous user overrides still
         // produce a sensible "net" rate per symbol.
         const newTotal = cur.valueUSD + h.valueUSD;
-        cur.weightedCAGR =
-          (cur.weightedCAGR * cur.valueUSD +
-            h.expectedRealCAGR * h.valueUSD) /
-          newTotal;
+        // Guard against divide-by-zero when both the existing
+        // aggregate and the new entry sum to 0 (corrupted /
+        // zero-value holding) — without it, weightedCAGR
+        // becomes NaN and propagates into `lifetimeDragUSD`,
+        // poisoning the fee-drag display.
+        if (newTotal > 0) {
+          cur.weightedCAGR =
+            (cur.weightedCAGR * cur.valueUSD +
+              h.expectedRealCAGR * h.valueUSD) /
+            newTotal;
+        }
         cur.valueUSD = newTotal;
       } else {
         bySymbol.set(sym.toUpperCase(), {

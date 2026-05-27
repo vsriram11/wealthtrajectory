@@ -146,6 +146,27 @@ export function parseImport(text: string): ExportPayload {
   ) {
     coerced.incomeStreams = [];
   }
+  // Per-stream NaN-safety on import. The slice's coerceWritableFields
+  // only runs on UI-driven add/update — direct import / Drive
+  // hydration bypasses it. Strip non-finite annualUSD so a corrupted
+  // payload (or a payload that survived a `JSON.stringify` Infinity
+  // round-trip-as-null) can't poison downstream cash-flow accumulators.
+  // Signed values are preserved; only NaN / Infinity / non-number are
+  // coerced to 0 (matches the slice contract).
+  if (Array.isArray(coerced.incomeStreams)) {
+    coerced.incomeStreams = (coerced.incomeStreams as unknown[]).map((s) => {
+      if (s == null || typeof s !== "object") return s;
+      const stream = s as Record<string, unknown>;
+      if (
+        stream.annualUSD != null &&
+        (typeof stream.annualUSD !== "number" ||
+          !Number.isFinite(stream.annualUSD))
+      ) {
+        return { ...stream, annualUSD: 0 };
+      }
+      return stream;
+    });
+  }
   if (coerced.goals !== undefined && !Array.isArray(coerced.goals)) {
     coerced.goals = [];
   }
@@ -165,6 +186,45 @@ export function parseImport(text: string): ExportPayload {
       !Array.isArray((coerced.glidePath as { waypoints?: unknown }).waypoints))
   ) {
     coerced.glidePath = null;
+  }
+  // Range-validate `retirementFixedNominalYears` on Assumptions
+  // and on every memberAssumptions override. The engine has a
+  // finite/positive guard but consumer UIs (AssumptionsPanel
+  // slider, MC card chips) display the field verbatim — a
+  // corrupted Drive payload with `-50` or `NaN` would render
+  // garbage in the slider. Coerce non-numeric / non-finite /
+  // out-of-range values back to undefined so the assumption
+  // falls back to "no freeze."
+  const sanitizeFreezeYears = (obj: Record<string, unknown>): void => {
+    const v = obj.retirementFixedNominalYears;
+    if (v == null) return;
+    // Range matches the AssumptionsPanel slider (0..15). A payload
+    // outside that range can't round-trip — the slider would
+    // truncate on next save, silently losing the user's number.
+    // Refuse out-of-range values rather than ship a silent
+    // truncation bug.
+    if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > 15) {
+      delete obj.retirementFixedNominalYears;
+    } else {
+      // Round to integer (the slider stores integers; a fractional
+      // year would behave oddly in the engine's geometric decay).
+      obj.retirementFixedNominalYears = Math.round(v);
+    }
+  };
+  if (coerced.assumptions && typeof coerced.assumptions === "object") {
+    sanitizeFreezeYears(coerced.assumptions as Record<string, unknown>);
+  }
+  if (
+    coerced.memberAssumptions &&
+    typeof coerced.memberAssumptions === "object" &&
+    !Array.isArray(coerced.memberAssumptions)
+  ) {
+    for (const k of Object.keys(coerced.memberAssumptions)) {
+      const m = (coerced.memberAssumptions as Record<string, unknown>)[k];
+      if (m && typeof m === "object" && !Array.isArray(m)) {
+        sanitizeFreezeYears(m as Record<string, unknown>);
+      }
+    }
   }
   if (
     coerced.householdAnnualIncomeUSD !== undefined &&

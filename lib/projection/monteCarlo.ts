@@ -146,6 +146,39 @@ export type MonteCarloInputs = {
   spending?: {
     variableUSD: number;
     haircut: { rate: number; onlyAfterDownYear: boolean };
+    /**
+     * Fixed-nominal SORR-mitigation: freeze withdrawals at the
+     * NOMINAL year-0 amount for the first `fixedNominalYears`
+     * retirement years, instead of inflating with the cost of
+     * living. Translated into the real-terms engine, this means
+     * the effective real withdrawal in retirement-year y is
+     *   annualSpendUSD / (1 + assumedInflationRate) ** y
+     * for y ∈ [0, fixedNominalYears), then snaps back to the
+     * full `annualSpendUSD` in real terms thereafter. The cut
+     * deepens linearly: y0 takes the full real withdrawal, y1
+     * takes ~97% of it (at 3% inflation), …, y9 takes ~76%. Over
+     * a 10-year freeze the cumulative real shrinkage is ~14%
+     * of one year's spend — meaningful sequence-of-returns risk
+     * relief when applied during the early-retirement danger zone.
+     *
+     * Composes with the variable-haircut feature: the freeze
+     * scales the BASE spend; the haircut subtracts the variable
+     * slice. Both can be active simultaneously.
+     *
+     * Default behavior: no freeze (0 years). Set `years` > 0 +
+     * a sensible `assumedInflationRate` (typically 0.025-0.035
+     * for the US — match the household's expectedInflationRate
+     * assumption for consistency) to turn it on.
+     *
+     * Reference: SORR-mitigation strategy with documented
+     * efficacy in lean-FIRE / long-horizon plans (10y freeze
+     * adds ~3-4 percentage points to historical success rate
+     * for the canonical $1M / $40k / 45y lean baseline).
+     */
+    fixedNominalFreeze?: {
+      years: number;
+      assumedInflationRate: number;
+    };
   };
   /**
    * Optional pre-retirement contribution. Modeled as positive
@@ -237,18 +270,40 @@ export type MonteCarloInputs = {
  *               ignored under this policy (no rebalance = no
  *               glide-target snap).
  */
-export type RebalancePolicy = "annual" | "none";
+export type RebalancePolicy = "annual" | "none" | "bucket";
 
 export type SimulationOptions = {
   /** Historical dataset to draw from. Defaults to HISTORICAL_REAL_RETURNS. */
   dataset?: readonly AnnualRealReturns[];
   /**
-   * Rebalancing policy. Default "annual" — snap to target each year.
-   * Pass "none" to model a set-and-forget portfolio (initial weights
-   * from year 0, then drift). The two modes can produce materially
-   * different success rates over long horizons because differential
-   * class returns let equity drift up over time in "none" mode,
-   * which raises both expected wealth AND sequence-risk exposure.
+   * Rebalancing policy.
+   *   - "annual" (default): snap to target weights each year. Standard
+   *     retirement-survival convention (Trinity Study, cfiresim, …).
+   *   - "none": set-and-forget. Initial weights at year 0, then the
+   *     portfolio drifts based on differential class returns.
+   *   - "bucket": cash-bucket strategy (Kitces "bond tent" / Pfau
+   *     two-bucket). Same as "annual" EXCEPT in retirement years
+   *     where the prior year's stock return was negative — in those
+   *     years the simulator (a) skips the year-start snap so the
+   *     equity slice can recover unsold, and (b) takes the year's
+   *     withdrawal from the cash bucket first, only spilling to
+   *     other classes when cash runs dry. Next up-year's annual
+   *     snap automatically refills the cash bucket from appreciated
+   *     equity. The user must configure a non-zero cash slice for
+   *     this to matter; with zero cash the policy degrades silently
+   *     to standard annual rebalance with proportional draw.
+   *
+   *     Interaction with glidePath: in a down-followup year the
+   *     bucket policy SKIPS the annual snap — which means the
+   *     per-age glide-path target is NOT applied that year. The
+   *     portfolio holds the previous year's composition. Over a
+   *     multi-year drawdown this can stall glide-path migration
+   *     for multiple consecutive years before the next up-year's
+   *     snap catches the portfolio up to the age-resolved target.
+   *     This is intended: the WHOLE POINT of bucket is "don't
+   *     rebalance into a falling market." A user who wants strict
+   *     glide-path adherence regardless of returns should use the
+   *     "annual" policy.
    */
   rebalance?: RebalancePolicy;
 };
@@ -492,7 +547,30 @@ export function simulatePath(
   let lB = nw * initialWeights.wL;
 
   for (let y = 0; y < totalYears; y++) {
-    if (rebalancePolicy === "annual") {
+    // "bucket" mode behaves like "annual" except in retirement
+    // years following a market drop, where the snap is skipped so
+    // the equity slice can recover unsold AND the withdrawal is
+    // taken from the cash bucket first. Compute the per-year
+    // decision once so the snap branch + withdrawal branch agree.
+    //
+    // Trigger gate alignment with the variable-haircut feature:
+    // `y >= yearsPre` (first retirement year is eligible) AND
+    // `y > 0` (we need a prior-year stock return to read).
+    // CRUCIAL: this means a user who retires RIGHT AFTER a
+    // -30% accumulation-year crash IS protected by the bucket
+    // strategy in year 0 of retirement — the exact SORR window
+    // the strategy is designed for. An earlier off-by-one used
+    // `y > yearsPre` and silently excluded that case.
+    const bucketFiresThisYear =
+      rebalancePolicy === "bucket" &&
+      y >= yearsPre &&
+      y > 0 &&
+      (stockReturns[y - 1] ?? 0) < 0;
+
+    if (
+      rebalancePolicy === "annual" ||
+      (rebalancePolicy === "bucket" && !bucketFiresThisYear)
+    ) {
       // Annual rebalance-to-target. Each year we snap to the target
       // weights (static from `inputs.allocation`, or per-age from
       // the glide path when configured) BEFORE applying that year's
@@ -505,8 +583,8 @@ export function simulatePath(
       rB = nw * wR;
       lB = nw * wL;
     }
-    // For "none" mode, balances persist from the previous iteration
-    // (or from the year-0 initialization above). No snap.
+    // For "none" mode AND "bucket" mode in a down-year-followup
+    // year, balances persist from the previous iteration. No snap.
 
     // Apply this year's real returns.
     const rs = stockReturns[y] ?? 0;
@@ -551,6 +629,31 @@ export function simulatePath(
     // Outside retirement, the haircut is irrelevant — pre-retirement
     // is contribution/no-withdrawal.
     let withdrawal = inputs.annualSpendUSD;
+    // Fixed-nominal freeze, applied FIRST so the variable-haircut
+    // operates on the post-freeze base (the haircut intent is "cut
+    // discretionary spend by X%" — that should apply to whatever
+    // the real withdrawal is in this year, frozen or not). The
+    // freeze is a multiplicative real-decay over the first
+    // `fixedNominalFreeze.years` retirement years.
+    if (inputs.spending?.fixedNominalFreeze && y >= yearsPre) {
+      const { years: freezeYears, assumedInflationRate } =
+        inputs.spending.fixedNominalFreeze;
+      const yearsIntoRetirement = y - yearsPre;
+      if (freezeYears > 0 && yearsIntoRetirement < freezeYears) {
+        const decay = Math.pow(
+          1 + assumedInflationRate,
+          yearsIntoRetirement,
+        );
+        // Defensive: pathological inflation rates (≤ -1, imported
+        // from corrupted Drive data despite UI bounds) would make
+        // 1 + r = 0 → decay = 0 → divide-by-zero → Infinity. Same
+        // for non-finite values. Engine NaN-safety contract says
+        // bad inputs degrade to no-op, not poison downstream.
+        if (Number.isFinite(decay) && decay > 0) {
+          withdrawal = withdrawal / decay;
+        }
+      }
+    }
     if (inputs.spending && y >= yearsPre) {
       const { variableUSD, haircut } = inputs.spending;
       const fires = haircut.onlyAfterDownYear
@@ -558,6 +661,16 @@ export function simulatePath(
         : true;
       if (fires) withdrawal -= variableUSD * haircut.rate;
     }
+    // Clamp at 0. The fixed-nominal freeze + a large variable haircut
+    // can compose to a negative `withdrawal`, which would flip the
+    // cash-flow sign (negative-withdrawal becomes a positive deposit
+    // in `cf = -withdrawal + income`). Engine should treat that as
+    // "user took no draw this year," not "the simulator deposited
+    // money into the portfolio." A user who configured a 100%
+    // variable-haircut with a deep freeze decay is asking for "as
+    // little spend as the haircut allows," not auto-saving. Clamp at
+    // 0 makes the floor explicit.
+    if (withdrawal < 0) withdrawal = 0;
 
     // Per-year income offset (consulting, pension, Social
     // Security, rental). Real dollars; ADDED to cash flow each
@@ -571,12 +684,136 @@ export function simulatePath(
     const cfWithGrowth = cf * (1 + rImplied / 2);
     nw = nwAfterReturns + cfWithGrowth;
 
-    if (rebalancePolicy === "none") {
-      // Distribute cf proportionally to current (post-return)
-      // bucket weights so cf itself doesn't force a rebalance. The
-      // drift across years comes purely from differential class
-      // returns; this step just keeps the per-class balances
-      // consistent with the new total nw.
+    if (bucketFiresThisYear) {
+      // Cash-bucket strategy: in a year following a market drop,
+      // the year's withdrawal comes out of the cash bucket first;
+      // any remainder spills proportionally across the OTHER
+      // classes. Net effect: equity stays unsold through the
+      // recovery year, materially reducing locked-in losses on
+      // the SORR-vulnerable early-retirement crash.
+      //
+      // Income (positive cf component) is layered back through the
+      // standard proportional distribution — income isn't a
+      // "withdrawal" the user is choosing where to source from,
+      // it's an inflow that should land where new contributions
+      // would (i.e. spread by current weights). Net = -withdraw +
+      // income; we split that into the two pieces.
+      //
+      // The mid-year growth adjustment applies to BOTH the
+      // withdrawal and the income at the same blended rate the
+      // rest of the engine uses, so the math doesn't drift away
+      // from the existing convention.
+      const drawAtMidYear = withdrawal * (1 + rImplied / 2);
+      const incomeAtMidYear = income * (1 + rImplied / 2);
+      // Drain from cash first, capped at what's available.
+      // Floor cB at 0 defensively: a small negative drift from
+      // an earlier `factor` rescale would otherwise let the min
+      // return that negative, ADDING (subtracting-a-negative) to
+      // drawRemaining AND leaving cash more negative. Guard once
+      // here so the rest of the branch operates on clean inputs.
+      const available = Math.max(0, cB);
+      const fromCash = Math.min(available, drawAtMidYear);
+      cB = available - fromCash;
+      const drawRemaining = drawAtMidYear - fromCash;
+      // Spillover: take what's left from non-cash classes
+      // proportionally. Per-class accounting asymmetry: the
+      // WITHDRAWAL is sourced cash-first by design (the strategy's
+      // whole point), but POSITIVE INCOME is credited
+      // proportionally to every class (it isn't a draw the user
+      // controls the source of; it's an inflow that should land
+      // where new contributions would). The two operations use
+      // different denominators on purpose.
+      const nonCashTotal = sB + bB + gB + rB + lB;
+      if (drawRemaining > 0 && nonCashTotal > 0) {
+        sB -= drawRemaining * (sB / nonCashTotal);
+        bB -= drawRemaining * (bB / nonCashTotal);
+        gB -= drawRemaining * (gB / nonCashTotal);
+        rB -= drawRemaining * (rB / nonCashTotal);
+        lB -= drawRemaining * (lB / nonCashTotal);
+      }
+      // Clamp non-cash classes BEFORE the income redistribution so
+      // the proportionality math (`sB / totalNow`) sees only non-
+      // negative weights. Without this, a class left slightly
+      // negative by the spillover above would corrupt the income
+      // distribution: `incomeAtMidYear * (-1e-12 / totalNow)`
+      // pushes that class further negative while the offset goes
+      // to nothing. Compounds across years.
+      if (sB < 0) sB = 0;
+      if (bB < 0) bB = 0;
+      if (gB < 0) gB = 0;
+      if (rB < 0) rB = 0;
+      if (lB < 0) lB = 0;
+      if (incomeAtMidYear > 0) {
+        // Positive income: distribute to ALL classes by current
+        // weights.
+        const totalNow = sB + bB + cB + gB + rB + lB;
+        if (totalNow > 0) {
+          sB += incomeAtMidYear * (sB / totalNow);
+          bB += incomeAtMidYear * (bB / totalNow);
+          cB += incomeAtMidYear * (cB / totalNow);
+          gB += incomeAtMidYear * (gB / totalNow);
+          rB += incomeAtMidYear * (rB / totalNow);
+          lB += incomeAtMidYear * (lB / totalNow);
+        }
+      } else if (incomeAtMidYear < 0) {
+        // NEGATIVE income (partial-coast distribution, sabbatical
+        // bridge — see lib/budget/incomeStreams.ts signed
+        // semantics). This is a SECOND withdrawal in everything-
+        // but-name; route it through the same cash-first → spill
+        // logic so the bucket strategy actually shields equity
+        // from BOTH the planned retirement spend AND any
+        // negative-income overlay. Without this branch, the
+        // negative income would be silently dropped (the per-
+        // class nw re-derive at the end would erase the signed
+        // cfWithGrowth from earlier). Real bug caught in audit.
+        const distributionAmount = -incomeAtMidYear;
+        const distFromCash = Math.min(Math.max(0, cB), distributionAmount);
+        cB = Math.max(0, cB) - distFromCash;
+        const distRemaining = distributionAmount - distFromCash;
+        const nonCashAfter = sB + bB + gB + rB + lB;
+        if (distRemaining > 0 && nonCashAfter > 0) {
+          sB -= distRemaining * (sB / nonCashAfter);
+          bB -= distRemaining * (bB / nonCashAfter);
+          gB -= distRemaining * (gB / nonCashAfter);
+          rB -= distRemaining * (rB / nonCashAfter);
+          lB -= distRemaining * (lB / nonCashAfter);
+        }
+      }
+      // Final clamp after the negative-income spillover (which
+      // could also leave a class slightly negative through the
+      // proportional subtraction). Cash is already non-negative
+      // from `available = Math.max(0, cB)` upstream.
+      if (sB < 0) sB = 0;
+      if (bB < 0) bB = 0;
+      if (gB < 0) gB = 0;
+      if (rB < 0) rB = 0;
+      if (lB < 0) lB = 0;
+      // Re-derive nw from per-class balances so the aggregate is
+      // exactly internally-consistent (avoid `cfWithGrowth`-derived
+      // value drifting from the per-class accounting).
+      nw = sB + bB + cB + gB + rB + lB;
+      // If the portfolio bust this year, zero everything so the
+      // next iteration starts from clean (negative) zero. The
+      // trailing nw<=0 check at the end of the loop will mark
+      // failedAtYear; this branch must mirror it.
+      if (nw <= 0) {
+        sB = 0;
+        bB = 0;
+        cB = 0;
+        gB = 0;
+        rB = 0;
+        lB = 0;
+      }
+    } else if (rebalancePolicy === "none" || rebalancePolicy === "bucket") {
+      // Both modes maintain per-class balances across years.
+      // - "none": balances drift purely from differential class
+      //   returns. Cash flow is distributed proportionally to
+      //   current weights so cf itself doesn't force a rebalance.
+      // - "bucket" (snap-year case — prior was up OR y=0): the
+      //   year-start snap above set balances to target weights;
+      //   here we just keep them consistent with the new total
+      //   nw after cf, since the NEXT year may skip the snap and
+      //   needs real per-class numbers to read from.
       if (nwAfterReturns > 0 && nw > 0) {
         const factor = nw / nwAfterReturns;
         sB *= factor;
@@ -734,7 +971,15 @@ export function runBootstrap(
   const dataset = options.dataset ?? HISTORICAL_REAL_RETURNS;
   const paths = options.paths ?? 1000;
   const blockSize = Math.max(1, options.blockSize ?? 5);
-  const seed = options.seed ?? Math.floor(Math.random() * 2 ** 31);
+  // Default seed = 1 (deterministic). Engine purity rule
+  // (CLAUDE.md §1) forbids `Math.random()` in lib/; callers that
+  // want non-deterministic paths must pass a seed explicitly
+  // (e.g. `Math.floor(Math.random() * 2**31)` at the call site).
+  // In practice every in-tree caller already passes a seed, so
+  // this fallback is dead — but the prior `Math.random()` default
+  // was a latent purity violation that would have surfaced as
+  // non-reproducible output the moment a caller forgot.
+  const seed = options.seed ?? 1;
   const rand = makePrng(seed);
   const yearsPre = inputs.yearsUntilRetirement ?? 0;
   const totalYears = yearsPre + inputs.retirementHorizonYears;

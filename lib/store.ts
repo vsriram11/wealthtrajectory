@@ -235,7 +235,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   ...createAssumptionsSliceInitial(DEMO_ASSUMPTIONS),
   ...createAssumptionsSliceActions(set),
   ...TARGET_ALLOCATION_SLICE_INITIAL,
-  ...createTargetAllocationSliceActions(set),
+  ...createTargetAllocationSliceActions(set, get),
 
   // Collections
   ...GOALS_SLICE_INITIAL,

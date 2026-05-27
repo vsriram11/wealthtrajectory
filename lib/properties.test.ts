@@ -296,6 +296,21 @@ describe("monteCarlo.ts — yearly + ending percentile ordering", () => {
    * percentile sort. The structural invariant (lower-rank ≤
    * higher-rank) still holds modulo the float slack.
    */
+  /**
+   * Relative-tolerance close-enough check. Vitest's toBeCloseTo
+   * uses ABSOLUTE precision, which fails on the scale of NW
+   * percentiles ($100k-$10M). expectRelClose accepts a 1-part-in-
+   * 10^N tolerance and floors at an epsilon for near-zero values.
+   */
+  function expectRelClose(actual: number, expected: number, relTol: number) {
+    const slack = Math.max(1e-6, Math.abs(expected) * relTol);
+    if (Math.abs(actual - expected) > slack) {
+      throw new Error(
+        `expectRelClose failed: ${actual} != ${expected} (slack ${slack})`,
+      );
+    }
+  }
+
   function expectOrdered(label: string, values: number[]) {
     for (let i = 0; i < values.length - 1; i++) {
       const lo = values[i];
@@ -431,6 +446,132 @@ describe("monteCarlo.ts — yearly + ending percentile ordering", () => {
       { numRuns: 8 },
     );
   });
+
+  it("fixedNominalFreeze.years=0 produces identical output to today's engine", () => {
+    // Back-compat invariant for the SORR-mitigation feature.
+    // When the freeze duration is 0, the engine must behave
+    // exactly as it did pre-feature — same successRate, same
+    // percentile bands. Without this property pinned, a future
+    // refactor of the freeze branch could subtly shift baseline
+    // results (e.g. divide-by-1 floating-point reordering) and
+    // every historical projection in the wild would drift.
+    fc.assert(
+      fc.property(
+        startingNWArb,
+        annualSpendArb,
+        horizonArb,
+        allocationArb,
+        (startingNW, annualSpend, horizonYears, allocation) => {
+          const baseline = runHistoricalSequences({
+            startingNetWorthUSD: startingNW,
+            allocation,
+            annualSpendUSD: annualSpend,
+            retirementHorizonYears: horizonYears,
+          });
+          const withZeroFreeze = runHistoricalSequences({
+            startingNetWorthUSD: startingNW,
+            allocation,
+            annualSpendUSD: annualSpend,
+            retirementHorizonYears: horizonYears,
+            spending: {
+              variableUSD: 0,
+              haircut: { rate: 0, onlyAfterDownYear: false },
+              fixedNominalFreeze: {
+                years: 0,
+                assumedInflationRate: 0.03,
+              },
+            },
+          });
+          // toBeCloseTo's precision arg is ABSOLUTE (±10^-precision),
+          // which is far too tight for NW percentiles in the
+          // $100k-$10M range. Use RELATIVE tolerance via
+          // Math.abs(a - b) <= max(epsilon, |b| * relTol). With
+          // relTol = 1e-9, two paths must agree to 9 significant
+          // digits — tight enough that any real divergence (a bug
+          // re-introducing the freeze decay when years=0) breaks the
+          // test, loose enough that FP-reordering refactors don't.
+          const RELTOL = 1e-9;
+          expect(
+            Math.abs(withZeroFreeze.successRate - baseline.successRate),
+          ).toBeLessThanOrEqual(1e-12);
+          expectRelClose(
+            withZeroFreeze.endingNetWorthPercentiles.p50,
+            baseline.endingNetWorthPercentiles.p50,
+            RELTOL,
+          );
+          expectRelClose(
+            withZeroFreeze.endingNetWorthPercentiles.p5,
+            baseline.endingNetWorthPercentiles.p5,
+            RELTOL,
+          );
+        },
+      ),
+      { numRuns: 8 },
+    );
+  });
+
+  it("bucket policy with 0% cash ≡ annual policy (silent degrade)", () => {
+    // Invariant: the bucket strategy needs a cash slice to do
+    // anything. With cashFraction = 0, the policy must produce
+    // results indistinguishable from annual rebalance — bucket
+    // mode must NEVER make a zero-cash portfolio WORSE through
+    // its skip-the-snap branch (which could happen if a refactor
+    // mishandled the no-cash case). Pinning this catches that
+    // class of regression even with all-stocks portfolios.
+    fc.assert(
+      fc.property(
+        startingNWArb,
+        annualSpendArb,
+        horizonArb,
+        (startingNW, annualSpend, horizonYears) => {
+          // 100% stocks: no cash → bucket has nothing to do.
+          const allStocks = {
+            stocksFraction: 1,
+            bondsFraction: 0,
+            cashFraction: 0,
+          };
+          const annual = runHistoricalSequences({
+            startingNetWorthUSD: startingNW,
+            allocation: allStocks,
+            annualSpendUSD: annualSpend,
+            retirementHorizonYears: horizonYears,
+          });
+          const bucket = runHistoricalSequences(
+            {
+              startingNetWorthUSD: startingNW,
+              allocation: allStocks,
+              annualSpendUSD: annualSpend,
+              retirementHorizonYears: horizonYears,
+            },
+            { rebalance: "bucket" },
+          );
+          // Single-class portfolio: there's literally nothing to
+          // rebalance to/from, so bucket's skip-the-snap and
+          // cash-first-draw branches are no-ops. Trajectories
+          // must match within float tolerance.
+          expectRelClose(
+            bucket.successRate,
+            annual.successRate,
+            1e-9,
+          );
+          expectRelClose(
+            bucket.endingNetWorthPercentiles.p50,
+            annual.endingNetWorthPercentiles.p50,
+            1e-9,
+          );
+        },
+      ),
+      { numRuns: 8 },
+    );
+  });
+
+  // (A "1-year horizon ≡ annual" invariant was considered but is
+  // tautological — `bucketFiresThisYear` requires `y > 0`, so a
+  // 1-year horizon has no firing year by construction. The
+  // engine code path isn't exercised, so the property pins
+  // nothing observable. The zero-cash invariant above + the
+  // point-tests in monteCarlo.test.ts cover the meaningful
+  // bucket-policy cases.)
 });
 
 /* ============================================================ */

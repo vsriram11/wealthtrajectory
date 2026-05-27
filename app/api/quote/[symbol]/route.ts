@@ -85,6 +85,8 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
         // price changes intraday but a 24h staleness is fine for a
         // long-term wealth planner. stale-while-revalidate keeps users
         // unblocked for a week even if both upstreams are down.
+        // `public` is fine here — the response carries no user-specific
+        // data, just the ticker's market price.
         "Cache-Control":
           "public, s-maxage=86400, stale-while-revalidate=604800",
       },
@@ -103,9 +105,16 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
       },
       200,
       {
-        // Shorter cache so the next request retries upstream sooner.
+        // `private` on the LRU fallback path: the per-instance LRU
+        // is request-affinitive (may hold different data on
+        // different Vercel edge instances), and `public, s-maxage`
+        // would let shared proxies / CDNs propagate a stale
+        // fallback to every user — including indefinitely if
+        // upstream stays down. `private, max-age` keeps the
+        // staleness scoped to the requesting browser; next request
+        // retries upstream cleanly.
         "Cache-Control":
-          "public, s-maxage=300, stale-while-revalidate=3600",
+          "private, max-age=300, stale-while-revalidate=3600",
       },
     );
   }

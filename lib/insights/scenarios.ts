@@ -34,13 +34,19 @@ export function applyScenario(
             overriddenCAGR != null ? overriddenCAGR : h.expectedRealCAGR;
           if (cagrDelta === 0 && overriddenCAGR == null) return h;
           // Composition-aware scenario application: when the holding
-          // carries multi-asset legs (NTSX, GDE, …), propagate the
-          // cagrDelta to each leg's expectedRealCAGR and re-derive the
-          // wrapper's blended scalar so the leg-driven
-          // computePortfolio.weightedRealCAGR stays consistent with
-          // the wrapper-driven projectIndependence. holdingCAGRs is a hard
-          // wrapper-level override; it doesn't touch legs (the user
-          // explicitly said "this holding returns X%").
+          // carries multi-asset legs (NTSX, GDE, …), the wrapper
+          // scalar feeds projectIndependence (via accountWeightedCAGR)
+          // while the LEG CAGRs feed computePortfolio.weightedRealCAGR.
+          // BOTH must move in lockstep when a scenario adjusts the
+          // wrapper's effective return — otherwise the two engines
+          // produce divergent answers for the same holding.
+          //
+          // Apply both `cagrDelta` (add to each leg) AND
+          // `overriddenCAGR` (replace each leg's CAGR uniformly with
+          // the override). Replacing-uniformly is lossy (a 90/60
+          // wrapper loses the equity/bond CAGR differential), but
+          // consistency between engines is more important than
+          // preserving per-leg detail under an explicit user override.
           const isCompositionWrapper =
             (h.kind === "equity" ||
               h.kind === "bond" ||
@@ -48,17 +54,20 @@ export function applyScenario(
               h.kind === "commodity") &&
             h.composition &&
             h.composition.length > 0;
-          if (isCompositionWrapper && cagrDelta !== 0) {
-            const nextLegs = h.composition!.map((leg) => ({
-              ...leg,
-              expectedRealCAGR:
-                (leg.expectedRealCAGR ??
-                  defaultLegFallback(leg.kind)) + cagrDelta,
-            }));
+          if (isCompositionWrapper) {
+            const nextLegs = h.composition!.map((leg) => {
+              // Override takes precedence over the legs' own CAGRs;
+              // cagrDelta is then ADDED on top.
+              const base =
+                overriddenCAGR != null
+                  ? overriddenCAGR
+                  : leg.expectedRealCAGR ?? defaultLegFallback(leg.kind);
+              return { ...leg, expectedRealCAGR: base + cagrDelta };
+            });
             return {
               ...h,
               composition: nextLegs,
-              // When holdingCAGRs override is also set, that wins.
+              // Wrapper scalar stays in sync with the leg blend.
               expectedRealCAGR:
                 overriddenCAGR != null
                   ? overriddenCAGR + cagrDelta

@@ -211,6 +211,80 @@ describe("aggregateAssumptions", () => {
     );
     expect(result.drawdownPhases).toEqual(householdWithPhases.drawdownPhases);
   });
+
+  describe("retirementFixedNominalYears — max aggregation (opt-in wins, opt-out preserved)", () => {
+    // The SORR-mitigation freeze aggregates by MAX: if ANY member
+    // opted into a freeze, the household-aggregate view shows
+    // that protection. The filter accepts EXPLICIT 0 so that
+    // unanimous opt-out (every member set 0) returns 0 instead
+    // of silently falling back to the household template's
+    // freeze setting. Regression risk: an earlier filter
+    // `v > 0` (instead of `v >= 0`) dropped explicit zeros and
+    // restored the household default for an opted-out member —
+    // pin THAT behavior so a refactor can't undo the fix.
+
+    it("any single member opt-in wins via MAX (5y trumps unset)", () => {
+      const result = aggregateAssumptions(
+        baseHousehold,
+        { m1: { retirementFixedNominalYears: 5 } },
+        ["m1", "m2"],
+      );
+      expect(result.retirementFixedNominalYears).toBe(5);
+    });
+
+    it("mixed values pick the MAX (5 vs 10 → 10)", () => {
+      const result = aggregateAssumptions(
+        baseHousehold,
+        {
+          m1: { retirementFixedNominalYears: 5 },
+          m2: { retirementFixedNominalYears: 10 },
+        },
+        ["m1", "m2"],
+      );
+      expect(result.retirementFixedNominalYears).toBe(10);
+    });
+
+    it("mixed opt-in + opt-out → opt-in wins (5 vs 0 → 5)", () => {
+      const result = aggregateAssumptions(
+        baseHousehold,
+        {
+          m1: { retirementFixedNominalYears: 5 },
+          m2: { retirementFixedNominalYears: 0 },
+        },
+        ["m1", "m2"],
+      );
+      expect(result.retirementFixedNominalYears).toBe(5);
+    });
+
+    it("unanimous opt-out (every member = 0) aggregates to 0 (NOT the household default)", () => {
+      // The regression fix: previously, `> 0` filter dropped
+      // explicit 0s, leaving the aggregate to fall back to the
+      // household's `retirementFixedNominalYears` value. Now
+      // `>= 0` preserves the unanimous opt-out.
+      const householdWithFreeze: Assumptions = {
+        ...baseHousehold,
+        retirementFixedNominalYears: 10, // template setting
+      };
+      const result = aggregateAssumptions(
+        householdWithFreeze,
+        {
+          m1: { retirementFixedNominalYears: 0 },
+          m2: { retirementFixedNominalYears: 0 },
+        },
+        ["m1", "m2"],
+      );
+      expect(result.retirementFixedNominalYears).toBe(0);
+    });
+
+    it("no member set anything → undefined (template falls through downstream)", () => {
+      const result = aggregateAssumptions(
+        baseHousehold,
+        { m1: {}, m2: {} },
+        ["m1", "m2"],
+      );
+      expect(result.retirementFixedNominalYears).toBeUndefined();
+    });
+  });
 });
 
 describe("effectiveHouseholdAssumptions", () => {

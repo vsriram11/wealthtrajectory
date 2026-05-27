@@ -2,7 +2,7 @@
 
 import { useMemo } from "react";
 import { feeAnalysis } from "@/lib/tax/feeDrag";
-import { useActiveProjection } from "@/lib/projection/useActiveProjection";
+import { useAllocationView } from "@/lib/portfolio/useAllocationView";
 import { formatPercent, formatUSDCompact } from "@/lib/format";
 
 /**
@@ -20,7 +20,12 @@ import { formatPercent, formatUSDCompact } from "@/lib/format";
  * Renders nothing when no recognized symbols are present.
  */
 export function FeeDragCard() {
-  const { household } = useActiveProjection();
+  // Shared allocation view so future-composition time-travel
+  // ages the fee-drag analysis alongside everything else on the
+  // page. Per-position fees scale with current value, so a
+  // 20-year-aged equity position pays meaningfully more in
+  // cumulative fees than today's snapshot.
+  const { household } = useAllocationView();
   const analysis = useMemo(() => feeAnalysis(household, 30), [household]);
 
   if (analysis.rows.length === 0) return null;

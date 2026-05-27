@@ -7,6 +7,7 @@ import {
   GLIDE_PATH_PRESETS,
   type GlidePath,
 } from "@/lib/portfolio/glidePath";
+import { WaypointEditor } from "./WaypointEditor";
 
 /**
  * Lifecycle glide-path editor. Lets users pick a target-date-fund-
@@ -49,6 +50,7 @@ export function GlidePathCard() {
   }, [household.members, memberId]);
 
   const [showPicker, setShowPicker] = useState(false);
+  const [editing, setEditing] = useState(false);
   // Default-collapsed because this card carries a lot of visual
   // weight (curve, preset list, waypoint grid) but most users
   // only need to revisit it occasionally. Expanding is one tap.
@@ -116,10 +118,17 @@ export function GlidePathCard() {
         {!isOn ? (
           <>
             <div className="mt-3 rounded-md border border-dashed border-border-strong bg-bg-elevated px-3 py-3 text-[11px] text-text-dim">
-              No glide-path set. Pick a preset below to start gliding
-              your target allocation with age.
+              No glide-path set. Pick a preset below — or build a
+              custom shape (rising-equity, U-curve, etc.).
             </div>
             <PresetGrid onPick={(gp) => setGlidePath(gp)} />
+            <button
+              type="button"
+              onClick={() => setEditing(true)}
+              className="mt-2 w-full rounded-md border border-dashed border-border-strong bg-bg-elevated px-3 py-2 text-[11px] font-medium text-text-muted active:opacity-70"
+            >
+              + Build a custom glide-path
+            </button>
           </>
         ) : (
           <>
@@ -137,13 +146,22 @@ export function GlidePathCard() {
                         : "Custom"}
                   </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setShowPicker(!showPicker)}
-                  className="rounded-md border border-accent/40 bg-accent/10 px-2 py-1 text-[10px] font-medium text-accent active:opacity-70"
-                >
-                  {showPicker ? "Done" : "Change"}
-                </button>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowPicker(!showPicker)}
+                    className="rounded-md border border-accent/40 bg-accent/10 px-2 py-1 text-[10px] font-medium text-accent active:opacity-70"
+                  >
+                    {showPicker ? "Done" : "Change"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditing(true)}
+                    className="rounded-md border border-border-strong bg-bg-elevated px-2 py-1 text-[10px] font-medium text-text active:opacity-70"
+                  >
+                    Edit waypoints
+                  </button>
+                </div>
               </div>
             </div>
             {showPicker && (
@@ -154,11 +172,24 @@ export function GlidePathCard() {
           </>
         )}
 
+        {editing && (
+          <WaypointEditor
+            initial={glidePath}
+            onSave={(gp) => {
+              setGlidePath(gp);
+              setEditing(false);
+            }}
+            onCancel={() => setEditing(false)}
+          />
+        )}
+
         <div className="mt-3 text-[10px] leading-snug text-text-dim">
           Interpolation is linear between waypoints. Before the
           first / after the last waypoint, the allocation is held
-          constant. Custom waypoint editing is on the roadmap; for
-          now, pick a preset.
+          constant. Need a rising-equity / Pfau-style shape? Pick
+          &ldquo;rising_equity_pfau&rdquo; from the presets or
+          build your own with{" "}
+          <span className="text-text">Edit waypoints</span>.
         </div>
         {isOn && (
           <button
@@ -206,6 +237,7 @@ const PRESET_LABELS: Record<string, string> = {
   vanguard_target_retirement: "Vanguard target-date style",
   conservative: "Conservative (Fidelity Freedom style)",
   perpetual_aggressive: "Perpetual aggressive (Independence 80/20)",
+  rising_equity_pfau: "Rising equity (Pfau/Kitces)",
 };
 
 const PRESET_DESCRIPTIONS: Record<string, string> = {
@@ -215,6 +247,8 @@ const PRESET_DESCRIPTIONS: Record<string, string> = {
     "Slightly faster taper; 70/30 at 50, 45/55 at 65, 30/70 at 75.",
   perpetual_aggressive:
     "Stays 80%+ stocks across the lifecycle — suits a long Independence horizon where corpus needs to last 40-50 years.",
+  rising_equity_pfau:
+    "U-shape: 60% equity at 30 → 40% at 45 (mitigate SORR) → ramp back to 60% at 60 and 80% by 80. Research-cited; useful when the early-retirement years are the danger zone.",
 };
 
 function PresetGrid({ onPick }: { onPick: (gp: GlidePath) => void }) {

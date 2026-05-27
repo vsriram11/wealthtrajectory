@@ -25,7 +25,8 @@ type Field = {
     | "drawdownHorizonYears"
     | "expectedInflationRate"
     | "retirementVariableHaircut"
-    | "retirementVariableShare";
+    | "retirementVariableShare"
+    | "retirementFixedNominalYears";
   label: string;
   prefix?: string;
   suffix?: string;
@@ -134,6 +135,24 @@ const fields: Field[] = [
     fromDisplay: (n) => Math.max(0, Math.min(1, n / 100)),
     helpFor: () =>
       "Fraction of your variable (lifestyle-flex) budget you expect to cut in retirement. 0 = same lifestyle; 50 = half-cut; 100 = drop variable entirely. Fixed expenses are never touched. Lower haircut = larger independence corpus needed.",
+  },
+  {
+    // Fixed-nominal years — SORR mitigation. Freezes the nominal
+    // withdrawal amount for the first N retirement years; in the
+    // engine's real-terms math this is a geometric decay of the
+    // real withdrawal during the freeze window (the assumption's
+    // own `expectedInflationRate` powers the decay so users don't
+    // set inflation twice). 0 = disabled.
+    key: "retirementFixedNominalYears",
+    label: "Fixed-nominal years (SORR mitigation)",
+    suffix: "yrs",
+    step: 1,
+    min: 0,
+    max: 15,
+    toDisplay: (n) => Math.round(n ?? 0),
+    fromDisplay: (n) => Math.max(0, Math.min(15, Math.round(n))),
+    helpFor: () =>
+      "Freeze withdrawals at their year-0 nominal amount for the first N retirement years (instead of inflating with CPI). Cuts cumulative real spend during the early-retirement SORR danger zone — 10 years at 3% inflation trims ~14% of one year's real spend, which buys meaningful tail-risk relief. 0 = disabled (default). Applied in historical Monte Carlo only; the deterministic Independence projection assumes the post-freeze real-flat baseline.",
   },
   {
     // Variable-share input — companion to the haircut slider.

@@ -198,6 +198,67 @@ describe("computeLeveragedEquityBuckets", () => {
     expect(buckets.nonRecognizedHoldings[0].accountId).toBe("acc-1");
     expect(buckets.nonRecognizedHoldings[0].holdingId).toBe("hld-9");
   });
+
+  it("REAL ESTATE is structurally excluded — a 5x-levered home is NOT deleveraged at retirement", () => {
+    // User concern (audit round 7+): make sure mortgaged real
+    // estate isn't swept into the leveraged-equity restructure
+    // path. The engine filters on `holding.kind !== "equity"`
+    // upfront — RE can never get into the deleveraging buckets
+    // regardless of its `leverage` field value. Pin that
+    // structural protection so a future refactor (e.g. unifying
+    // "leveraged equity" with "leveraged anything") doesn't
+    // silently start charging a deleveraging tax on a home.
+    const hh: Household = {
+      id: "hh-re",
+      members: [member()],
+      accounts: [
+        {
+          id: "acc-re",
+          ownerId: "mem-1",
+          category: "REAL_ESTATE",
+          displayName: "Primary residence",
+          monthlyContributionUSD: 0,
+          holdings: [
+            {
+              kind: "real_estate",
+              id: "hld-home",
+              name: "Primary residence",
+              valueUSD: 100_000, // equity stake (net of mortgage)
+              expectedRealCAGR: 0.03,
+              leverage: 5.0, // $500k home / $100k equity
+              acquiredAt: null,
+            },
+          ],
+        },
+        {
+          // Add a real leveraged-equity position so we can confirm
+          // the function isn't just returning empty.
+          id: "acc-eq",
+          ownerId: "mem-1",
+          category: "BROKERAGE",
+          displayName: "Brokerage",
+          monthlyContributionUSD: 0,
+          holdings: [
+            equityHolding({
+              id: "hld-tqqq",
+              symbol: "TQQQ",
+              leverage: 3.0,
+              valueUSD: 50_000,
+            }),
+          ],
+        },
+      ],
+      liabilities: [],
+    };
+    const buckets = computeLeveragedEquityBuckets(hh);
+    // Only TQQQ should be in the deleveraging path — NOT the RE.
+    expect(buckets.nonRecognizedHoldings).toHaveLength(1);
+    expect(buckets.nonRecognizedHoldings[0].holdingId).toBe("hld-tqqq");
+    // No RE entry by id or by kind.
+    for (const h of buckets.nonRecognizedHoldings) {
+      expect(h.holdingId).not.toBe("hld-home");
+    }
+  });
 });
 
 describe("computeLeveragedEquityBuckets — deleveraging strategy", () => {

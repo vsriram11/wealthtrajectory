@@ -221,13 +221,37 @@ function IncomeStreamRow({
   onRemove: () => void;
 }) {
   const [label, setLabel] = useState(stream.label);
+  // Resync the local `label` draft when the prop changes from
+  // outside (scenario switch, Drive cloud sync, another browser
+  // tab). Without this, the row's input shows the stale draft
+  // until the user re-focuses + blurs the field. Compare-then-set
+  // pattern: only fire setState when the prop genuinely differs
+  // from what we last echoed AND the user hasn't started editing
+  // (label === lastSyncedLabel means the local draft matches the
+  // last value the prop fed us → safe to accept the new prop).
+  const [lastSyncedLabel, setLastSyncedLabel] = useState(stream.label);
+  if (stream.label !== lastSyncedLabel) {
+    if (label === lastSyncedLabel) {
+      // No pending local edit — pick up the external update.
+      setLabel(stream.label);
+    }
+    // Always re-baseline so the next external change is detected
+    // even if the user's edit conflicted with this one.
+    setLastSyncedLabel(stream.label);
+  }
   const [confirming, setConfirming] = useState(false);
   const currentYear = new Date().getFullYear();
   const thisYear = incomeForYear(stream, currentYear);
   const lifetime = lifetimeTotalReal(stream);
 
   return (
-    <li className="rounded-xl border border-border bg-bg-elevated p-3">
+    <li
+      className={`rounded-xl border bg-bg-elevated p-3 ${
+        stream.annualUSD < 0
+          ? "border-amber-300/40"
+          : "border-border"
+      }`}
+    >
       <div className="flex items-center gap-2">
         <input
           type="text"
@@ -235,12 +259,29 @@ function IncomeStreamRow({
           onChange={(e) => setLabel(e.target.value)}
           onBlur={() => {
             const trimmed = label.trim();
-            if (trimmed && trimmed !== stream.label) onChange({ label: trimmed });
-            else setLabel(stream.label);
+            // Commit the trimmed edit only when non-empty AND
+            // different. An empty / whitespace-only blur reverts
+            // visibly to the original — but only after the value
+            // has been blanked (so the user SEES the reversion
+            // instead of silently discarding text they thought
+            // they typed).
+            if (trimmed && trimmed !== stream.label) {
+              onChange({ label: trimmed });
+            } else if (label !== stream.label) {
+              // No commit happened — revert the draft. The user
+              // sees the original come back on blur, signaling
+              // their edit didn't take.
+              setLabel(stream.label);
+            }
           }}
           aria-label="Stream label"
           className="flex-1 rounded-md border border-border-strong bg-bg-surface px-3 py-2 text-sm text-text outline-none focus:border-accent"
         />
+        {stream.annualUSD < 0 && (
+          <span className="rounded-full bg-amber-300/15 px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wider text-amber-300">
+            Distribution
+          </span>
+        )}
         {!confirming && (
           <button
             type="button"
@@ -290,9 +331,11 @@ function IncomeStreamRow({
               value={stream.annualUSD}
               onChange={(v) => onChange({ annualUSD: v })}
               precision={0}
-              allowNegative={false}
-              ariaLabel="Annual amount in real dollars"
-              className="num w-full bg-transparent text-right text-sm font-medium text-text outline-none"
+              allowNegative={true}
+              ariaLabel="Annual amount in real dollars (negative = distribution)"
+              className={`num w-full bg-transparent text-right text-sm font-medium outline-none ${
+                stream.annualUSD < 0 ? "text-amber-300" : "text-text"
+              }`}
             />
           </span>
         </label>
@@ -375,14 +418,15 @@ function IncomeStreamCreator({
   const [label, setLabel] = useState("");
   const [startYear, setStartYear] = useState(currentYear + 1);
   const [endYear, setEndYear] = useState(currentYear + 5);
+  // Display the amount as a positive number; sign is applied via
+  // the kind chip at save time. Keeps the entry field intuitive
+  // ("enter $20k", not "enter −$20k") while the engine model stays
+  // signed.
   const [annualUSD, setAnnualUSD] = useState(50_000);
+  const [kind, setKind] = useState<"income" | "distribution">("income");
   const [growthPct, setGrowthPct] = useState(0);
   const [ownerId, setOwnerId] = useState(memberPreselect);
 
-  // Local validity gate — refuse the save when end < start so
-  // the user gets an immediate "fix the form" prompt rather than
-  // having the slice silently coerce. The slice's coercion is
-  // still the safety net for synced / imported data.
   const isValid =
     label.trim().length > 0 &&
     endYear >= startYear &&
@@ -397,7 +441,12 @@ function IncomeStreamCreator({
         aria-label="Add income stream"
         className="fixed inset-0 z-50"
       >
-        <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onCancel} />
+        {/* Decorative backdrop — no click-to-close to prevent
+            accidental data loss on in-progress edits. */}
+        <div
+          className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+          aria-hidden="true"
+        />
         <div className="absolute inset-x-0 bottom-0 max-h-[92dvh] overflow-y-auto rounded-t-3xl border-t border-border-strong bg-bg-surface pb-10 sm:inset-x-auto sm:left-1/2 sm:top-1/2 sm:-translate-x-1/2 sm:-translate-y-1/2 sm:max-w-md sm:rounded-3xl sm:border">
           <div className="px-5 pt-3">
             <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-border-strong" />
@@ -428,11 +477,58 @@ function IncomeStreamCreator({
                 type="text"
                 value={label}
                 onChange={(e) => setLabel(e.target.value)}
-                placeholder="Consulting · Social Security · Rental"
+                placeholder={
+                  kind === "distribution"
+                    ? "Partial-coast bridge · Sabbatical"
+                    : "Consulting · Social Security · Rental"
+                }
                 aria-label="Stream label"
                 className="w-full rounded-md border border-border-strong bg-bg-elevated px-3 py-2 text-sm text-text outline-none placeholder:text-text-dim focus:border-accent"
               />
             </label>
+
+            {/* Type chip — income vs distribution. Sign is applied
+                at save time; the engine model is signed
+                annualUSD. Negative streams pull from the
+                portfolio (partial-coast / sabbatical / step-down
+                pattern). See incomeStreams.ts file-level
+                docstring for engine semantics. */}
+            <div className="mt-3">
+              <span className="mb-1 block text-[10px] uppercase tracking-wider text-text-dim">
+                Type
+              </span>
+              <div className="inline-flex gap-0.5 rounded-full border border-border bg-bg-elevated p-0.5">
+                <button
+                  type="button"
+                  onClick={() => setKind("income")}
+                  aria-pressed={kind === "income"}
+                  className={`rounded-full px-3 py-1 text-[11px] font-medium transition active:opacity-70 ${
+                    kind === "income"
+                      ? "bg-accent text-bg"
+                      : "text-text-muted"
+                  }`}
+                >
+                  Income
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setKind("distribution")}
+                  aria-pressed={kind === "distribution"}
+                  className={`rounded-full px-3 py-1 text-[11px] font-medium transition active:opacity-70 ${
+                    kind === "distribution"
+                      ? "bg-amber-300 text-bg"
+                      : "text-text-muted"
+                  }`}
+                >
+                  Distribution
+                </button>
+              </div>
+              <p className="mt-1 text-[10px] leading-snug text-text-dim">
+                {kind === "income"
+                  ? "Money flowing IN (consulting, pension, Social Security, rental). Offsets retirement withdrawals."
+                  : "Money flowing OUT (partial-coast bridge, sabbatical, step-down). Pulls from the portfolio in the active years."}
+              </p>
+            </div>
 
             <div className="mt-3 grid grid-cols-2 gap-2">
               <label className="block">
@@ -541,7 +637,11 @@ function IncomeStreamCreator({
                     label: label.trim(),
                     startYear,
                     endYear,
-                    annualUSD,
+                    // Sign the amount based on the kind chip.
+                    // Stored signed; UI surfaces re-derive the
+                    // chip via Math.sign for editing.
+                    annualUSD:
+                      kind === "distribution" ? -annualUSD : annualUSD,
                     realGrowthRate: growthPct / 100,
                     ownerId,
                   })
