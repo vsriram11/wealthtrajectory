@@ -43,10 +43,18 @@ const nextConfig = {
               "default-src 'self'",
               "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://accounts.google.com https://*.gstatic.com",
               "style-src 'self' 'unsafe-inline' https://accounts.google.com",
-              "img-src 'self' data: blob: https://lh3.googleusercontent.com https://*.googleusercontent.com",
+              // *.googleusercontent.com covers lh3 (user avatars)
+              // and any future bucket variant Google rotates to.
+              "img-src 'self' data: blob: https://*.googleusercontent.com",
               "font-src 'self' data:",
-              "connect-src 'self' https://accounts.google.com https://www.googleapis.com https://oauth2.googleapis.com https://*.googleapis.com https://query1.finance.yahoo.com https://query2.finance.yahoo.com https://finnhub.io",
-              "frame-src https://accounts.google.com https://*.google.com",
+              // *.googleapis.com covers www.googleapis.com,
+              // oauth2.googleapis.com, content-storage.googleapis.com,
+              // and any future API surface Google rotates to.
+              "connect-src 'self' https://accounts.google.com https://*.googleapis.com https://query1.finance.yahoo.com https://query2.finance.yahoo.com https://finnhub.io",
+              // Only accounts.google.com is used (OAuth popup); One
+              // Tap is intentionally not wired so the narrow
+              // allowlist is safe.
+              "frame-src https://accounts.google.com",
               "object-src 'none'",
               "base-uri 'self'",
               "form-action 'self'",
