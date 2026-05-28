@@ -175,8 +175,25 @@ export function HistoricalMonteCarloCard() {
   // class returns — when a glide path is configured, only year 0 of
   // the glide path is honored under "none" since no rebalance = no
   // glide-target snap.
-  const [rebalance, setRebalance] = useState<"annual" | "none" | "bucket">(
-    "annual",
+  // Rebalance × Cash-bucket as two orthogonal toggles (PR
+  // redesign per user feedback: the old 3-way `Annual / None /
+  // Bucket` collapsed two distinct strategies and produced
+  // minimal observable change in success rate). The 2×2:
+  //   - annual + bucket-off: Trinity baseline
+  //   - annual + bucket-on:  refilling cash reserve (Kitces)
+  //   - none + bucket-off:   set-and-forget drift
+  //   - none + bucket-on:    DEPLETING cash reserve (Pfau), the
+  //                           finite SORR shield for early years
+  const [rebalance, setRebalance] = useState<"annual" | "none">("annual");
+  const [cashBucketPriority, setCashBucketPriority] = useState(false);
+  // Optional cash-bucket size override (in % of NW). Default
+  // null = use whatever cashFraction the allocation produces.
+  // When set, the simulator's allocation is rewritten at the
+  // call site: `stocksFraction` shrinks to make room for the
+  // larger cash slice. Defer the equity → cash swap tax hit
+  // to a later iteration (documented in methodology copy).
+  const [cashBucketSizePct, setCashBucketSizePct] = useState<number | null>(
+    null,
   );
 
   // Project the household forward to the date the user is expected
@@ -380,21 +397,45 @@ export function HistoricalMonteCarloCard() {
     portfolio.netWorthUSD > 0
       ? leveragedBuckets.deleveragingTaxHitUSD / portfolio.netWorthUSD
       : 0;
+  // Cash-bucket size override: when the user wants a bigger
+  // cash slice at retirement than the portfolio currently has
+  // (e.g. 10% reserve from 3% cash), we re-anchor the allocation
+  // here. Extra cash is sourced from regular 1x equity
+  // proportionally — equity-2x and other classes are left
+  // untouched. v1 does NOT model the equity → cash swap tax
+  // hit (would require gain assumption + taxable-share math
+  // similar to the deleveraging-tax flow); the methodology
+  // block calls out the gap so users aren't surprised.
+  const cashFractionEffective = useMemo(() => {
+    const today = portfolio.classes.cashShare;
+    if (cashBucketSizePct == null) return today;
+    const requested = Math.max(0, Math.min(0.5, cashBucketSizePct / 100));
+    return Math.max(today, requested);
+  }, [portfolio.classes.cashShare, cashBucketSizePct]);
+  const stocksFractionEffective = useMemo(() => {
+    // Re-anchor: reduce the regular 1x stocks slice to make room
+    // for the larger cash reserve. Floor at 0 — extreme
+    // configurations (90% cash) just zero equity rather than
+    // poisoning other classes.
+    const extraCash = cashFractionEffective - portfolio.classes.cashShare;
+    if (extraCash <= 0) return regularStocksFraction;
+    return Math.max(0, regularStocksFraction - extraCash);
+  }, [regularStocksFraction, cashFractionEffective, portfolio.classes.cashShare]);
   const allocation = useMemo(
     () => ({
-      stocksFraction: regularStocksFraction,
+      stocksFraction: stocksFractionEffective,
       stocks2xFraction,
       bondsFraction: portfolio.classes.bondShare,
-      cashFraction: portfolio.classes.cashShare,
+      cashFraction: cashFractionEffective,
       commodityFraction: commodityShare,
       realEstateFraction: realEstateShare,
       otherFraction: otherAltsShare,
     }),
     [
-      regularStocksFraction,
+      stocksFractionEffective,
       stocks2xFraction,
       portfolio.classes.bondShare,
-      portfolio.classes.cashShare,
+      cashFractionEffective,
       commodityShare,
       realEstateShare,
       otherAltsShare,
@@ -444,6 +485,11 @@ export function HistoricalMonteCarloCard() {
           rate: haircutRate,
           onlyAfterDownYear: haircutOnDownYearOnly,
         },
+        // Cash-bucket priority: when on, retirement-year
+        // withdrawals come from cash first. Combines with the
+        // `rebalance` policy: annual → refilling bucket;
+        // none → depleting bucket.
+        cashBucketPriority,
         // Fixed-nominal freeze (SORR mitigation). The user
         // configures both the freeze duration and the assumed
         // inflation on the AssumptionsPanel. When years is 0
@@ -516,6 +562,7 @@ export function HistoricalMonteCarloCard() {
     glidePath,
     memberAge,
     rebalance,
+    cashBucketPriority,
     baseYear,
   ]);
 
@@ -798,16 +845,14 @@ export function HistoricalMonteCarloCard() {
           </div>
         )}
 
-        {/* Rebalancing-policy toggle.
-              - Annual: snap to target weights every year (Trinity
-                Study / cfiresim convention).
-              - None: set-and-forget; let weights drift.
-              - Bucket: annual rebalance EXCEPT in retirement years
-                following a market drop, where the simulator skips
-                the snap so equity can recover unsold AND draws the
-                spend from the cash slice first. Next up-year's
-                snap refills the cash slice. Requires a non-zero
-                cash allocation to do anything. */}
+        {/* Rebalance × Cash-bucket as two orthogonal toggles.
+            The 2×2 matrix:
+              - annual + bucket-off: Trinity baseline
+              - annual + bucket-on:  refilling reserve (Kitces)
+              - none + bucket-off:   drift, proportional draw
+              - none + bucket-on:    depleting reserve (Pfau) —
+                                     finite SORR shield for early
+                                     retirement years */}
         <div className="mt-3 flex items-center justify-between gap-2 rounded-md border border-border bg-bg-elevated px-3 py-2">
           <div className="min-w-0 text-[10px] leading-snug text-text-dim">
             <span className="text-text">Rebalance</span> between
@@ -824,22 +869,72 @@ export function HistoricalMonteCarloCard() {
               active={rebalance === "none"}
               onClick={() => setRebalance("none")}
             />
+          </div>
+        </div>
+        <div className="mt-2 flex items-center justify-between gap-2 rounded-md border border-border bg-bg-elevated px-3 py-2">
+          <div className="min-w-0 text-[10px] leading-snug text-text-dim">
+            <span className="text-text">Cash-bucket priority</span> in
+            retirement (draw cash before equity)
+          </div>
+          <div className="inline-flex shrink-0 gap-0.5 rounded-full border border-border bg-bg-surface p-0.5">
             <ModeChip
-              label="Bucket"
-              active={rebalance === "bucket"}
-              onClick={() => setRebalance("bucket")}
+              label="Off"
+              active={!cashBucketPriority}
+              onClick={() => setCashBucketPriority(false)}
+            />
+            <ModeChip
+              label="On"
+              active={cashBucketPriority}
+              onClick={() => setCashBucketPriority(true)}
             />
           </div>
         </div>
-        {rebalance === "bucket" && cashShareToday < 0.005 && (
-          <div className="mt-2 rounded-md border border-amber-300/40 bg-amber-300/5 px-2.5 py-1.5 text-[10px] leading-snug text-amber-200">
-            Bucket strategy is on but your cash allocation is
-            essentially 0%. With no cash to drain, the policy
-            degrades to standard annual rebalance — set up a
-            small cash slice (5% is typical) for the strategy to
-            actually matter.
+        {cashBucketPriority && (
+          <div className="mt-2 flex items-center justify-between gap-2 rounded-md border border-border bg-bg-elevated px-3 py-2">
+            <div className="min-w-0 text-[10px] leading-snug text-text-dim">
+              <span className="text-text">Cash bucket size</span>{" "}
+              (override; default = today&apos;s cash share{" "}
+              <span className="num">
+                {(cashShareToday * 100).toFixed(2)}%
+              </span>
+              )
+            </div>
+            <span className="flex shrink-0 items-center gap-1 rounded-md border border-border-strong bg-bg-surface px-2 py-1">
+              <NumberInput
+                label="%"
+                value={cashBucketSizePct ?? Math.round(cashShareToday * 100)}
+                onChange={(v) =>
+                  setCashBucketSizePct(Math.max(0, Math.min(50, v)))
+                }
+                step={1}
+                min={0}
+                max={50}
+                compact
+              />
+            </span>
           </div>
         )}
+        {cashBucketPriority && cashFractionEffective < 0.005 && (
+          <div className="mt-2 rounded-md border border-amber-300/40 bg-amber-300/5 px-2.5 py-1.5 text-[10px] leading-snug text-amber-200">
+            Cash-bucket priority is on but your effective cash slice
+            is essentially 0%. With no cash to drain, the policy
+            no-ops — either set a Cash bucket size above or add
+            cash to your real portfolio.
+          </div>
+        )}
+        {cashBucketPriority &&
+          cashBucketSizePct != null &&
+          cashBucketSizePct / 100 > cashShareToday + 0.001 && (
+            <div className="mt-2 rounded-md border border-amber-300/40 bg-amber-300/5 px-2.5 py-1.5 text-[10px] leading-snug text-amber-200">
+              You&apos;ve sized the bucket above today&apos;s cash
+              share. In reality, funding the larger bucket means
+              selling equity at retirement — capital-gains tax on
+              that sale is NOT modeled in this v1. Treat the
+              success rate as an upper bound; the real-world
+              number is lower by roughly the tax cost on the
+              equity-to-cash swap.
+            </div>
+          )}
 
         <div className="mt-3 rounded-md border border-border bg-bg-elevated px-3 py-2 text-[10px] leading-snug text-text-dim">
           <div className="text-[10px] uppercase tracking-wider text-text-muted">
@@ -876,30 +971,30 @@ export function HistoricalMonteCarloCard() {
                 Allocation inferred from your portfolio
                 {yearsToTarget > 0 && " AT target date"}:
               </span>{" "}
-              {(allocation.stocksFraction * 100).toFixed(0)}% stocks /{" "}
-              {(allocation.bondsFraction * 100).toFixed(0)}% bonds /{" "}
-              {(allocation.cashFraction * 100).toFixed(0)}% cash
-              {stocks2xFraction > 0.001 && (
+              {(allocation.stocksFraction * 100).toFixed(2)}% stocks /{" "}
+              {(allocation.bondsFraction * 100).toFixed(2)}% bonds /{" "}
+              {(allocation.cashFraction * 100).toFixed(2)}% cash
+              {stocks2xFraction > 0.0001 && (
                 <>
-                  {" "}/ {(stocks2xFraction * 100).toFixed(0)}% 2x equity
+                  {" "}/ {(stocks2xFraction * 100).toFixed(2)}% 2x equity
                   (RYTNX series — real 2001+, projected pre-2001)
                 </>
               )}
-              {commodityShare > 0.001 && (
+              {commodityShare > 0.0001 && (
                 <>
-                  {" "}/ {(commodityShare * 100).toFixed(0)}% commodity
+                  {" "}/ {(commodityShare * 100).toFixed(2)}% commodity
                   (gold series)
                 </>
               )}
-              {realEstateShare > 0.001 && (
+              {realEstateShare > 0.0001 && (
                 <>
-                  {" "}/ {(realEstateShare * 100).toFixed(0)}% real estate
+                  {" "}/ {(realEstateShare * 100).toFixed(2)}% real estate
                   (Damodaran RE price series)
                 </>
               )}
-              {otherAltsShare > 0.001 && (
+              {otherAltsShare > 0.0001 && (
                 <>
-                  {" "}/ {(otherAltsShare * 100).toFixed(0)}% alts (
+                  {" "}/ {(otherAltsShare * 100).toFixed(2)}% alts (
                   {altsAs === "stocks" ? "as stocks" : "as cash"})
                 </>
               )}
@@ -949,26 +1044,6 @@ export function HistoricalMonteCarloCard() {
                   page and it&apos;ll honor that here instead.
                 </li>
               )
-            ) : rebalance === "bucket" ? (
-              <li>
-                <span className="text-text">
-                  Cash-bucket strategy (Kitces &ldquo;bond tent&rdquo; / Pfau).
-                </span>{" "}
-                Annual rebalance in normal years; in retirement
-                years following a market drop, the simulator skips
-                the snap (equity stays unsold through the recovery)
-                and takes the whole withdrawal from the{" "}
-                <span className="num text-text">
-                  {(allocation.cashFraction * 100).toFixed(0)}%
-                </span>{" "}
-                cash slice first — only spilling proportionally to
-                other classes when cash runs dry. Next up-year&apos;s
-                annual snap refills the cash bucket from appreciated
-                equity. SORR-mitigation for multi-year downturns;
-                annual rebalance can still outperform on V-shaped
-                crash-and-bounce sequences (the rebalance-buy-the-
-                dip mechanic), so this isn&apos;t a free lunch.
-              </li>
             ) : (
               <li>
                 <span className="text-text">
@@ -988,6 +1063,27 @@ export function HistoricalMonteCarloCard() {
                 sequences AND raise sequence-risk exposure when
                 equity grows beyond your target — neither effect is
                 small over a 30+ year horizon.
+              </li>
+            )}
+            {cashBucketPriority && (
+              <li>
+                <span className="text-text">
+                  Cash-bucket priority {rebalance === "annual"
+                    ? "(refilling reserve, Kitces interp.)"
+                    : "(depleting reserve, Pfau interp.)"}
+                  .
+                </span>{" "}
+                Retirement-year withdrawals come from the{" "}
+                <span className="num text-text">
+                  {(allocation.cashFraction * 100).toFixed(2)}%
+                </span>{" "}
+                cash slice first — only spilling proportionally to
+                other classes when cash runs dry.{" "}
+                {rebalance === "annual"
+                  ? "Each year-start snap refills cash from appreciated equity, so the bucket provides ongoing SORR shielding across the whole horizon."
+                  : "Cash is NEVER refilled (no rebalance) — the slice monotonically depletes. Once exhausted, withdrawals fall through to proportional draw. This is a FINITE shield for the early-retirement danger zone (typically ~5-10 years), not perpetual protection."}{" "}
+                Composes with the fixed-nominal freeze and variable
+                haircut: all three can be on simultaneously.
               </li>
             )}
             <li>

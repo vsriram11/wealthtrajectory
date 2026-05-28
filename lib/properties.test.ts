@@ -542,13 +542,18 @@ describe("monteCarlo.ts — yearly + ending percentile ordering", () => {
               allocation: allStocks,
               annualSpendUSD: annualSpend,
               retirementHorizonYears: horizonYears,
+              spending: {
+                variableUSD: 0,
+                haircut: { rate: 0, onlyAfterDownYear: false },
+                cashBucketPriority: true,
+              },
             },
-            { rebalance: "bucket" },
+            { rebalance: "none" },
           );
-          // Single-class portfolio: there's literally nothing to
-          // rebalance to/from, so bucket's skip-the-snap and
-          // cash-first-draw branches are no-ops. Trajectories
-          // must match within float tolerance.
+          // Single-class portfolio with 0% cash: the bucket flag
+          // has nothing to drain → silent no-op. Even with the
+          // depleting-bucket interpretation (none + bucketPriority),
+          // trajectories should match within float tolerance.
           expectRelClose(
             bucket.successRate,
             annual.successRate,

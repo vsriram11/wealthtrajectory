@@ -10,6 +10,7 @@ import {
   type Snapshot,
 } from "@/lib/persistence/persistence";
 import { householdNetWorth } from "@/lib/types";
+import { memberFilteredSnapshots } from "@/lib/data/history";
 import { formatUSD } from "@/lib/format";
 
 /**
@@ -35,6 +36,17 @@ import { formatUSD } from "@/lib/format";
 export function SnapshotsManager() {
   const household = useAppStore((s) => s.household);
   const mode = useAppStore((s) => s.mode);
+  // Honor the global member filter chip: when the user has
+  // scoped the app to a specific member, the snapshot list +
+  // displayed NW + summary stats should reflect THAT member's
+  // slice — matching what every other card on the page already
+  // does via `useActiveProjection`. Without this, a user
+  // viewing "Alex" sees household-wide snapshot NW numbers,
+  // inconsistent with the rest of the UI. Legacy NW-only
+  // snapshots can't be attributed to a single member and drop
+  // out of the filtered view (same semantic as HistoryView /
+  // GrowthVelocityCard).
+  const memberId = useAppStore((s) => s.selectedMemberId);
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -105,7 +117,12 @@ export function SnapshotsManager() {
     }
   };
 
-  const sorted = [...snapshots].sort((a, b) => b.t - a.t);
+  // Apply the global member filter. `memberFilteredSnapshots`
+  // recomputes each rich snapshot's NW from the member-filtered
+  // household and drops legacy NW-only entries that can't be
+  // attributed.
+  const filteredSnapshots = memberFilteredSnapshots(snapshots, memberId);
+  const sorted = [...filteredSnapshots].sort((a, b) => b.t - a.t);
 
   return (
     <div className="mt-4 rounded-xl border border-border bg-bg-elevated">
@@ -120,11 +137,13 @@ export function SnapshotsManager() {
             Snapshots
           </div>
           <div className="mt-0.5 text-[10px] text-text-dim">
-            {snapshots.length === 0
-              ? "None yet — capture one to anchor your history"
-              : `${snapshots.length} recorded · oldest ${formatDate(
-                  Math.min(...snapshots.map((s) => s.t)),
-                )}`}
+            {filteredSnapshots.length === 0
+              ? memberId
+                ? "No snapshots for this member"
+                : "None yet — capture one to anchor your history"
+              : `${filteredSnapshots.length} recorded · oldest ${formatDate(
+                  Math.min(...filteredSnapshots.map((s) => s.t)),
+                )}${memberId ? " (filtered to selected member)" : ""}`}
           </div>
         </div>
         <span

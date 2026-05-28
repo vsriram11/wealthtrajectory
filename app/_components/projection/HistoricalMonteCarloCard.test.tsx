@@ -449,8 +449,13 @@ describe("HistoricalMonteCarloCard — retirementFixedNominalYears propagation",
 });
 
 function readStocksPctFromAllocation(): number {
+  // Allocation precision in the methodology block is 2-decimal
+  // (e.g. "57.13% stocks"). The regex accepts the decimal so the
+  // helper survives the precision bump.
   const allocSummary = screen.getByText(/% stocks \/ /);
-  const match = (allocSummary.textContent ?? "").match(/(\d+)% stocks/);
+  const match = (allocSummary.textContent ?? "").match(
+    /(\d+(?:\.\d+)?)% stocks/,
+  );
   if (!match) throw new Error("stocks pct not found in allocation summary");
   return Number(match[1]);
 }
