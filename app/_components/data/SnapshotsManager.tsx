@@ -120,8 +120,14 @@ export function SnapshotsManager() {
   // Apply the global member filter. `memberFilteredSnapshots`
   // recomputes each rich snapshot's NW from the member-filtered
   // household and drops legacy NW-only entries that can't be
-  // attributed.
+  // attributed. When a member is selected, count the dropped
+  // legacy snapshots so the summary text can surface "M legacy
+  // hidden" — otherwise the user thinks the records vanished.
   const filteredSnapshots = memberFilteredSnapshots(snapshots, memberId);
+  const droppedLegacyCount =
+    memberId == null
+      ? 0
+      : snapshots.length - filteredSnapshots.length;
   const sorted = [...filteredSnapshots].sort((a, b) => b.t - a.t);
 
   return (
@@ -139,11 +145,13 @@ export function SnapshotsManager() {
           <div className="mt-0.5 text-[10px] text-text-dim">
             {filteredSnapshots.length === 0
               ? memberId
-                ? "No snapshots for this member"
+                ? droppedLegacyCount > 0
+                  ? `No member-attributable snapshots (${droppedLegacyCount} legacy NW-only hidden — filterable only at household view)`
+                  : "No snapshots for this member"
                 : "None yet — capture one to anchor your history"
               : `${filteredSnapshots.length} recorded · oldest ${formatDate(
                   Math.min(...filteredSnapshots.map((s) => s.t)),
-                )}${memberId ? " (filtered to selected member)" : ""}`}
+                )}${memberId ? ` (filtered to selected member${droppedLegacyCount > 0 ? `, ${droppedLegacyCount} legacy NW-only hidden` : ""})` : ""}`}
           </div>
         </div>
         <span

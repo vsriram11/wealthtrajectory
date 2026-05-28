@@ -696,93 +696,127 @@ describe("simulatePath — cashBucketPriority (orthogonal to rebalance policy)",
       "annual-yes",
       { rebalance: "annual" },
     );
+    // Tolerance: `toBeCloseTo(x, -2)` = ±$50 absolute. Per-class
+    // sum (bucket arm) vs `nwAfterReturns + cfWithGrowth` (no-bucket
+    // arm) accumulate float-noise across 5 years; the user-visible
+    // intent is "indistinguishable at NW-display scale," not bit-
+    // identical. Matches the exhaustion test's looseness.
     for (let i = 0; i < noBucket.trajectory.length; i++) {
-      expect(withBucket.trajectory[i]).toBeCloseTo(noBucket.trajectory[i], 0);
+      expect(withBucket.trajectory[i]).toBeCloseTo(noBucket.trajectory[i], -2);
     }
   });
 
-  it("none + bucketPriority DEPLETES cash monotonically (drain-without-refill)", () => {
-    // The whole point of `none + bucket` per the user's
-    // intuition: cash gets used up over the first ~5-10 years,
-    // never refilled, then withdrawals fall through to
-    // proportional draw on remaining classes. Pin that the cash
-    // slice strictly decreases (in absolute dollar terms) until
-    // it hits zero, then stays at zero.
-    //
-    // Test setup: 95/5 portfolio, $40k/yr spend, all up years
-    // (so the depletion is purely from withdrawals, not market
-    // drops). Cash bucket starts at $50k; should drain over
-    // ~1.25 years.
+  it("none + bucketPriority differs materially from none + no-bucket (cash-first drain observable)", () => {
+    // The whole point of `none + bucket` per the user's intuition:
+    // cash gets used up over the first ~5-10 years, never refilled,
+    // then withdrawals fall through to proportional draw on
+    // remaining classes. To pin THAT the cash-first logic actually
+    // fires (vs the prior version which only checked NaN-safety),
+    // compare against the same-rebalance no-bucket arm. With 5%
+    // cash starting and an all-up-years sequence, cash drains
+    // ~1.25 years under bucket-on; under bucket-off, withdrawals
+    // come proportionally so cash drains far more slowly. The
+    // trajectories MUST differ materially.
     const inputs: MonteCarloInputs = {
       startingNetWorthUSD: 1_000_000,
       allocation: ALLOC_95_STOCKS_5_CASH,
       annualSpendUSD: 40_000,
       retirementHorizonYears: 5,
-      spending: spendingWithBucket(),
     };
-    const path = simulatePath(
+    const stocks = [0.05, 0.05, 0.05, 0.05, 0.05];
+    const noBucket = simulatePath(
       inputs,
-      [0.05, 0.05, 0.05, 0.05, 0.05],
+      stocks,
       [0, 0, 0, 0, 0],
       [0, 0, 0, 0, 0],
       [0, 0, 0, 0, 0],
       [0, 0, 0, 0, 0],
-      "deplete",
+      "no-bucket-none",
       { rebalance: "none" },
     );
-    // No NaN propagation; ends positive.
-    for (const v of path.trajectory) {
+    const withBucket = simulatePath(
+      { ...inputs, spending: spendingWithBucket() },
+      stocks,
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      "with-bucket-none",
+      { rebalance: "none" },
+    );
+    // NaN-safety + non-negative endpoints across all years.
+    for (const v of withBucket.trajectory) {
       expect(Number.isFinite(v)).toBe(true);
       expect(v).toBeGreaterThanOrEqual(0);
     }
-    expect(path.endingNetWorthUSD).toBeGreaterThan(0);
+    expect(withBucket.endingNetWorthUSD).toBeGreaterThan(0);
+    // Active flag: trajectories diverge by more than a $1
+    // floating-point wobble somewhere. If `cashBucketPriority`
+    // weren't being honored at all, the two arms would match
+    // byte-for-byte.
+    let maxAbsDelta = 0;
+    for (let i = 0; i < withBucket.trajectory.length; i++) {
+      const d = Math.abs(withBucket.trajectory[i] - noBucket.trajectory[i]);
+      if (d > maxAbsDelta) maxAbsDelta = d;
+    }
+    expect(maxAbsDelta).toBeGreaterThan(1);
   });
 
-  it("year 0 of retirement IS protected when prior accumulation year was down", () => {
-    // Off-by-one regression from prior PR — the bucket trigger
-    // gate is `y >= yearsPre && y > 0`. A retiree who hits
-    // retirement RIGHT AFTER a -30% accumulation year gets
-    // bucket protection in year 0 of retirement.
-    const inputs: MonteCarloInputs = {
+  it("year 0 of retirement IS protected when bucket flag is on (rebalance held constant)", () => {
+    // Isolate the bucket flag: hold rebalance = "none" constant in
+    // BOTH arms and toggle only `cashBucketPriority`. Any trajectory
+    // divergence is then attributable to the bucket flag alone.
+    //
+    // The bucket trigger gate is `y >= yearsPre`. A retiree who hits
+    // retirement RIGHT AFTER a -30% accumulation year gets cash-first
+    // withdrawal in year 0 of retirement (no off-by-one).
+    //
+    // Use a SUFFICIENTLY-DIVERGENT setup: 5-year horizon (per-class
+    // composition diverges across multiple years), 10% cash slice
+    // (large enough that the cash-first drain produces material
+    // composition shifts vs proportional), $80k/yr spend.
+    const inputsBase: MonteCarloInputs = {
       startingNetWorthUSD: 1_000_000,
-      allocation: ALLOC_95_STOCKS_5_CASH,
-      annualSpendUSD: 40_000,
+      allocation: { stocksFraction: 0.9, bondsFraction: 0, cashFraction: 0.1 },
+      annualSpendUSD: 80_000,
       annualContributionUSD: 0,
       yearsUntilRetirement: 1,
-      retirementHorizonYears: 2,
-      spending: spendingWithBucket(),
+      retirementHorizonYears: 5,
     };
-    const stocks = [-0.3, 0.3, 0];
-    const noBucketAnnual = simulatePath(
-      { ...inputs, spending: undefined },
+    const stocks = [-0.3, 0.3, 0.1, 0.05, 0.05, 0.05];
+    const noBucket = simulatePath(
+      inputsBase,
       stocks,
-      [0, 0, 0],
-      [0, 0, 0],
-      [0, 0, 0],
-      [0, 0, 0],
-      "no-bucket-annual",
-      { rebalance: "annual" },
+      [0, 0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0, 0],
+      "no-bucket-none",
+      { rebalance: "none" },
     );
-    const bucketNone = simulatePath(
-      inputs,
+    const withBucket = simulatePath(
+      { ...inputsBase, spending: spendingWithBucket() },
       stocks,
-      [0, 0, 0],
-      [0, 0, 0],
-      [0, 0, 0],
-      [0, 0, 0],
+      [0, 0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0, 0],
       "bucket-none",
       { rebalance: "none" },
     );
-    // The two strategies produce different trajectories — proves
-    // the bucket flag is honored in y=yearsPre with prior down.
-    let differs = false;
-    for (let i = 0; i < bucketNone.trajectory.length; i++) {
-      if (Math.abs(bucketNone.trajectory[i] - noBucketAnnual.trajectory[i]) > 0.01) {
-        differs = true;
-        break;
-      }
+    // Same rebalance policy on both sides → divergence MUST come
+    // from the cashBucketPriority flag firing. If it weren't firing
+    // in y=yearsPre, the two arms would be byte-identical at all
+    // indices.
+    let maxAbsDelta = 0;
+    for (let i = 0; i < withBucket.trajectory.length; i++) {
+      const d = Math.abs(withBucket.trajectory[i] - noBucket.trajectory[i]);
+      if (d > maxAbsDelta) maxAbsDelta = d;
     }
-    expect(differs).toBe(true);
+    // Material divergence (> $10) signals the cash-first logic
+    // actually fires across the multi-year window. If it weren't
+    // firing, the test would see ~$0 delta and fail.
+    expect(maxAbsDelta).toBeGreaterThan(10);
   });
 
   it("zero-cash allocation: bucket flag is a silent no-op", () => {

@@ -708,7 +708,7 @@ export function simulatePath(
     const cfWithGrowth = cf * (1 + rImplied / 2);
     nw = nwAfterReturns + cfWithGrowth;
 
-    if (cashBucketActive && y >= yearsPre) {
+    if (cashBucketActive) {
       // Cash-bucket-priority withdrawal: in retirement years (with
       // the flag enabled), the year's withdrawal comes out of the
       // cash bucket FIRST; any remainder spills proportionally

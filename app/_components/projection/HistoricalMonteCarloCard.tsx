@@ -397,48 +397,64 @@ export function HistoricalMonteCarloCard() {
     portfolio.netWorthUSD > 0
       ? leveragedBuckets.deleveragingTaxHitUSD / portfolio.netWorthUSD
       : 0;
-  // Cash-bucket size override: when the user wants a bigger
-  // cash slice at retirement than the portfolio currently has
-  // (e.g. 10% reserve from 3% cash), we re-anchor the allocation
-  // here. Extra cash is sourced from regular 1x equity
-  // proportionally — equity-2x and other classes are left
-  // untouched. v1 does NOT model the equity → cash swap tax
-  // hit (would require gain assumption + taxable-share math
-  // similar to the deleveraging-tax flow); the methodology
-  // block calls out the gap so users aren't surprised.
+  // Cash-bucket size override (cap shared with the NumberInput's
+  // max — single source of truth so the UI accepted range can't
+  // drift from the effective clamp).
+  const CASH_BUCKET_MAX_PCT = 50;
+  // When the user wants a bigger cash slice than the portfolio
+  // has today (e.g. 20% reserve from 3% cash), re-anchor the
+  // allocation. Extra cash is sourced PROPORTIONALLY from every
+  // non-cash class (1x stocks, 2x stocks, bonds, commodity, RE,
+  // alts) — earlier v0 only stole from regular 1x stocks, which
+  // silently sums-to-greater-than-100% allocations when the user
+  // has little 1x stocks (e.g. mostly TQQQ + RE). `resolveWeights`
+  // then normalized away the excess, giving a SMALLER actual cash
+  // slice than the methodology displayed. Proportional steals
+  // preserves sum-to-1.
+  //
+  // v1 does NOT model the equity → cash swap tax hit (would
+  // require gain assumption + taxable-share math similar to the
+  // deleveraging-tax flow); the methodology block surfaces the
+  // gap so users aren't surprised.
   const cashFractionEffective = useMemo(() => {
     const today = portfolio.classes.cashShare;
     if (cashBucketSizePct == null) return today;
-    const requested = Math.max(0, Math.min(0.5, cashBucketSizePct / 100));
+    const requested = Math.max(
+      0,
+      Math.min(CASH_BUCKET_MAX_PCT / 100, cashBucketSizePct / 100),
+    );
     return Math.max(today, requested);
   }, [portfolio.classes.cashShare, cashBucketSizePct]);
-  const stocksFractionEffective = useMemo(() => {
-    // Re-anchor: reduce the regular 1x stocks slice to make room
-    // for the larger cash reserve. Floor at 0 — extreme
-    // configurations (90% cash) just zero equity rather than
-    // poisoning other classes.
-    const extraCash = cashFractionEffective - portfolio.classes.cashShare;
-    if (extraCash <= 0) return regularStocksFraction;
-    return Math.max(0, regularStocksFraction - extraCash);
-  }, [regularStocksFraction, cashFractionEffective, portfolio.classes.cashShare]);
+  // Proportional re-scale factor for non-cash classes.
+  // `scale = (1 - cashEff) / (1 - cashToday)`. When extra cash
+  // is 0, scale = 1 (no-op). When cash doubles, every non-cash
+  // class is scaled down so the sum stays at 1.
+  const nonCashScale = useMemo(() => {
+    const today = portfolio.classes.cashShare;
+    if (cashFractionEffective <= today) return 1;
+    const denominator = 1 - today;
+    if (denominator <= 0) return 1;
+    return (1 - cashFractionEffective) / denominator;
+  }, [portfolio.classes.cashShare, cashFractionEffective]);
   const allocation = useMemo(
     () => ({
-      stocksFraction: stocksFractionEffective,
-      stocks2xFraction,
-      bondsFraction: portfolio.classes.bondShare,
+      stocksFraction: regularStocksFraction * nonCashScale,
+      stocks2xFraction: stocks2xFraction * nonCashScale,
+      bondsFraction: portfolio.classes.bondShare * nonCashScale,
       cashFraction: cashFractionEffective,
-      commodityFraction: commodityShare,
-      realEstateFraction: realEstateShare,
-      otherFraction: otherAltsShare,
+      commodityFraction: commodityShare * nonCashScale,
+      realEstateFraction: realEstateShare * nonCashScale,
+      otherFraction: otherAltsShare * nonCashScale,
     }),
     [
-      stocksFractionEffective,
+      regularStocksFraction,
       stocks2xFraction,
       portfolio.classes.bondShare,
       cashFractionEffective,
       commodityShare,
       realEstateShare,
       otherAltsShare,
+      nonCashScale,
     ],
   );
 
@@ -904,11 +920,13 @@ export function HistoricalMonteCarloCard() {
                 label="%"
                 value={cashBucketSizePct ?? Math.round(cashShareToday * 100)}
                 onChange={(v) =>
-                  setCashBucketSizePct(Math.max(0, Math.min(50, v)))
+                  setCashBucketSizePct(
+                    Math.max(0, Math.min(CASH_BUCKET_MAX_PCT, v)),
+                  )
                 }
                 step={1}
                 min={0}
-                max={50}
+                max={CASH_BUCKET_MAX_PCT}
                 compact
               />
             </span>
@@ -974,25 +992,25 @@ export function HistoricalMonteCarloCard() {
               {(allocation.stocksFraction * 100).toFixed(2)}% stocks /{" "}
               {(allocation.bondsFraction * 100).toFixed(2)}% bonds /{" "}
               {(allocation.cashFraction * 100).toFixed(2)}% cash
-              {stocks2xFraction > 0.0001 && (
+              {stocks2xFraction > 0.00005 && (
                 <>
                   {" "}/ {(stocks2xFraction * 100).toFixed(2)}% 2x equity
                   (RYTNX series — real 2001+, projected pre-2001)
                 </>
               )}
-              {commodityShare > 0.0001 && (
+              {commodityShare > 0.00005 && (
                 <>
                   {" "}/ {(commodityShare * 100).toFixed(2)}% commodity
                   (gold series)
                 </>
               )}
-              {realEstateShare > 0.0001 && (
+              {realEstateShare > 0.00005 && (
                 <>
                   {" "}/ {(realEstateShare * 100).toFixed(2)}% real estate
                   (Damodaran RE price series)
                 </>
               )}
-              {otherAltsShare > 0.0001 && (
+              {otherAltsShare > 0.00005 && (
                 <>
                   {" "}/ {(otherAltsShare * 100).toFixed(2)}% alts (
                   {altsAs === "stocks" ? "as stocks" : "as cash"})
