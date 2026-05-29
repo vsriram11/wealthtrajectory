@@ -8,6 +8,7 @@ import {
   maybeRecordSnapshot,
   saveRealState,
 } from "@/lib/persistence/persistence";
+import { captureSnapshotAppState } from "@/lib/persistence/snapshotAppState";
 import { householdNetWorth } from "@/lib/types";
 
 export function PersistenceHydrator() {
@@ -108,9 +109,13 @@ export function PersistenceHydrator() {
         void (async () => {
           // Same fire-time gate for the auto-snapshot path.
           if (useAppStore.getState().timeTravelActive) return;
+          const fresh = useAppStore.getState();
           const wrote = await maybeRecordSnapshot(
             householdNetWorth(state.household),
             state.household,
+            undefined,
+            undefined,
+            captureSnapshotAppState(fresh),
           );
           // R1-D7 audit CRITICAL fix: when the auto-snapshotter
           // actually writes a row, bump the sync-revision counter so
@@ -159,7 +164,14 @@ export function PersistenceHydrator() {
         // explicitly via the banner's Save button.
         if (s.timeTravelActive) return;
         const nw = householdNetWorth(s.household);
-        const wrote12h = await maybeRecordSnapshot(nw, s.household);
+        const appState = captureSnapshotAppState(s);
+        const wrote12h = await maybeRecordSnapshot(
+          nw,
+          s.household,
+          undefined,
+          undefined,
+          appState,
+        );
         // Run the monthly anchor alongside. Both helpers are
         // independent (different timestamps, different no-op
         // conditions), so a single load can land either, both, or
@@ -168,6 +180,9 @@ export function PersistenceHydrator() {
         const wroteMonthly = await maybeRecordMonthlySnapshot(
           nw,
           s.household,
+          undefined,
+          undefined,
+          appState,
         );
         if (wrote12h || wroteMonthly) {
           useAppStore.getState().bumpSnapshotsRevision();

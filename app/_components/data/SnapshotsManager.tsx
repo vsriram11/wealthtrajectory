@@ -9,6 +9,7 @@ import {
   recordSnapshot,
   type Snapshot,
 } from "@/lib/persistence/persistence";
+import { captureSnapshotAppState } from "@/lib/persistence/snapshotAppState";
 import {
   filterHousehold,
   householdForRollups,
@@ -239,8 +240,17 @@ export function SnapshotsManager() {
         // in-memory snapshot (until next refresh). Dexie serializes
         // on `put` so persisted data was safe, but the React state
         // here shares the reference until reload.
+        // The `includeComposition` toggle gates BOTH the household
+        // and the appState (target alloc, assumptions, goals, budget,
+        // etc.). Either you opt into a rich snapshot that captures
+        // the full state-of-the-world as of `t`, or you opt out for
+        // a lightweight NW-only record. Splitting them would
+        // produce a half-state that's hard to reason about.
         ...(includeComposition
-          ? { household: structuredClone(household) }
+          ? {
+              household: structuredClone(household),
+              appState: captureSnapshotAppState(useAppStore.getState()),
+            }
           : {}),
         ...(draftLabel.trim() ? { label: draftLabel.trim() } : {}),
       };
@@ -368,6 +378,12 @@ export function SnapshotsManager() {
         ...(editLabel.trim() ? { label: editLabel.trim() } : {}),
         ...(original.household
           ? { household: structuredClone(original.household) }
+          : {}),
+        // Preserve appState across the edit with the same
+        // defensive-clone treatment as household. The user is
+        // editing NW/date/label, not the captured state-of-the-world.
+        ...(original.appState
+          ? { appState: structuredClone(original.appState) }
           : {}),
       };
       // If editLabel was cleared but original had a label, drop the

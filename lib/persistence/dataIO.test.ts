@@ -497,6 +497,84 @@ describe("snapshots in export → parseImport (audit R1 CRITICAL — Drive sync 
     expect(parsed.snapshots).toEqual(snapshots);
   });
 
+  it("PRE-FEATURE JSON exports without appState import cleanly (back-compat with all earlier app versions)", () => {
+    // Pin the constraint the user explicitly called out: a JSON
+    // file exported by an older app version (before the appState
+    // field existed) MUST import cleanly. The shape is just
+    // `{ t, netWorthUSD, household?, label? }` — no appState
+    // anywhere. parseImport must accept it without dropping
+    // the row or crashing, and consumers downstream must tolerate
+    // `parsed.snapshots[i].appState === undefined`.
+    const legacyExport = {
+      schema: 1,
+      exportedAt: Date.now(),
+      household: { accounts: [], members: [], liabilities: [] },
+      assumptions: {},
+      scenarios: [],
+      snapshots: [
+        {
+          t: 1_700_000_000_000,
+          netWorthUSD: 100_000,
+          household: { accounts: [], members: [], liabilities: [] },
+          label: "Pre-promotion",
+        },
+        { t: 1_701_000_000_000, netWorthUSD: 110_000 },
+      ],
+    };
+    const parsed = parseImport(JSON.stringify(legacyExport));
+    expect(parsed.snapshots).toHaveLength(2);
+    // appState is absent (back-compat — old exports never had it).
+    expect(
+      (parsed.snapshots as Array<{ appState?: unknown }>)[0].appState,
+    ).toBeUndefined();
+    expect(
+      (parsed.snapshots as Array<{ appState?: unknown }>)[1].appState,
+    ).toBeUndefined();
+  });
+
+  it("NEW exports with appState preserve the field through round-trip", () => {
+    // Mirror test for forward compatibility: a snapshot WRITTEN
+    // with appState (by the time-travel banner or auto-snapshotter)
+    // must survive a JSON export → import round-trip with the
+    // appState intact, including per-member overrides and
+    // owner-keyed collections.
+    const snapshots = [
+      {
+        t: 1_700_000_000_000,
+        netWorthUSD: 100_000,
+        appState: {
+          assumptions: {
+            targetNetWorthUSD: 2_000_000,
+            withdrawalRate: 0.04,
+            legacyFloorUSD: 0,
+            drawdownHorizonYears: 30,
+            expectedInflationRate: 0.03,
+          },
+          memberAssumptions: {
+            m1: { withdrawalRate: 0.035 },
+          },
+          targetAllocation: { stocks: 0.7, bonds: 0.3 },
+          householdAnnualIncomeUSD: 250_000,
+          goals: [{ id: "g1", ownerId: "m1", name: "House" }],
+          budgetItems: [{ id: "b1", ownerId: "m2", amountUSD: 4_000 }],
+          incomeStreams: [],
+          scenarios: [],
+          healthPlans: [],
+          healthImportanceWeights: {},
+        },
+      },
+    ];
+    const json = exportData({
+      household: DEMO_HOUSEHOLD,
+      assumptions: DEMO_ASSUMPTIONS,
+      scenarios: [],
+      snapshots: snapshots as never,
+    });
+    const parsed = parseImport(json);
+    const row = (parsed.snapshots as Array<Record<string, unknown>>)[0];
+    expect(row.appState).toEqual(snapshots[0].appState);
+  });
+
   it("absent snapshots field round-trips as undefined (NOT empty array — back-compat)", () => {
     // Critical for back-compat: when an OLD payload (no snapshots
     // field) is imported, we must NOT silently wipe local IDB

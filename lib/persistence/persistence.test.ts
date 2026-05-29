@@ -407,3 +407,190 @@ describe("maybeRecordMonthlySnapshot — monthly auto-snapshot policy (R-monthly
     expect(autos.map((r) => r.netWorthUSD).sort()).toEqual([102_000, 103_000]);
   });
 });
+
+describe("Snapshot.appState — back-compat + per-member preservation", () => {
+  // Two-member household with per-member ownership chains —
+  // accounts owned by m1, liabilities owned by m2. Verifies the
+  // per-member attribution survives a snapshot round-trip.
+  const TWO_MEMBER_HH: Household = {
+    id: "hh-two",
+    members: [
+      { id: "m1", displayName: "Alice" },
+      { id: "m2", displayName: "Bob" },
+    ],
+    accounts: [
+      {
+        id: "a1",
+        ownerId: "m1",
+        nickname: "Alice 401k",
+        kind: "retirement",
+        taxTreatment: "tax-deferred",
+        institutionId: null,
+        holdings: [
+          {
+            id: "h1",
+            assetClass: "stocks",
+            geoExposure: "us",
+            valueUSD: 50_000,
+          } as never,
+        ],
+      } as never,
+    ],
+    liabilities: [
+      {
+        id: "l1",
+        ownerId: "m2",
+        kind: "mortgage",
+        principalUSD: 200_000,
+        aprPct: 6.5,
+      } as never,
+    ],
+  };
+
+  const APP_STATE = {
+    assumptions: ASSUMP,
+    memberAssumptions: {
+      m1: { withdrawalRate: 0.035 },
+      m2: { expectedInflationRate: 0.04 },
+    },
+    targetAllocation: { stocks: 0.7, bonds: 0.3 } as never,
+    glidePath: null,
+    householdAnnualIncomeUSD: 250_000,
+    goals: [
+      { id: "g1", ownerId: "m1", name: "House", targetUSD: 300_000 } as never,
+    ],
+    budgetItems: [
+      {
+        id: "b1",
+        ownerId: "m2",
+        category: "Housing",
+        amountUSD: 4_000,
+      } as never,
+    ],
+    incomeStreams: [
+      {
+        id: "i1",
+        ownerId: "m1",
+        kind: "salary",
+        annualUSD: 180_000,
+      } as never,
+    ],
+    scenarios: [],
+    healthPlans: [],
+    healthImportanceWeights: {},
+  };
+
+  it("round-trips a snapshot with full appState including per-member overrides + per-member owned collections", async () => {
+    const { loadSnapshots, recordSnapshot } = await freshModule();
+    const snap = {
+      t: Date.UTC(2024, 5, 1, 12, 0, 0, 0),
+      netWorthUSD: 500_000,
+      household: TWO_MEMBER_HH,
+      appState: APP_STATE,
+      label: "Mid-year check-in",
+    };
+    await recordSnapshot(snap as never);
+    const [out] = await loadSnapshots();
+    // Per-member roster intact.
+    expect(out.household?.members.map((m) => m.id)).toEqual(["m1", "m2"]);
+    // Per-member ownership chain intact: account → m1, liability → m2.
+    expect(out.household?.accounts[0].ownerId).toBe("m1");
+    expect(out.household?.liabilities[0].ownerId).toBe("m2");
+    // Per-member assumption overrides preserved.
+    expect(out.appState?.memberAssumptions?.m1?.withdrawalRate).toBe(0.035);
+    expect(out.appState?.memberAssumptions?.m2?.expectedInflationRate).toBe(0.04);
+    // Other owner-keyed collections preserved with ownership intact.
+    expect(out.appState?.goals?.[0]).toMatchObject({ ownerId: "m1", name: "House" });
+    expect(out.appState?.budgetItems?.[0]).toMatchObject({ ownerId: "m2" });
+    expect(out.appState?.incomeStreams?.[0]).toMatchObject({ ownerId: "m1" });
+    // Aim/target preserved.
+    expect(out.appState?.targetAllocation).toEqual({ stocks: 0.7, bonds: 0.3 });
+    expect(out.appState?.householdAnnualIncomeUSD).toBe(250_000);
+  });
+
+  it("legacy snapshot WITHOUT appState loads cleanly (back-compat with pre-feature JSON exports)", async () => {
+    // Pre-feature exports / pre-feature in-IDB rows lack `appState`
+    // entirely. The load path MUST tolerate that — consumers read
+    // `snapshot.appState?.foo ?? fallback`. This test pins the
+    // back-compat contract.
+    const { loadSnapshots, recordSnapshot } = await freshModule();
+    await recordSnapshot({
+      t: Date.UTC(2022, 0, 1, 12, 0, 0, 0),
+      netWorthUSD: 100_000,
+      household: TWO_MEMBER_HH,
+      // No `appState`, no `label` — legacy shape.
+    });
+    const [out] = await loadSnapshots();
+    expect(out.appState).toBeUndefined();
+    // Household still loads (the foundation of the legacy form).
+    expect(out.household?.members).toHaveLength(2);
+    // Consumer-side back-compat pattern works:
+    expect(out.appState?.targetAllocation ?? null).toBeNull();
+  });
+
+  it("maybeRecordSnapshot persists the appState when supplied (auto-snapshot path)", async () => {
+    // Pins that the auto-snapshotter actually writes the new field
+    // — without this, the schema change would land silently on
+    // manual saves only and the monthly history would have
+    // appState=undefined for every auto row.
+    const { loadSnapshots, maybeRecordSnapshot } = await freshModule();
+    const hh = { ...EMPTY_HH, accounts: [{ id: "a1" }] as never };
+    const wrote = await maybeRecordSnapshot(
+      150_000,
+      hh,
+      Date.UTC(2024, 5, 1, 12, 0, 0, 0),
+      undefined,
+      APP_STATE,
+    );
+    expect(wrote).toBe(true);
+    const [out] = await loadSnapshots();
+    expect(out.appState?.assumptions?.withdrawalRate).toBe(0.04);
+    expect(out.appState?.goals?.[0]?.id).toBe("g1");
+  });
+
+  it("maybeRecordMonthlySnapshot persists the appState when supplied (monthly auto path)", async () => {
+    const { loadSnapshots, maybeRecordMonthlySnapshot } = await freshModule();
+    const hh = { ...EMPTY_HH, accounts: [{ id: "a1" }] as never };
+    const wrote = await maybeRecordMonthlySnapshot(
+      150_000,
+      hh,
+      Date.UTC(2024, 5, 15, 12, 0, 0, 0),
+      undefined,
+      APP_STATE,
+    );
+    expect(wrote).toBe(true);
+    const [out] = await loadSnapshots();
+    expect(out.appState?.householdAnnualIncomeUSD).toBe(250_000);
+    expect(out.appState?.memberAssumptions?.m1?.withdrawalRate).toBe(0.035);
+  });
+
+  it("captureSnapshotAppState deep-clones — mutating live state after capture does NOT alter the captured payload", async () => {
+    const { captureSnapshotAppState } = await import(
+      "@/lib/persistence/snapshotAppState"
+    );
+    const live = {
+      assumptions: { ...ASSUMP },
+      memberAssumptions: { m1: { withdrawalRate: 0.035 } },
+      targetAllocation: { stocks: 0.7, bonds: 0.3 } as never,
+      glidePath: null,
+      householdAnnualIncomeUSD: 250_000,
+      goals: [{ id: "g1", ownerId: "m1" } as never],
+      budgetItems: [{ id: "b1", ownerId: "m2", amountUSD: 4_000 } as never],
+      incomeStreams: [],
+      scenarios: [],
+      healthPlans: [],
+      healthImportanceWeights: {},
+    };
+    const captured = captureSnapshotAppState(live);
+    // Mutate the live state in place — captured must NOT change.
+    live.assumptions.withdrawalRate = 0.099;
+    live.memberAssumptions.m1.withdrawalRate = 0.099;
+    (live.budgetItems[0] as { amountUSD: number }).amountUSD = 99_999;
+    expect(captured.assumptions?.withdrawalRate).toBe(0.04);
+    expect(captured.memberAssumptions?.m1?.withdrawalRate).toBe(0.035);
+    expect(
+      (captured.budgetItems?.[0] as unknown as { amountUSD: number })
+        .amountUSD,
+    ).toBe(4_000);
+  });
+});

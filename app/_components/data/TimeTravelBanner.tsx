@@ -6,6 +6,7 @@ import {
   recordSnapshot,
   type Snapshot,
 } from "@/lib/persistence/persistence";
+import { captureSnapshotAppState } from "@/lib/persistence/snapshotAppState";
 import { householdNetWorth } from "@/lib/types";
 
 /**
@@ -45,12 +46,15 @@ export function TimeTravelBanner() {
       // Defensive deep clone — the household reference is shared
       // with the live store; structuredClone guarantees the
       // snapshot payload is decoupled from whatever happens to
-      // store state immediately after.
+      // store state immediately after. Same applies to appState:
+      // captureSnapshotAppState clones every field internally.
       const householdClone = structuredClone(household);
+      const appState = captureSnapshotAppState(useAppStore.getState());
       const snap: Snapshot = {
         t,
         netWorthUSD: householdNetWorth(householdClone),
         household: householdClone,
+        appState,
       };
       await recordSnapshot(snap);
       // Bump the snapshot revision so CloudSyncer sees the

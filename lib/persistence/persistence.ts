@@ -59,6 +59,23 @@ export type PersistedRealState = {
  * form still loads cleanly (household is just absent), which keeps
  * pre-v3 snapshots usable.
  */
+/**
+ * A timestamped record of the user's wealth at a moment. The richer
+ * form carries the full household composition for that date — so the
+ * history chart can interpolate using actual past holdings rather
+ * than just back-projecting today's shares. The legacy `{t, netWorth}`
+ * form still loads cleanly (household is just absent), which keeps
+ * pre-v3 snapshots usable.
+ *
+ * `appState` (added later) carries the rest of the financial-state
+ * slices — target allocation, assumptions, goals, budget, etc. —
+ * so historical views can reconstruct not just realized allocation
+ * but ALSO the user's targets, withdrawal assumptions, goal
+ * progress, etc. as-of `t`. Optional for back-compat: pre-`appState`
+ * snapshots (including all JSON exports from earlier app versions)
+ * still load and the history views fall back to "data unavailable
+ * for this date" for the missing slice overlays.
+ */
 export type Snapshot = {
   t: number;
   netWorthUSD: number;
@@ -68,14 +85,61 @@ export type Snapshot = {
    * for their symbols) to render the past, rather than back-projecting
    * the current household. When absent (legacy snapshot), only the
    * `netWorthUSD` value is overlaid onto the reconstructed series.
+   *
+   * Per-member data lives INSIDE household: `household.members` is
+   * the member roster (each member's per-member assumptions are on
+   * `appState.memberAssumptions` keyed by member id), and
+   * `household.accounts[].ownerId` + `household.liabilities[].ownerId`
+   * carry the owner attribution that drives member-filtered views.
    */
   household?: Household;
+  /**
+   * Optional snapshot of the OTHER financial-state slices as of `t`
+   * (everything that isn't household). Lets historical views answer
+   * questions like "what was my target allocation last June?" or
+   * "did my withdrawal-rate assumption drift after I switched jobs?"
+   *
+   * Mirrors `PersistedRealState` minus: auth/meta fields
+   * (`schemaVersion`, `savedAt`, `driveEncryptionEnabled`) and UI
+   * preferences (`preferredMemberId`) and the `household` slice
+   * (already a sibling field on Snapshot).
+   *
+   * Critically: all fields are optional so a partial appState (from
+   * a future schema, a hand-edited JSON, or a JSON import from an
+   * older app version that included some-but-not-all slices) still
+   * loads cleanly — consumers read with `appState?.field ?? null`.
+   */
+  appState?: SnapshotAppState;
   /**
    * Free-text label the user can attach when manually saving a
    * snapshot ("Pre-promotion", "After RSU vest 2023-Q2", etc.). Falls
    * back to the date when absent.
    */
   label?: string;
+};
+
+/**
+ * The non-household financial-state slices captured alongside a
+ * snapshot. Mirrors the optional fields on `PersistedRealState` so
+ * a snapshot is conceptually "the persisted state as of `t`, minus
+ * auth/meta". Every field is optional — a snapshot's appState may
+ * carry only a subset, and consumers must tolerate absence.
+ */
+export type SnapshotAppState = {
+  assumptions?: Assumptions;
+  memberAssumptions?: Record<string, Partial<Assumptions>>;
+  targetAllocation?: import("@/lib/portfolio/targetAllocation").TargetAllocation | null;
+  glidePath?: import("@/lib/portfolio/glidePath").GlidePath | null;
+  householdAnnualIncomeUSD?: number | null;
+  goals?: import("@/lib/insights/goals").Goal[];
+  budgetItems?: import("@/lib/budget/budget").BudgetItem[];
+  incomeStreams?: import("@/lib/budget/incomeStreams").IncomeStream[];
+  scenarios?: import("@/lib/types").Scenario[];
+  healthPlans?: import("@/lib/health/healthPlans").HealthPlan[];
+  healthImportanceWeights?: Record<
+    string,
+    import("@/lib/health/healthPlans").HealthImportanceWeights
+  >;
 };
 
 const SCHEMA_VERSION = 2;
@@ -86,6 +150,7 @@ type SnapshotRow = {
   t: number;
   netWorthUSD: number;
   household?: Household;
+  appState?: SnapshotAppState;
   label?: string;
 };
 
@@ -325,6 +390,7 @@ export async function maybeRecordSnapshot(
   household?: Household,
   now = Date.now(),
   minIntervalMs = 12 * 60 * 60 * 1000,
+  appState?: SnapshotAppState,
 ): Promise<boolean> {
   // Never persist a zero / negative net-worth auto-snapshot. The
   // most common cause: PersistenceHydrator's 3-second timer fires
@@ -342,9 +408,9 @@ export async function maybeRecordSnapshot(
   try {
     const last = await handle.snapshots.orderBy("t").reverse().first();
     if (last && now - last.t < minIntervalMs) return false;
-    const row: SnapshotRow = household
-      ? { t: now, netWorthUSD, household }
-      : { t: now, netWorthUSD };
+    const row: SnapshotRow = { t: now, netWorthUSD };
+    if (household) row.household = household;
+    if (appState) row.appState = appState;
     await handle.snapshots.put(row);
     return true;
   } catch (e) {
@@ -380,6 +446,7 @@ export async function maybeRecordMonthlySnapshot(
   household?: Household,
   now = Date.now(),
   maxAutoRows = 240,
+  appState?: SnapshotAppState,
 ): Promise<boolean> {
   if (!Number.isFinite(netWorthUSD) || netWorthUSD <= 0) return false;
   if (household && household.accounts.length === 0) return false;
@@ -406,9 +473,9 @@ export async function maybeRecordMonthlySnapshot(
     // is the "first-call wins" semantic per the policy.
     const existing = await handle.snapshots.get(monthAnchor);
     if (existing) return false;
-    const row: SnapshotRow = household
-      ? { t: monthAnchor, netWorthUSD, household }
-      : { t: monthAnchor, netWorthUSD };
+    const row: SnapshotRow = { t: monthAnchor, netWorthUSD };
+    if (household) row.household = household;
+    if (appState) row.appState = appState;
     await handle.snapshots.put(row);
     // Prune oldest auto-snapshots (unlabeled) past the cap.
     if (maxAutoRows > 0) {
