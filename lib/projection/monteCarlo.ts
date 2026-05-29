@@ -481,12 +481,9 @@ export function simulatePath(
   // simulator then uses a zero-filled stocks2x stream.
   let stocks2xReturns: number[];
   let pathId: string;
-  // Note: `options` is reserved for the dataset hook used by tests
-  // that swap in a synthetic return series. Other options used to
-  // live here (the old `rebalance` flag — see SimulationOptions
-  // doc) but were no-ops, so the parameter is currently
-  // unconsumed inside the loop. Kept in the signature for the
-  // dataset hook and future expansion.
+  // Note: `options` carries the rebalance policy (consumed at line
+  // ~502 below) plus a dataset hook used by tests that swap in a
+  // synthetic return series.
   let options: SimulationOptions;
   if (typeof stocks2xReturnsOrPathId === "string") {
     // Old 5-stream signature: (..., realEstate, pathId, options?)
@@ -561,39 +558,27 @@ export function simulatePath(
   let lB = nw * initialWeights.wL;
 
   for (let y = 0; y < totalYears; y++) {
-    // "bucket" mode behaves like "annual" except in retirement
-    // years following a market drop, where the snap is skipped so
-    // the equity slice can recover unsold AND the withdrawal is
-    // taken from the cash bucket first. Compute the per-year
-    // decision once so the snap branch + withdrawal branch agree.
-    //
-    // Trigger gate alignment with the variable-haircut feature:
-    // `y >= yearsPre` (first retirement year is eligible) AND
-    // `y > 0` (we need a prior-year stock return to read).
-    // CRUCIAL: this means a user who retires RIGHT AFTER a
-    // -30% accumulation-year crash IS protected by the bucket
-    // strategy in year 0 of retirement — the exact SORR window
-    // the strategy is designed for. An earlier off-by-one used
-    // `y > yearsPre` and silently excluded that case.
-    // Cash-bucket priority is now ORTHOGONAL to the rebalance
-    // policy (PR #X redesign per user feedback). The rebalance
-    // policy decides whether to SNAP each year; the bucket flag
+    // Cash-bucket priority is ORTHOGONAL to the rebalance policy:
+    // rebalance decides whether to SNAP each year; the bucket flag
     // decides whether retirement-year WITHDRAWAL comes from cash
-    // first. The four combinations are:
-    //   - annual + no-bucket: Trinity baseline (snap + proportional)
-    //   - annual + bucket: refilling SORR shield (snap refills cash
-    //     each year; retirement draws cash-first → cash refills on
-    //     next snap → ongoing protection)
-    //   - none + no-bucket: set-and-forget drift, proportional draw
-    //   - none + bucket: DEPLETING SORR shield (cash never refills;
-    //     retirement drains cash-first → cash falls to 0 → spills
-    //     to equity). Finite protection for early-retirement years.
+    // first. See `RebalancePolicy` and `cashBucketPriority` docs
+    // for the full 2D model; brief summary:
+    //   - annual + no-bucket: Trinity baseline.
+    //   - annual + bucket:    "refilling" shield. CAVEAT: at
+    //     year-end MC snapshot resolution, this cell produces
+    //     IDENTICAL nw to annual+no-bucket because the next
+    //     year-start snap restores cash share. The within-year
+    //     cash-first sourcing matters for liquidity/tax timing
+    //     (not modeled here), not for survival rate. Tests
+    //     pin the observational equivalence (`toBeCloseTo`).
+    //   - none + no-bucket:   set-and-forget drift, proportional draw.
+    //   - none + bucket:      "depleting" shield. Cash never refills →
+    //     monotonic depletion → finite SORR protection. THIS is
+    //     the cell where MC shows divergence from baseline.
     //
-    // The old `"bucket"` rebalance policy collapsed two distinct
-    // strategies into one (refill-bucket-on-up-years-snap +
-    // cash-first-on-down-followup-years) and produced minimal
-    // observable change in user MC runs — the user surfaced this
-    // and proposed the 2D model that this branch implements.
+    // Gate: `y >= yearsPre` (first retirement year eligible). A
+    // user who retires right after an accumulation-year crash IS
+    // protected by the bucket in year 0 of retirement.
     const cashBucketActive =
       inputs.spending?.cashBucketPriority === true && y >= yearsPre;
 
@@ -755,12 +740,21 @@ export function simulatePath(
       // where new contributions would). The two operations use
       // different denominators on purpose.
       const nonCashTotal = sB + bB + gB + rB + lB;
-      if (drawRemaining > 0 && nonCashTotal > 0) {
-        sB -= drawRemaining * (sB / nonCashTotal);
-        bB -= drawRemaining * (bB / nonCashTotal);
-        gB -= drawRemaining * (gB / nonCashTotal);
-        rB -= drawRemaining * (rB / nonCashTotal);
-        lB -= drawRemaining * (lB / nonCashTotal);
+      if (drawRemaining > 0) {
+        if (nonCashTotal > 0) {
+          sB -= drawRemaining * (sB / nonCashTotal);
+          bB -= drawRemaining * (bB / nonCashTotal);
+          gB -= drawRemaining * (gB / nonCashTotal);
+          rB -= drawRemaining * (rB / nonCashTotal);
+          lB -= drawRemaining * (lB / nonCashTotal);
+        } else {
+          // No non-cash class to spill into. The unmet draw is a
+          // real obligation — push it into cash as a deficit so
+          // the trailing nw<=0 detector fires and we don't silently
+          // pretend the household withdrew less than they did.
+          // (Income, if any, will partially offset this below.)
+          cB -= drawRemaining;
+        }
       }
       // Clamp non-cash classes BEFORE the income redistribution so
       // the proportionality math (`sB / totalNow`) sees only non-
@@ -776,7 +770,13 @@ export function simulatePath(
       if (lB < 0) lB = 0;
       if (incomeAtMidYear > 0) {
         // Positive income: distribute to ALL classes by current
-        // weights.
+        // weights. Edge case: if the portfolio is drained (totalNow
+        // <= 0) — either because withdrawal exhausted everything or
+        // an unmet-withdrawal deficit pushed cash negative — drop
+        // the proportional math (denominator is zero or wrong sign)
+        // and land the income directly in cash. Matches a real
+        // household receiving a paycheck into checking when the
+        // brokerage is empty.
         const totalNow = sB + bB + cB + gB + rB + lB;
         if (totalNow > 0) {
           sB += incomeAtMidYear * (sB / totalNow);
@@ -785,6 +785,8 @@ export function simulatePath(
           gB += incomeAtMidYear * (gB / totalNow);
           rB += incomeAtMidYear * (rB / totalNow);
           lB += incomeAtMidYear * (lB / totalNow);
+        } else {
+          cB += incomeAtMidYear;
         }
       } else if (incomeAtMidYear < 0) {
         // NEGATIVE income (partial-coast distribution, sabbatical
@@ -802,12 +804,20 @@ export function simulatePath(
         cB = Math.max(0, cB) - distFromCash;
         const distRemaining = distributionAmount - distFromCash;
         const nonCashAfter = sB + bB + gB + rB + lB;
-        if (distRemaining > 0 && nonCashAfter > 0) {
-          sB -= distRemaining * (sB / nonCashAfter);
-          bB -= distRemaining * (bB / nonCashAfter);
-          gB -= distRemaining * (gB / nonCashAfter);
-          rB -= distRemaining * (rB / nonCashAfter);
-          lB -= distRemaining * (lB / nonCashAfter);
+        if (distRemaining > 0) {
+          if (nonCashAfter > 0) {
+            sB -= distRemaining * (sB / nonCashAfter);
+            bB -= distRemaining * (bB / nonCashAfter);
+            gB -= distRemaining * (gB / nonCashAfter);
+            rB -= distRemaining * (rB / nonCashAfter);
+            lB -= distRemaining * (lB / nonCashAfter);
+          } else {
+            // Symmetric to the withdrawal-deficit case above: no
+            // non-cash to drain, so the unmet negative-income
+            // obligation pushes cash into deficit. The trailing
+            // nw<=0 detector will fire.
+            cB -= distRemaining;
+          }
         }
       }
       // Final clamp after the negative-income spillover (which

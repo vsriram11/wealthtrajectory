@@ -852,7 +852,10 @@ describe("simulatePath — cashBucketPriority (orthogonal to rebalance policy)",
       { rebalance: "none" },
     );
     for (let i = 0; i < noBucket.trajectory.length; i++) {
-      expect(withBucket.trajectory[i]).toBeCloseTo(noBucket.trajectory[i], 0);
+      // Algebraically identical — same factor scaling collapses to
+      // the same per-class balances. ±$0.005 to expose drift, not
+      // ±$0.50 which would silently swallow methodology bugs.
+      expect(withBucket.trajectory[i]).toBeCloseTo(noBucket.trajectory[i], 2);
     }
   });
 
@@ -892,6 +895,85 @@ describe("simulatePath — cashBucketPriority (orthogonal to rebalance policy)",
     for (let i = 0; i < noBucket.trajectory.length; i++) {
       expect(withBucket.trajectory[i]).toBeCloseTo(noBucket.trajectory[i], 6);
     }
+  });
+
+  it("positive income is not lost when bucket drains portfolio to zero (regression)", () => {
+    // Edge case caught in adversarial audit: when withdrawal
+    // exhausts cash AND there's no non-cash to spill into, the
+    // unmet draw used to vanish silently — and the subsequent
+    // positive-income deposit used to skip because totalNow=0.
+    // Net: income worth $80 became $0 in NW, falsely flipping a
+    // survivable path into a failure.
+    //
+    // Setup: 100% cash $50k, withdrawal $100k, income $80k. The
+    // bucket strategy drains cash to 0 + $50k unmet draw → cash
+    // deficit. Then $80k income lands in cash. End NW should be
+    // $50 - $100 + $80 = $30k (positive — survived this year).
+    const inputs: MonteCarloInputs = {
+      startingNetWorthUSD: 50_000,
+      allocation: {
+        stocksFraction: 0,
+        bondsFraction: 0,
+        cashFraction: 1,
+      },
+      annualSpendUSD: 100_000,
+      annualContributionUSD: 0,
+      retirementHorizonYears: 1,
+      incomePerYearUSD: [80_000],
+      spending: spendingWithBucket(),
+    };
+    const result = simulatePath(
+      inputs,
+      [0],
+      [0],
+      [0],
+      [0],
+      [0],
+      "income-survives-drain",
+      { rebalance: "none" },
+    );
+    // Net of withdrawal and income: $50k - $100k + $80k = $30k.
+    // (Cash returns 0%, so rImplied=0 and cfWithGrowth = cf.)
+    expect(result.trajectory[1]).toBeCloseTo(30_000, 0);
+    expect(result.survived).toBe(true);
+  });
+
+  it("negative income deficit is not silently dropped when portfolio drained (regression)", () => {
+    // Symmetric to the positive-income regression: a sabbatical-
+    // bridge negative income that exceeds available cash AND has
+    // no non-cash to drain from used to silently vanish — leaving
+    // the simulator to under-report household failure.
+    //
+    // Setup: 100% cash $50k, withdrawal $30k, negative income $50k
+    // (e.g. partial-coast distribution to another bucket). Total
+    // outflow = $80k > $50k available → real bust.
+    const inputs: MonteCarloInputs = {
+      startingNetWorthUSD: 50_000,
+      allocation: {
+        stocksFraction: 0,
+        bondsFraction: 0,
+        cashFraction: 1,
+      },
+      annualSpendUSD: 30_000,
+      annualContributionUSD: 0,
+      retirementHorizonYears: 1,
+      incomePerYearUSD: [-50_000],
+      spending: spendingWithBucket(),
+    };
+    const result = simulatePath(
+      inputs,
+      [0],
+      [0],
+      [0],
+      [0],
+      [0],
+      "negincome-bust",
+      { rebalance: "none" },
+    );
+    // Net: $50k - $30k - $50k = -$30k → portfolio busts → nw clamps to 0.
+    expect(result.trajectory[1]).toBe(0);
+    expect(result.survived).toBe(false);
+    expect(result.failedAtYear).toBe(1);
   });
 });
 

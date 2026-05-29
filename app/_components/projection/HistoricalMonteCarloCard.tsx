@@ -1098,8 +1098,8 @@ export function HistoricalMonteCarloCard() {
                 cash slice first — only spilling proportionally to
                 other classes when cash runs dry.{" "}
                 {rebalance === "annual"
-                  ? "Each year-start snap refills cash from appreciated equity, so the bucket provides ongoing SORR shielding across the whole horizon."
-                  : "Cash is NEVER refilled (no rebalance) — the slice monotonically depletes. Once exhausted, withdrawals fall through to proportional draw. This is a FINITE shield for the early-retirement danger zone (typically ~5-10 years), not perpetual protection."}{" "}
+                  ? "CAVEAT: with annual rebalance, the next year-start snap restores cash share from appreciated equity. So at year-end MC snapshot resolution (what this simulator measures), the success rate is IDENTICAL to annual + no-bucket. The benefit is within-year liquidity / tax-lot timing, NOT survival rate. For OBSERVABLE SORR shielding in the simulator, switch rebalance to 'no rebalance' (depleting reserve)."
+                  : "Cash is NEVER refilled (no rebalance) — the slice monotonically depletes. Once exhausted, withdrawals fall through to proportional draw. This is a FINITE shield for the early-retirement danger zone (typically ~5-10 years), not perpetual protection. Survival rate genuinely diverges from no-bucket."}{" "}
                 Composes with the fixed-nominal freeze and variable
                 haircut: all three can be on simultaneously.
               </li>
