@@ -289,61 +289,61 @@ export function UsTaxCalculator() {
         />
       </div>
 
-      {/* --------------------------- Breakdown grid ------------------------ */}
+      {/* --------------------------- Breakdown table ----------------------- */}
       <div className="mt-4 rounded-xl border border-border bg-bg-elevated p-4">
-        <div className="text-[11px] font-medium uppercase tracking-wider text-text-muted">
-          Tax breakdown
+        <div className="flex items-baseline justify-between">
+          <div className="text-[11px] font-medium uppercase tracking-wider text-text-muted">
+            Tax breakdown by component
+          </div>
+          <div className="text-[10px] text-text-dim">
+            % of total tax · % of gross income
+          </div>
         </div>
-        <div className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-3">
-          <Stat
-            label="Federal ordinary"
-            value={result.federal.ordinaryTaxUSD}
-            sub={`Marginal ${formatPercent(result.federal.marginalRateOrdinary)}`}
+        {/* Stacked horizontal bar: each component's share of total tax */}
+        <ComponentStackedBar
+          totalTax={result.totalTaxUSD}
+          rows={taxComponents(result)}
+        />
+        {/* Per-component rows: $ amount + % of total tax + % of gross
+            income + descriptive note. Every U.S. tax type the engine
+            models has its own row so the user sees both the dollar
+            cost AND the share of the total + gross. */}
+        <div className="mt-3 divide-y divide-border/50">
+          {taxComponents(result).map((c) => (
+            <TaxComponentRow
+              key={c.key}
+              label={c.label}
+              amount={c.amount}
+              totalTax={result.totalTaxUSD}
+              grossIncome={result.federal.totalGrossIncomeUSD}
+              note={c.note}
+              color={c.color}
+            />
+          ))}
+          {/* Total row */}
+          <TaxComponentRow
+            label="Total tax (all U.S. federal + state)"
+            amount={result.totalTaxUSD}
+            totalTax={result.totalTaxUSD}
+            grossIncome={result.federal.totalGrossIncomeUSD}
+            note="Sum of every component above"
+            color="bg-text"
+            isTotal
           />
-          <Stat
-            label="Federal LTCG"
-            value={result.federal.ltcgTaxUSD}
-            sub={`Marginal ${formatPercent(result.federal.marginalRateLTCG)}`}
-          />
-          <Stat
-            label="Social Security (6.2%)"
-            value={result.federal.ficaSsUSD}
-            sub={`Capped at $176,100`}
-          />
-          <Stat
-            label="Medicare (1.45%)"
-            value={result.federal.ficaMedicareUSD}
-            sub="No wage cap"
-          />
-          <Stat
-            label="Additional Medicare (0.9%)"
-            value={result.federal.additionalMedicareUSD}
-            sub="Above threshold"
-          />
-          <Stat
-            label="Self-employment tax"
-            value={result.federal.seTaxUSD}
-            sub="15.3% × 92.35% × SE"
-          />
-          <Stat
-            label="NIIT (3.8%)"
-            value={result.federal.niitUSD}
-            sub="On investment income above MAGI threshold"
-          />
-          <Stat
-            label={`State (${result.state.stateName})`}
-            value={result.state.stateTaxUSD}
-            sub={
-              result.state.hasIncomeTax
-                ? `Marginal ${formatPercent(result.state.marginalRate)}`
-                : "No income tax"
-            }
-          />
-          <Stat
-            label="AGI"
-            value={result.federal.agiUSD}
-            sub={`Deduction ${formatUSDCompact(result.federal.deductionUSD)} (${result.federal.deductionSource})`}
-          />
+        </div>
+        {/* Adjusted-gross-income context row (not a tax — informational) */}
+        <div className="mt-3 flex items-baseline justify-between rounded-md border border-border bg-bg-surface px-3 py-2 text-[11px]">
+          <div className="text-text-muted">
+            AGI{" "}
+            <span className="text-text-dim">
+              · deduction{" "}
+              {formatUSDCompact(result.federal.deductionUSD)} (
+              {result.federal.deductionSource})
+            </span>
+          </div>
+          <div className="num font-medium text-text">
+            {formatUSD(result.federal.agiUSD)}
+          </div>
         </div>
       </div>
 
@@ -592,6 +592,179 @@ function Stat({
         {formatUSD(value)}
       </div>
       {sub && <div className="text-[10px] text-text-dim">{sub}</div>}
+    </div>
+  );
+}
+
+/**
+ * Per-component tax row. Shows label, $ amount, % of total tax,
+ * % of gross income, and a one-line note. Designed to read like a
+ * line item in a tax return rather than a metric tile — explicit
+ * dual-percentage display per user request.
+ */
+function TaxComponentRow({
+  label,
+  amount,
+  totalTax,
+  grossIncome,
+  note,
+  color,
+  isTotal,
+}: {
+  label: string;
+  amount: number;
+  totalTax: number;
+  grossIncome: number;
+  note?: string;
+  color: string;
+  isTotal?: boolean;
+}) {
+  const pctOfTotal = totalTax > 0 ? amount / totalTax : 0;
+  const pctOfGross = grossIncome > 0 ? amount / grossIncome : 0;
+  return (
+    <div className="grid grid-cols-12 items-baseline gap-2 py-2">
+      <div className="col-span-5 flex items-center gap-2 sm:col-span-4">
+        <span
+          className={`inline-block h-2 w-2 shrink-0 rounded-full ${color}`}
+          aria-hidden
+        />
+        <span
+          className={`text-[11px] ${
+            isTotal ? "font-semibold text-text" : "text-text"
+          }`}
+        >
+          {label}
+        </span>
+      </div>
+      <div
+        className={`num col-span-3 text-right text-[12px] sm:col-span-3 ${
+          isTotal ? "font-semibold text-text" : "text-text"
+        }`}
+      >
+        {formatUSD(amount)}
+      </div>
+      <div className="num col-span-2 text-right text-[11px] text-text-dim sm:col-span-2">
+        {(pctOfTotal * 100).toFixed(1)}%
+      </div>
+      <div className="num col-span-2 text-right text-[11px] text-text-dim sm:col-span-2">
+        {(pctOfGross * 100).toFixed(2)}%
+      </div>
+      {note && (
+        <div className="col-span-12 -mt-1 pl-4 text-[10px] text-text-dim sm:col-span-1 sm:mt-0 sm:pl-0 sm:text-right">
+          {note}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Tax-component palette + ordering. Stable keys keyed off the engine
+ * fields so adding a new component is a one-line change here.
+ */
+function taxComponents(result: ReturnType<typeof computeUsTax>): Array<{
+  key: string;
+  label: string;
+  amount: number;
+  note?: string;
+  color: string;
+}> {
+  return [
+    {
+      key: "fedOrdinary",
+      label: "Federal ordinary income tax",
+      amount: result.federal.ordinaryTaxUSD,
+      note: `Marginal ${formatPercent(result.federal.marginalRateOrdinary)}`,
+      color: "bg-accent",
+    },
+    {
+      key: "fedLtcg",
+      label: "Federal LTCG + qualified-dividend tax",
+      amount: result.federal.ltcgTaxUSD,
+      note: `Marginal ${formatPercent(result.federal.marginalRateLTCG)}`,
+      color: "bg-positive",
+    },
+    {
+      key: "ss",
+      label: "Social Security (6.2%)",
+      amount: result.federal.ficaSsUSD,
+      note: "Capped at $176,100 wage base",
+      color: "bg-blue-400",
+    },
+    {
+      key: "medicare",
+      label: "Medicare (1.45%)",
+      amount: result.federal.ficaMedicareUSD,
+      note: "No wage cap",
+      color: "bg-cyan-400",
+    },
+    {
+      key: "addlMedicare",
+      label: "Additional Medicare (0.9%)",
+      amount: result.federal.additionalMedicareUSD,
+      note: "Above the AGI threshold",
+      color: "bg-teal-400",
+    },
+    {
+      key: "se",
+      label: "Self-employment tax (15.3%)",
+      amount: result.federal.seTaxUSD,
+      note: "Both halves of FICA; half deductible",
+      color: "bg-purple-400",
+    },
+    {
+      key: "niit",
+      label: "Net Investment Income Tax (NIIT 3.8%)",
+      amount: result.federal.niitUSD,
+      note: "On investment income above MAGI threshold",
+      color: "bg-amber-400",
+    },
+    {
+      key: "state",
+      label: `State income tax — ${result.state.stateName}`,
+      amount: result.state.stateTaxUSD,
+      note: result.state.hasIncomeTax
+        ? `Marginal ${formatPercent(result.state.marginalRate)}`
+        : "No state income tax",
+      color: "bg-rose-400",
+    },
+  ];
+}
+
+/**
+ * Stacked horizontal bar visualizing each component's share of the
+ * total tax bill. Zero-amount components render with zero width
+ * (and stay invisible) so the bar stays a clean visual summary
+ * even on simple income mixes.
+ */
+function ComponentStackedBar({
+  totalTax,
+  rows,
+}: {
+  totalTax: number;
+  rows: Array<{ key: string; amount: number; color: string; label: string }>;
+}) {
+  if (totalTax <= 0) {
+    return (
+      <div className="mt-2 h-2 rounded-full bg-bg-surface" aria-hidden />
+    );
+  }
+  return (
+    <div
+      className="mt-2 flex h-2 overflow-hidden rounded-full bg-bg-surface"
+      role="img"
+      aria-label="Stacked tax-component composition bar"
+    >
+      {rows.map((r) =>
+        r.amount > 0 ? (
+          <div
+            key={r.key}
+            className={r.color}
+            style={{ width: `${(r.amount / totalTax) * 100}%` }}
+            title={`${r.label}: ${(r.amount / totalTax * 100).toFixed(1)}%`}
+          />
+        ) : null,
+      )}
     </div>
   );
 }
