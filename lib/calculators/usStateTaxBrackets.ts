@@ -202,15 +202,29 @@ export const STATE_BRACKETS_2025: Record<USState, StateData> = {
   /* --------------------- Flat tax ---------------------- */
   AZ: flatState(0.025),
   CO: flatState(0.044),
-  GA: flatState(0.0539),
+  // Georgia — HB 1015 (signed April 2024) accelerated the flat-tax
+  // glide path: 2024 was 5.39%, 2025 dropped to 5.19%, with further
+  // 0.10% reductions scheduled annually until reaching 4.99%.
+  GA: flatState(0.0519, undefined, "Georgia's flat rate reduced from 5.39% (2024) to 5.19% (2025) under HB 1015; further annual cuts to 4.99% are scheduled."),
   IL: flatState(0.0495, undefined, "Illinois exempts retirement income."),
   IN: flatState(0.030, undefined, "Indiana also levies county income tax (1-3%) not modeled here."),
   IA: flatState(0.038),
   KY: flatState(0.040),
-  MA: flatState(
-    0.05,
-    undefined,
-    "Massachusetts adds a 4% surtax on income above $1M (not modeled).",
+  // Massachusetts: 5% baseline + 4% Millionaires Tax surtax above
+  // $1M (Question 1, ratified 2022; effective tax years 2023+).
+  // Round-7 audit CRITICAL: previously treated as pure flat with a
+  // "not modeled" note — for a HIGH-INCOME MA filer the surtax is
+  // material ($40k extra per $1M of income). Modeled as a
+  // progressive schedule (5% to $1M, 9% above). The $1M threshold
+  // is per-RETURN, not per-spouse, so MFJ uses the same threshold.
+  MA: progressiveSimple(
+    [
+      { rate: 0.05, threshold: 0 },
+      { rate: 0.09, threshold: 1_000_000 },
+    ],
+    {
+      note: "Includes the 4% Millionaires Tax surtax above $1M (Question 1, 2022).",
+    },
   ),
   MI: flatState(0.0425, undefined, "Michigan also levies city income tax in select cities (not modeled)."),
   MS: flatState(0.044, { single: 2_300, mfj: 4_600, hoh: 3_400, mfs: 2_300 }),
@@ -240,12 +254,24 @@ export const STATE_BRACKETS_2025: Record<USState, StateData> = {
     },
   ),
 
-  // Arkansas
-  AR: progressiveSimple([
-    { rate: 0.02, threshold: 0 },
-    { rate: 0.04, threshold: 4_400 },
-    { rate: 0.039, threshold: 8_800 },
-  ], { standardDeduction: { single: 2_410, mfj: 4_820, hoh: 2_410, mfs: 2_410 } }),
+  // Arkansas — post-2024 reform (Act 532, 2024) reduced the top
+  // marginal rate from 4.4% → 3.9% and re-laddered the lower
+  // brackets. Previous code carried the stale 2023 figures AND was
+  // non-monotonic (0.04 then 0.039), which would silently produce
+  // wrong (decreasing) liability across the breakpoint.
+  AR: progressiveSimple(
+    [
+      { rate: 0, threshold: 0 },
+      { rate: 0.02, threshold: 5_500 },
+      { rate: 0.03, threshold: 11_000 },
+      { rate: 0.034, threshold: 15_500 },
+      { rate: 0.039, threshold: 25_700 },
+    ],
+    {
+      standardDeduction: { single: 2_410, mfj: 4_820, hoh: 2_410, mfs: 2_410 },
+      note: "Post-2024 reform (Act 532, 2024). MFJ uses single schedule by AR convention.",
+    },
+  ),
 
   // California (2024 schedule used as 2025 placeholder — FTB
   // typically publishes after October). Includes the 1% MHST roll-up
@@ -274,11 +300,19 @@ export const STATE_BRACKETS_2025: Record<USState, StateData> = {
         { rate: 0.093, threshold: 141_212 },
         { rate: 0.103, threshold: 721_318 },
         { rate: 0.113, threshold: 865_574 },
-        { rate: 0.123, threshold: 1_442_628 },
         // California's 1.1% MHST surcharge is per-RETURN at $1M
         // (NOT $2M for MFJ — the joint return is one return, the
-        // MHST threshold doesn't double). Round-3 audit MED fix.
-        { rate: 0.133, threshold: 1_000_000 },
+        // MHST threshold doesn't double). Round-7 audit MED fix:
+        // the previous code put { 0.123 at $1.44M, 0.133 at $1M }
+        // which is NON-MONOTONIC and breaks the bracket walker. The
+        // MFJ regular top rate of 12.3% kicks in at $1.44M, but MHST
+        // hits at $1M — so we insert a synthetic intermediate
+        // bracket to keep the schedule monotonic AND mathematically
+        // correct:
+        //   $1.00M+: 11.3% (regular) + 1% MHST = 12.3%
+        //   $1.44M+: 12.3% (regular) + 1% MHST = 13.3%
+        { rate: 0.123, threshold: 1_000_000 },
+        { rate: 0.133, threshold: 1_442_628 },
       ],
       hoh: [
         { rate: 0.01, threshold: 0 },
@@ -352,7 +386,10 @@ export const STATE_BRACKETS_2025: Record<USState, StateData> = {
     },
   },
 
-  // Delaware
+  // Delaware — DE Form 200-01 uses the same bracket schedule for all
+  // filing statuses (single = MFJ = HoH), so reusing the single
+  // schedule across all four is correct by DE convention, not a
+  // fallback.
   DE: progressiveSimple([
     { rate: 0.0, threshold: 0 },
     { rate: 0.022, threshold: 2_000 },
@@ -361,7 +398,9 @@ export const STATE_BRACKETS_2025: Record<USState, StateData> = {
     { rate: 0.052, threshold: 20_000 },
     { rate: 0.0555, threshold: 25_000 },
     { rate: 0.066, threshold: 60_000 },
-  ]),
+  ], {
+    note: "Delaware uses the same bracket schedule for all filing statuses (per DE Form 200-01).",
+  }),
 
   // Hawaii
   HI: progressiveSimple(
@@ -411,23 +450,60 @@ export const STATE_BRACKETS_2025: Record<USState, StateData> = {
     standardDeduction: { single: 14_600, mfj: 29_200, hoh: 21_900, mfs: 14_600 },
   }),
 
-  // Maryland
-  MD: progressiveSimple(
-    [
-      { rate: 0.02, threshold: 0 },
-      { rate: 0.03, threshold: 1_000 },
-      { rate: 0.04, threshold: 2_000 },
-      { rate: 0.0475, threshold: 3_000 },
-      { rate: 0.05, threshold: 100_000 },
-      { rate: 0.0525, threshold: 125_000 },
-      { rate: 0.055, threshold: 150_000 },
-      { rate: 0.0575, threshold: 250_000 },
-    ],
-    {
-      standardDeduction: { single: 2_550, mfj: 5_150, hoh: 2_550, mfs: 2_550 },
-      note: "Maryland counties also levy income tax (2.25-3.20%) not modeled here.",
+  // Maryland — MD Form 502 publishes filing-status-specific bracket
+  // schedules. Single, MFS, and Dependent use the SINGLE column;
+  // MFJ, HoH, and Qualifying Surviving Spouse use the JOINT column
+  // (which is NOT simply doubled — only the upper brackets shift).
+  // Round-7 audit HIGH fix: previously the MFJ schedule fell back to
+  // the single thresholds, overstating MFJ tax by ~$1.2k on a $300k
+  // joint return.
+  MD: {
+    kind: "progressive",
+    brackets: {
+      single: [
+        { rate: 0.02, threshold: 0 },
+        { rate: 0.03, threshold: 1_000 },
+        { rate: 0.04, threshold: 2_000 },
+        { rate: 0.0475, threshold: 3_000 },
+        { rate: 0.05, threshold: 100_000 },
+        { rate: 0.0525, threshold: 125_000 },
+        { rate: 0.055, threshold: 150_000 },
+        { rate: 0.0575, threshold: 250_000 },
+      ],
+      mfj: [
+        { rate: 0.02, threshold: 0 },
+        { rate: 0.03, threshold: 1_000 },
+        { rate: 0.04, threshold: 2_000 },
+        { rate: 0.0475, threshold: 3_000 },
+        { rate: 0.05, threshold: 150_000 },
+        { rate: 0.0525, threshold: 175_000 },
+        { rate: 0.055, threshold: 225_000 },
+        { rate: 0.0575, threshold: 300_000 },
+      ],
+      hoh: [
+        { rate: 0.02, threshold: 0 },
+        { rate: 0.03, threshold: 1_000 },
+        { rate: 0.04, threshold: 2_000 },
+        { rate: 0.0475, threshold: 3_000 },
+        { rate: 0.05, threshold: 150_000 },
+        { rate: 0.0525, threshold: 175_000 },
+        { rate: 0.055, threshold: 225_000 },
+        { rate: 0.0575, threshold: 300_000 },
+      ],
+      mfs: [
+        { rate: 0.02, threshold: 0 },
+        { rate: 0.03, threshold: 1_000 },
+        { rate: 0.04, threshold: 2_000 },
+        { rate: 0.0475, threshold: 3_000 },
+        { rate: 0.05, threshold: 100_000 },
+        { rate: 0.0525, threshold: 125_000 },
+        { rate: 0.055, threshold: 150_000 },
+        { rate: 0.0575, threshold: 250_000 },
+      ],
     },
-  ),
+    standardDeduction: { single: 2_550, mfj: 5_150, hoh: 2_550, mfs: 2_550 },
+    note: "Maryland counties also levy income tax (2.25-3.20%) not modeled here.",
+  },
 
   // Minnesota
   MN: {

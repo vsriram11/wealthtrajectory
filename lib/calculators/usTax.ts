@@ -550,15 +550,19 @@ export function computeStateTax(
   // but the I&D tax is repealed effective Jan 1 2025. Treat as none
   // (the data already does this, but documenting the precedent).
 
-  // State taxable income: a simplified model — we use federal taxable
-  // income (ordinary + LTCG, since most states treat LTCG as ordinary)
-  // minus the state standard deduction. This is a deliberate
-  // simplification documented in the disclosures.
-  const federalTaxableTotal =
-    federal.taxableOrdinaryIncomeUSD + federal.taxableLtcgUSD;
+  // State taxable income: a simplified model. Round-7 audit CRITICAL
+  // fix — we now start from federal AGI (not federal TAXABLE income),
+  // so the FEDERAL standard deduction is not double-subtracted when
+  // we then apply the STATE standard deduction below. Most states
+  // begin their schedule from federal AGI (or a close cousin) and
+  // apply their own state-specific deduction, which is exactly what
+  // this approximation now models.
+  //
+  // Most states treat LTCG as ordinary, so we collapse the two
+  // federal taxable streams into a single state-taxable amount.
   const stateStdDed =
     stateData.standardDeduction?.[inputs.filingStatus] ?? 0;
-  const taxableIncome = Math.max(0, federalTaxableTotal - stateStdDed);
+  const taxableIncome = Math.max(0, federal.agiUSD - stateStdDed);
 
   // Pick the bracket schedule for this filing status. Some states
   // ignore filing status (flat tax) or only have one schedule.

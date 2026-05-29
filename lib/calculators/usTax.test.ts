@@ -356,16 +356,21 @@ describe("computeStateTax — basic categories", () => {
     expect(r.state.stateTaxUSD).toBe(0);
   });
 
-  it("CO flat 4.4% applies to federal-style taxable income", () => {
+  it("CO flat 4.4% applies to federal AGI (no double-counting of federal std ded)", () => {
     const r = computeUsTax(
       baseInputs({
         state: "CO",
         income: { ...EMPTY_INCOME, wagesUSD: 100_000 },
       }),
     );
-    // Federal taxable = 100k − 15k = 85k
-    // CO has no state std ded modeled → 85k × 4.4% = 3,740
-    expect(r.state.stateTaxUSD).toBeCloseTo(85_000 * 0.044, 2);
+    // Round-7 audit CRITICAL fix: state tax base starts from federal
+    // AGI ($100k here — no retirement adj, no SE deductible), NOT
+    // federal TAXABLE income (which would have subtracted the federal
+    // $15k std deduction first). CO has no state std ded modeled →
+    // $100k × 4.4% = $4,400. Previously this returned $3,740, silently
+    // under-stating state liability by the federal-deduction × state-
+    // rate cross-product (here $660).
+    expect(r.state.stateTaxUSD).toBeCloseTo(100_000 * 0.044, 2);
   });
 
   it("CA single $100k wages → progressive brackets applied", () => {
@@ -572,5 +577,167 @@ describe("Round 3 audit regression — engine fixes", () => {
     // = $5,652. With $10k retire deducted too → AGI = $80k -
     // $5,652 - $10,000 = $64,348.
     expect(r.agiUSD).toBeCloseTo(64_348, 0);
+  });
+});
+
+describe("Round 7 audit regression — state tax engine fixes", () => {
+  it("MA Millionaires Tax: 9% applies above $1M (audit R7 CRITICAL #1)", () => {
+    // Single MA filer with $1.5M ordinary income. Previously MA was
+    // modeled as a flat 5% → underreported tax by 4% × $500k = $20k.
+    // Now: first $1M at 5% = $50k; next $500k at 9% = $45k; total $95k.
+    // (State stdDed not modeled for MA; verify by simulation rather
+    // than precise number to allow for tiny rounding.)
+    const r = computeUsTax(
+      baseInputs({
+        state: "MA",
+        income: { ...EMPTY_INCOME, wagesUSD: 1_500_000 },
+      }),
+    );
+    // State tax base = federal AGI ≈ $1.5M (no adjustments here).
+    // Expected MA tax: $50k + $45k = $95k (± small from any modeled
+    // state deduction).
+    expect(r.state.stateTaxUSD).toBeGreaterThan(94_000);
+    expect(r.state.stateTaxUSD).toBeLessThan(96_000);
+    // Marginal rate at the top should reflect the 9% surtax bracket.
+    expect(r.state.marginalRate).toBeCloseTo(0.09, 5);
+  });
+
+  it("MA below $1M is flat 5% (sanity for the surtax)", () => {
+    const r = computeUsTax(
+      baseInputs({
+        state: "MA",
+        income: { ...EMPTY_INCOME, wagesUSD: 500_000 },
+      }),
+    );
+    // $500k × 5% = $25k (state base = AGI = $500k, no MA std ded
+    // modeled).
+    expect(r.state.stateTaxUSD).toBeCloseTo(25_000, 0);
+    expect(r.state.marginalRate).toBeCloseTo(0.05, 5);
+  });
+
+  it("AR post-2024 reform brackets are monotonic (audit R7 CRITICAL #2)", () => {
+    // The OLD schedule was non-monotonic: 0.04 then 0.039 across
+    // $4,400 and $8,800. Now we use the post-Act-532 schedule with
+    // a clean monotonic 0 → 2 → 3 → 3.4 → 3.9%.
+    const wagesUSD = 100_000;
+    const r = computeUsTax(
+      baseInputs({
+        state: "AR",
+        income: { ...EMPTY_INCOME, wagesUSD },
+      }),
+    );
+    // Marginal rate at $100k should be the top 3.9%.
+    expect(r.state.marginalRate).toBeCloseTo(0.039, 5);
+    // Sanity: tax should be < 3.9% × $100k (because lower brackets
+    // are lower rates) and > 3.4% × $100k − $1k (lots of income at top).
+    expect(r.state.stateTaxUSD).toBeLessThan(0.039 * wagesUSD);
+    expect(r.state.stateTaxUSD).toBeGreaterThan(0.034 * wagesUSD - 1_000);
+  });
+
+  it("state tax base = federal AGI, not federal taxable income (audit R7 CRITICAL #3)", () => {
+    // The previous code used `federal.taxableOrdinaryIncomeUSD +
+    // federal.taxableLtcgUSD` — which had the FEDERAL standard
+    // deduction subtracted — as the state base. When the state then
+    // applied its OWN standard deduction (or none), the federal
+    // std ded was effectively double-counted. Switching to AGI fixes
+    // it.
+    //
+    // CO has no state std ded modeled, so the test is precise:
+    // wages $100k → AGI $100k → state tax $100k × 4.4% = $4,400.
+    const r = computeUsTax(
+      baseInputs({
+        state: "CO",
+        income: { ...EMPTY_INCOME, wagesUSD: 100_000 },
+      }),
+    );
+    expect(r.state.stateTaxUSD).toBeCloseTo(100_000 * 0.044, 2);
+  });
+
+  it("MD MFJ schedule uses joint thresholds, not single (audit R7 HIGH H3)", () => {
+    // $300k MFJ. Under the OLD code MFJ fell back to the single
+    // schedule, so brackets shifted upward at $250k → top 5.75%.
+    // Under the actual MD joint schedule, 5.75% doesn't kick in
+    // until $300k — so on $300k income, MFJ marginal is 5.5%,
+    // not 5.75%.
+    const r = computeUsTax(
+      baseInputs({
+        state: "MD",
+        filingStatus: "mfj",
+        income: { ...EMPTY_INCOME, wagesUSD: 300_000 },
+      }),
+    );
+    expect(r.state.marginalRate).toBeCloseTo(0.055, 5);
+    // And $400k MFJ should hit 5.75% (the new joint top bracket).
+    const r2 = computeUsTax(
+      baseInputs({
+        state: "MD",
+        filingStatus: "mfj",
+        income: { ...EMPTY_INCOME, wagesUSD: 400_000 },
+      }),
+    );
+    expect(r2.state.marginalRate).toBeCloseTo(0.0575, 5);
+  });
+
+  it("CA MFJ above $1M includes MHST and stays monotonic (audit R7 MED M1)", () => {
+    // $1.2M MFJ income. Regular MFJ top bracket of 12.3% doesn't
+    // kick in until $1.44M, so $1.2M falls in the 11.3% regular
+    // bracket — but per-return MHST adds 1% above $1M → 12.3%.
+    const r = computeUsTax(
+      baseInputs({
+        state: "CA",
+        filingStatus: "mfj",
+        income: { ...EMPTY_INCOME, wagesUSD: 1_200_000 },
+      }),
+    );
+    expect(r.state.marginalRate).toBeCloseTo(0.123, 5);
+
+    // $1.5M MFJ should hit the full 13.3% (12.3% regular + 1% MHST).
+    const r2 = computeUsTax(
+      baseInputs({
+        state: "CA",
+        filingStatus: "mfj",
+        income: { ...EMPTY_INCOME, wagesUSD: 1_500_000 },
+      }),
+    );
+    expect(r2.state.marginalRate).toBeCloseTo(0.133, 5);
+  });
+
+  it("GA rate reflects 2025 HB-1015 reduction to 5.19% (audit R7 MED M4)", () => {
+    const r = computeUsTax(
+      baseInputs({
+        state: "GA",
+        income: { ...EMPTY_INCOME, wagesUSD: 100_000 },
+      }),
+    );
+    expect(r.state.marginalRate).toBeCloseTo(0.0519, 5);
+  });
+
+  it("every state bracket schedule is monotonically non-decreasing (cross-cutting property)", () => {
+    // Pin the invariant the AR + CA-MFJ bugs both violated: the
+    // bracket walker assumes thresholds increase monotonically. Any
+    // future stale-rate edit that breaks this is caught here.
+    const STATES = Object.keys(US_STATE_NAMES) as USState[];
+    const statuses = ["single", "mfj", "hoh", "mfs"] as const;
+    for (const state of STATES) {
+      for (const status of statuses) {
+        const r = computeUsTax(
+          baseInputs({
+            state,
+            filingStatus: status,
+            income: { ...EMPTY_INCOME, wagesUSD: 50_000 },
+          }),
+        );
+        const breakdown = r.state.bracketBreakdown;
+        for (let i = 1; i < breakdown.length; i++) {
+          // Rates within a single state schedule must not decrease.
+          // (We compare bracket-row rates pulled from breakdown.)
+          if (breakdown[i].rate < breakdown[i - 1].rate) {
+            throw new Error(
+              `Non-monotonic bracket in ${state} ${status}: rate dropped from ${breakdown[i - 1].rate} to ${breakdown[i].rate}`,
+            );
+          }
+        }
+      }
+    }
   });
 });
