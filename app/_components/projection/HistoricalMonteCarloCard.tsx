@@ -425,17 +425,49 @@ export function HistoricalMonteCarloCard() {
   // Decompose equity into face values to recompose post-tax.
   // `regular1xEquityUSD` is the equity that's neither recognized 2x
   // nor leveraged-being-restructured — it stays at full face value.
-  const totalEquityFaceUSD =
-    portfolio.classes.equityShare * portfolio.netWorthUSD;
+  //
+  // Round-2 audit CRITICAL fix: after Round 1, leveragedBuckets'
+  // stocks2xUSD and nonRecognizedLeveragedUSD EXCLUDE the portion
+  // consumed by bucket-funding. But `totalEquityFaceUSD` still
+  // counted the full pre-sale face. Subtracting the (reduced)
+  // leveraged values from the unchanged total face was RE-ATTRIBUTING
+  // the consumed leveraged value into `regular1xEquityUSD` —
+  // simulator saw the same TQQQ as cash AND as 1x stocks (phantom
+  // equity). Fix: subtract the consumed equity face from the total
+  // BEFORE deriving the 1x residual.
+  const consumedEquityFaceUSD = bucketFundingPlan.sales
+    .filter((s) => s.kind === "equity")
+    .reduce((sum, s) => sum + s.faceValueSoldUSD, 0);
+  const totalEquityFaceUSD = Math.max(
+    0,
+    portfolio.classes.equityShare * portfolio.netWorthUSD -
+      consumedEquityFaceUSD,
+  );
   const regular1xEquityUSD = Math.max(
     0,
     totalEquityFaceUSD -
       leveragedBuckets.stocks2xUSD -
       leveragedBuckets.nonRecognizedLeveragedUSD,
   );
+  // Per-class consumption from non-equity buckets, so the share
+  // computations below also reflect post-sale composition (Round-2
+  // CRITICAL: bonds / commodity / RE / alts could be drained too
+  // when equity is exhausted; the simulator must see the reduced
+  // shares, not pre-sale shares).
+  const consumedByBucketUSD: Record<string, number> = {
+    bonds: 0,
+    commodity: 0,
+    realEstate: 0,
+    otherAlts: 0,
+  };
+  for (const s of bucketFundingPlan.sales) {
+    if (s.bucket in consumedByBucketUSD) {
+      consumedByBucketUSD[s.bucket] += s.faceValueSoldUSD;
+    }
+  }
   // Bucket dollar amounts going into the MC sim:
-  //   stocks2x = recognized 2x face (unchanged) + post-tax 3x SPY/Nasdaq
-  //   stocks   = regular 1x face (unchanged)  + post-tax other-leveraged
+  //   stocks2x = recognized 2x face (post-bucket-funding) + post-tax 3x SPY/Nasdaq
+  //   stocks   = regular 1x face (post-bucket-funding) + post-tax other-leveraged
   const stocks2xBucketUSD =
     leveragedBuckets.stocks2xUSD +
     leveragedBuckets.postTaxDeleverageToStocks2xUSD;
@@ -444,9 +476,7 @@ export function HistoricalMonteCarloCard() {
   // Fractions of pre-tax NW. `resolveWeights` inside the simulator
   // normalizes these to sum-to-1, so a sub-1 raw sum (the tax-hit
   // shrinkage) is handled correctly when applied to the post-tax
-  // `effectiveStartingNW` below — net effect: bucket dollars come
-  // out as bucket_face_or_post_tax × (startingNW / netWorthUSD),
-  // which scales correctly with what-if overrides.
+  // `effectiveStartingNW` below.
   const stocks2xFraction =
     portfolio.netWorthUSD > 0
       ? stocks2xBucketUSD / portfolio.netWorthUSD
@@ -455,14 +485,50 @@ export function HistoricalMonteCarloCard() {
     portfolio.netWorthUSD > 0
       ? stocks1xBucketUSD / portfolio.netWorthUSD
       : 0;
-  // Tax hit as a fraction of total pre-tax NW. Scales with the
-  // user's startingNW override so what-if scenarios get proportional
-  // tax drag — the assumption is portfolio composition is held
-  // constant across what-if sizing.
+  // Tax hit as a fraction of total pre-tax NW.
   const taxHitFraction =
     portfolio.netWorthUSD > 0
       ? leveragedBuckets.deleveragingTaxHitUSD / portfolio.netWorthUSD
       : 0;
+  // Per-class shares for non-equity classes, reduced by any
+  // bucket-funding consumption from that class. The plan drains
+  // priority-ordered (equity first), so in typical use only equity
+  // is touched — but a household with little equity could see
+  // bonds/commodity/RE consumed too. Round-2 audit CRITICAL fix:
+  // simulator must see post-sale shares, not pre-sale shares.
+  const bondsFractionPostSale =
+    portfolio.netWorthUSD > 0
+      ? Math.max(
+          0,
+          portfolio.classes.bondShare * portfolio.netWorthUSD -
+            consumedByBucketUSD.bonds,
+        ) / portfolio.netWorthUSD
+      : 0;
+  const commodityFractionPostSale =
+    portfolio.netWorthUSD > 0
+      ? Math.max(
+          0,
+          commodityShare * portfolio.netWorthUSD -
+            consumedByBucketUSD.commodity,
+        ) / portfolio.netWorthUSD
+      : 0;
+  const realEstateFractionPostSale =
+    portfolio.netWorthUSD > 0
+      ? Math.max(
+          0,
+          realEstateShare * portfolio.netWorthUSD -
+            consumedByBucketUSD.realEstate,
+        ) / portfolio.netWorthUSD
+      : 0;
+  const otherAltsFractionPostSale =
+    portfolio.netWorthUSD > 0
+      ? Math.max(
+          0,
+          otherAltsShare * portfolio.netWorthUSD -
+            consumedByBucketUSD.otherAlts,
+        ) / portfolio.netWorthUSD
+      : 0;
+
   // Single pure transformation: see lib/projection/cashBucketAllocation.ts.
   // Passes the bucket-funding plan's POST-TAX effective cash
   // fraction (NOT the raw requested fraction). Round-1 audit HIGH:
@@ -470,20 +536,29 @@ export function HistoricalMonteCarloCard() {
   // actual post-tax cash is less than 25%; piping the raw request
   // through magicked $T of cash out of thin air. The plan's
   // `effectiveCashFractionPostTax` reconciles this correctly +
-  // also handles the partial-funding case (shortfallUSD > 0 ⇒
-  // can't raise the full request ⇒ allocation runs at the
-  // achievable fraction, not the requested one).
+  // also handles the partial-funding case (shortfallUSD > 0).
+  //
+  // Round-2 KNOWN APPROXIMATION: applyCashBucketOverride
+  // proportionally shrinks non-cash classes uniformly, while the
+  // plan drains highest-leverage FIRST. For a request that's
+  // mostly satisfied from equity (typical), the disagreement is
+  // bounded: equity classes are explicitly fed in already-shrunk
+  // (regularStocksFraction, stocks2xFraction reflect plan
+  // consumption). Bonds/etc. use `*PostSale` fractions above.
+  // The override's final pass only handles the cash dilution; if
+  // it shrinks non-cash slightly more than needed, the simulator
+  // sees a marginally lower equity exposure (conservative bias).
   const allocation = useMemo(
     () =>
       applyCashBucketOverride(
         {
           stocksFraction: regularStocksFraction,
           stocks2xFraction,
-          bondsFraction: portfolio.classes.bondShare,
+          bondsFraction: bondsFractionPostSale,
           cashFraction: projectedCashShare,
-          commodityFraction: commodityShare,
-          realEstateFraction: realEstateShare,
-          otherFraction: otherAltsShare,
+          commodityFraction: commodityFractionPostSale,
+          realEstateFraction: realEstateFractionPostSale,
+          otherFraction: otherAltsFractionPostSale,
         },
         cashBucketOverrideActive
           ? bucketFundingPlan.effectiveCashFractionPostTax
@@ -492,11 +567,11 @@ export function HistoricalMonteCarloCard() {
     [
       regularStocksFraction,
       stocks2xFraction,
-      portfolio.classes.bondShare,
+      bondsFractionPostSale,
       projectedCashShare,
-      commodityShare,
-      realEstateShare,
-      otherAltsShare,
+      commodityFractionPostSale,
+      realEstateFractionPostSale,
+      otherAltsFractionPostSale,
       cashBucketOverrideActive,
       bucketFundingPlan.effectiveCashFractionPostTax,
     ],
