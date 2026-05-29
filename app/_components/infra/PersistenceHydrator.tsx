@@ -51,6 +51,15 @@ export function PersistenceHydrator() {
     let snapTimer: ReturnType<typeof setTimeout> | null = null;
     const unsub = useAppStore.subscribe((state, prev) => {
       if (state.mode !== "real") return;
+      // Time-travel session gate — when active, the household /
+      // assumptions in memory represent a HYPOTHETICAL past state
+      // the user is editing for the purpose of taking a backdated
+      // snapshot. Persisting them to IDB would clobber the live
+      // present-day state on next load (and the auto-snapshot
+      // path would record a duplicate at today's date with the
+      // edited values). Both writes must be muted until the user
+      // exits the session (which restores the baseline).
+      if (state.timeTravelActive) return;
       if (
         state.household === prev.household &&
         state.assumptions === prev.assumptions &&
@@ -71,6 +80,11 @@ export function PersistenceHydrator() {
       }
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => {
+        // Fire-time gate: if the user entered time-travel during
+        // the 250ms debounce window, abort the save. The handler's
+        // entry-time gate already covers the common path; this is
+        // defense in depth for the queued-then-entered race.
+        if (useAppStore.getState().timeTravelActive) return;
         void saveRealState({
           household: state.household,
           assumptions: state.assumptions,
@@ -91,6 +105,8 @@ export function PersistenceHydrator() {
       if (snapTimer) clearTimeout(snapTimer);
       snapTimer = setTimeout(() => {
         void (async () => {
+          // Same fire-time gate for the auto-snapshot path.
+          if (useAppStore.getState().timeTravelActive) return;
           const wrote = await maybeRecordSnapshot(
             householdNetWorth(state.household),
             state.household,
@@ -124,6 +140,11 @@ export function PersistenceHydrator() {
       void (async () => {
         const s = useAppStore.getState();
         if (s.mode !== "real") return;
+        // Don't auto-snapshot the time-travel hypothetical at
+        // today's date — the user is mid-edit on a backdated
+        // session and the snapshot they want will be recorded
+        // explicitly via the banner's Save button.
+        if (s.timeTravelActive) return;
         const wrote = await maybeRecordSnapshot(
           householdNetWorth(s.household),
           s.household,

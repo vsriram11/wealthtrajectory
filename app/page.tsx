@@ -34,6 +34,7 @@ import { EncryptionUnlockBanner } from "./_components/data/EncryptionUnlockBanne
 import { SyncShrinkageBanner } from "./_components/data/SyncShrinkageBanner";
 import { GlobalSyncBanner } from "./_components/data/GlobalSyncBanner";
 import { SignInOutcomeBanner } from "./_components/data/SignInOutcomeBanner";
+import { TimeTravelBanner } from "./_components/data/TimeTravelBanner";
 import { EmptyState } from "./_components/ui/EmptyState";
 import { QuickStart } from "./_components/data/QuickStart";
 import { HoldingCreator } from "./_components/holdings/HoldingCreator";
@@ -90,6 +91,7 @@ export default function Home() {
       <QuoteCloudSync />
       <ServiceWorkerRegistrar />
       <SessionEnforcer />
+      <TimeTravelBanner />
       <DemoHeader />
       <SignInOutcomeBanner />
       <EncryptionUnlockBanner />

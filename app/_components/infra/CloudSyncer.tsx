@@ -45,6 +45,17 @@ export function CloudSyncer() {
       // isDemoHousehold checks for the hardcoded demo IDs that no
       // user-created household can produce.
       if (isDemoHousehold(state.household)) return;
+      // Time-travel session gate — same reasoning as the IDB gate
+      // in PersistenceHydrator. The in-memory household represents
+      // a HYPOTHETICAL past state the user is editing for the
+      // purpose of a backdated snapshot. Uploading those edits to
+      // Drive would overwrite every other device's view of the
+      // user's actual present-day holdings — catastrophic. The
+      // gate fires BEFORE the debounce timer starts so a queued
+      // upload from before-time-travel doesn't fire mid-session
+      // either (the cleanup path below also clears any pending
+      // timer when the subscription re-runs).
+      if (state.timeTravelActive) return;
       if (
         state.household === prev.household &&
         state.assumptions === prev.assumptions &&
@@ -87,6 +98,16 @@ export function CloudSyncer() {
           return;
         }
         if (s.mode !== "real") {
+          s.setGoogleSyncState({ googleUploadScheduled: false });
+          return;
+        }
+        // Re-check the time-travel gate at fire time too — a debounce
+        // scheduled BEFORE the user entered time travel must not fire
+        // mid-session with the hypothetical state. The subscribe
+        // handler already clears the prior timer when state changes,
+        // but enterTimeTravel itself doesn't change any of the
+        // diffed slice references, so the existing timer may survive.
+        if (s.timeTravelActive) {
           s.setGoogleSyncState({ googleUploadScheduled: false });
           return;
         }

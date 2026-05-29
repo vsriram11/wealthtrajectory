@@ -13,12 +13,11 @@ import {
   filterHousehold,
   householdForRollups,
   householdNetWorth,
-  type Household,
 } from "@/lib/types";
 import { memberFilteredSnapshots } from "@/lib/data/history";
 import { formatUSD } from "@/lib/format";
 import { useActiveProjection } from "@/lib/projection/useActiveProjection";
-import { SnapshotStagingPanel } from "./SnapshotStagingPanel";
+import { EnterTimeTravelModal } from "./EnterTimeTravelModal";
 
 /**
  * History snapshot manager.
@@ -95,16 +94,16 @@ export function SnapshotsManager() {
         : null,
     [snapshots, draftT],
   );
-  // Time-travel staging state (R-snapshot UX) — when non-null, the
-  // user has entered "Stage past holdings" mode. The staged
-  // household lives in REACT STATE ONLY and never touches Zustand
-  // or IDB. Cancel discards it atomically; Commit calls
-  // recordSnapshot with the staged payload and resets to null. The
-  // dance the old <details> block described (Export → mutate live →
-  // snapshot → mutate back → import) is now obviated.
-  const [stagedHousehold, setStagedHousehold] = useState<Household | null>(
-    null,
-  );
+  // Time-travel session — a separate, full-app edit mode for
+  // backdating snapshots. The button in this panel opens a date
+  // picker; on confirm the store flips to `timeTravelActive=true`
+  // and the TimeTravelBanner takes over. While the mode is
+  // active, persistence + Drive sync are gated off so the user
+  // can freely edit their holdings as if at the chosen past date,
+  // then Save (writes a backdated snapshot) or Exit (restores the
+  // baseline). Modal open state lives here so the trigger button
+  // and the modal share an immediate scope.
+  const [timeTravelModalOpen, setTimeTravelModalOpen] = useState(false);
   // Per-row edit state (Audit R1 HIGH #5 + #6). When non-null,
   // the row whose `t` matches is in edit mode; the draft fields
   // are scoped to that row's edits. Explicit Save/Cancel
@@ -248,42 +247,6 @@ export function SnapshotsManager() {
       await recordSnapshot(snap);
       bumpSnapshotsRevision();
       await refresh();
-      setDraftLabel("");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  /**
-   * Time-travel commit. Saves a snapshot from the STAGED household
-   * (the React-local working copy) at the chosen date. Live store
-   * state is untouched. Status message announces the safety
-   * guarantee so the user knows their actual holdings weren't
-   * mutated. Auto-collapses the staging panel on success.
-   */
-  const handleStagedCommit = async () => {
-    if (!stagedHousehold) return;
-    const t = parseISO(draftDate);
-    if (!Number.isFinite(t)) return;
-    setBusy(true);
-    try {
-      // Defensive clone — the React state could be aliased into
-      // an upcoming render's diff calculation. Same pattern as
-      // handleAdd above.
-      const stagedClone = structuredClone(stagedHousehold);
-      const snap: Snapshot = {
-        t,
-        netWorthUSD: householdNetWorth(stagedClone),
-        household: stagedClone,
-        ...(draftLabel.trim() ? { label: draftLabel.trim() } : {}),
-      };
-      await recordSnapshot(snap);
-      bumpSnapshotsRevision();
-      await refresh();
-      setStatusMessage(
-        "Historical snapshot saved. Live accounts unchanged.",
-      );
-      setStagedHousehold(null);
       setDraftLabel("");
     } finally {
       setBusy(false);
@@ -621,58 +584,37 @@ export function SnapshotsManager() {
             </div>
           </div>
 
-          {/* Advanced flow: backdating a snapshot to a date when the
-              portfolio looked different. Surfaced as collapsible
-              guidance so the simple "save current state" case isn't
-              cluttered with the destructive-edit warning. */}
-          {/* Time-travel staging: lets the user backdate a snapshot
-              with DIFFERENT holdings than today, without the
-              previous cumbersome Export → mutate-live → snapshot →
-              mutate-back → import dance. Staged state lives
-              entirely in React local state — live store + Drive
-              backup are NEVER touched until the user clicks Commit
-              (and even then only the snapshot collection mutates,
-              not the live household). */}
-          {stagedHousehold == null ? (
-            <button
-              type="button"
-              onClick={() => {
-                // Initialize staging from the SAME base used for
-                // currentDisplayNW — rollup-include + member-filter
-                // applied so the staged starting point matches what
-                // the user sees as "Live NW (today)" in the panel
-                // header.
-                const base =
-                  memberId == null
-                    ? householdForRollups(household)
-                    : filterHousehold(household, memberId);
-                setStagedHousehold(structuredClone(base));
-              }}
-              className="mt-3 w-full rounded-lg border border-dashed border-border bg-bg-surface px-3 py-2 text-left text-[11px] text-text-muted hover:border-accent hover:text-accent"
-              aria-label="Open time-travel staging panel to record a past state with different holdings"
-            >
-              <span className="font-medium text-text">
-                Stage past holdings…
-              </span>{" "}
-              Backdate a snapshot with different composition (e.g.
-              &ldquo;in 2022 I held only VTI&rdquo;) without touching
-              your live accounts or Drive backup.
-            </button>
-          ) : (
-            <SnapshotStagingPanel
-              base={
-                memberId == null
-                  ? householdForRollups(household)
-                  : filterHousehold(household, memberId)
-              }
-              staged={stagedHousehold}
-              onChange={setStagedHousehold}
-              onCommit={() => void handleStagedCommit()}
-              onCancel={() => setStagedHousehold(null)}
-              busy={busy}
-              collisionExists={collidingSnapshot != null}
-            />
-          )}
+          {/* Time-travel session entry. Clicking this opens a
+              date-picker modal; on confirm the app enters
+              backdating mode (a sticky banner at the top of the
+              window, plus persistence + Drive sync muted for the
+              duration). The user navigates to Holdings / Accounts
+              and edits values to match the chosen past date, then
+              hits Save in the banner to record the backdated
+              snapshot — or Exit to discard everything. The full
+              app-wide edit mode replaced the older inline scale /
+              drop "Stage past holdings" panel: users needed the
+              richness of the real Holdings UI, not a parallel
+              mini-editor. */}
+          <button
+            type="button"
+            onClick={() => setTimeTravelModalOpen(true)}
+            className="mt-3 w-full rounded-lg border border-dashed border-border bg-bg-surface px-3 py-2 text-left text-[11px] text-text-muted hover:border-accent hover:text-accent"
+            aria-label="Open the date-picker modal to enter time-travel backdating mode"
+          >
+            <span className="font-medium text-text">
+              Backdate snapshot (time-travel mode)…
+            </span>{" "}
+            Enter a special mode where you can edit your holdings,
+            accounts, and assumptions as if at a past date. Save to
+            record a backdated snapshot; Exit to restore. None of
+            your edits in the session are persisted to IndexedDB or
+            Drive — your live data is safe.
+          </button>
+          <EnterTimeTravelModal
+            open={timeTravelModalOpen}
+            onClose={() => setTimeTravelModalOpen(false)}
+          />
 
           {sorted.length > 0 && (
             <ul className="mt-3 space-y-1.5">
