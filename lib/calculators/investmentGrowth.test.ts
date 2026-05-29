@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  annualContributionForYear,
   simulateInvestmentGrowth,
   type InvestmentGrowthInputs,
 } from "./investmentGrowth";
@@ -220,5 +221,213 @@ describe("simulateInvestmentGrowth", () => {
         r.yearlyBreakdown[i - 1].endingBalanceUSD,
       );
     }
+  });
+});
+
+describe("simulateInvestmentGrowth — annualContributionIncreasePct (escalator)", () => {
+  it("with 0% escalator, behavior matches the omitted-escalator baseline", () => {
+    const r1 = simulateInvestmentGrowth(BASE);
+    const r2 = simulateInvestmentGrowth({
+      ...BASE,
+      annualContributionIncreasePct: 0,
+    });
+    expect(r2.futureValueUSD).toBeCloseTo(r1.futureValueUSD, 6);
+  });
+
+  it("escalator > 0 increases each year's contribution geometrically", () => {
+    // 3% escalator, monthly $100 base → year 1 = $1200 annual, year 2
+    // = $1236, year 3 = $1273.08, ...
+    const r = simulateInvestmentGrowth({
+      ...BASE,
+      contributionUSD: 100,
+      contributionFrequency: "monthly",
+      annualContributionIncreasePct: 0.03,
+      years: 3,
+      annualRateOfReturn: 0,
+    });
+    expect(r.yearlyBreakdown[0].contributionsThisYear).toBeCloseTo(1200, 2);
+    expect(r.yearlyBreakdown[1].contributionsThisYear).toBeCloseTo(1236, 2);
+    expect(r.yearlyBreakdown[2].contributionsThisYear).toBeCloseTo(1273.08, 2);
+  });
+
+  it("escalator > 0 strictly increases future value vs flat contributions (positive rate)", () => {
+    const flat = simulateInvestmentGrowth({ ...BASE, years: 30 });
+    const escalated = simulateInvestmentGrowth({
+      ...BASE,
+      years: 30,
+      annualContributionIncreasePct: 0.03,
+    });
+    expect(escalated.futureValueUSD).toBeGreaterThan(flat.futureValueUSD);
+  });
+
+  it("escalator NaN/Infinity degrades to 0 (no escalation)", () => {
+    const nanEsc = simulateInvestmentGrowth({
+      ...BASE,
+      annualContributionIncreasePct: Number.NaN,
+    });
+    const baseline = simulateInvestmentGrowth(BASE);
+    expect(nanEsc.futureValueUSD).toBeCloseTo(baseline.futureValueUSD, 6);
+  });
+});
+
+describe("simulateInvestmentGrowth — perYearContributionOverridesUSD", () => {
+  it("override on a single year REPLACES the escalated default, leaves other years alone", () => {
+    const escalated = simulateInvestmentGrowth({
+      ...BASE,
+      contributionUSD: 100,
+      contributionFrequency: "monthly",
+      annualContributionIncreasePct: 0.03,
+      years: 5,
+      annualRateOfReturn: 0,
+    });
+    const withOverride = simulateInvestmentGrowth({
+      ...BASE,
+      contributionUSD: 100,
+      contributionFrequency: "monthly",
+      annualContributionIncreasePct: 0.03,
+      years: 5,
+      annualRateOfReturn: 0,
+      // Override year 3 to $5000 total annual contribution
+      perYearContributionOverridesUSD: [null, null, 5000, null, null],
+    });
+    // Year 1, 2, 4, 5 unchanged (matching escalator)
+    expect(withOverride.yearlyBreakdown[0].contributionsThisYear).toBeCloseTo(
+      escalated.yearlyBreakdown[0].contributionsThisYear,
+      2,
+    );
+    expect(withOverride.yearlyBreakdown[1].contributionsThisYear).toBeCloseTo(
+      escalated.yearlyBreakdown[1].contributionsThisYear,
+      2,
+    );
+    // Year 3: $5000 (override), not the escalated default
+    expect(withOverride.yearlyBreakdown[2].contributionsThisYear).toBeCloseTo(
+      5000,
+      2,
+    );
+    expect(withOverride.yearlyBreakdown[3].contributionsThisYear).toBeCloseTo(
+      escalated.yearlyBreakdown[3].contributionsThisYear,
+      2,
+    );
+    expect(withOverride.yearlyBreakdown[4].contributionsThisYear).toBeCloseTo(
+      escalated.yearlyBreakdown[4].contributionsThisYear,
+      2,
+    );
+  });
+
+  it("override of 0 means 'contribute nothing this year' (NOT 'use default')", () => {
+    const r = simulateInvestmentGrowth({
+      ...BASE,
+      years: 3,
+      annualRateOfReturn: 0,
+      perYearContributionOverridesUSD: [null, 0, null],
+    });
+    expect(r.yearlyBreakdown[1].contributionsThisYear).toBe(0);
+  });
+
+  it("null/undefined overrides fall back to escalated default (sparse array semantics)", () => {
+    const baseline = simulateInvestmentGrowth({
+      ...BASE,
+      years: 3,
+      annualContributionIncreasePct: 0.03,
+      annualRateOfReturn: 0,
+    });
+    const sparse = simulateInvestmentGrowth({
+      ...BASE,
+      years: 3,
+      annualContributionIncreasePct: 0.03,
+      annualRateOfReturn: 0,
+      perYearContributionOverridesUSD: [null, undefined, null],
+    });
+    expect(sparse.futureValueUSD).toBeCloseTo(baseline.futureValueUSD, 6);
+  });
+
+  it("overrides array shorter than years is fine (years past the end use default)", () => {
+    const baseline = simulateInvestmentGrowth({
+      ...BASE,
+      years: 5,
+      annualRateOfReturn: 0,
+    });
+    const partial = simulateInvestmentGrowth({
+      ...BASE,
+      years: 5,
+      annualRateOfReturn: 0,
+      perYearContributionOverridesUSD: [null], // only year 1 covered
+    });
+    expect(partial.futureValueUSD).toBeCloseTo(baseline.futureValueUSD, 6);
+  });
+
+  it("negative override clamps at 0", () => {
+    const r = simulateInvestmentGrowth({
+      ...BASE,
+      years: 2,
+      annualRateOfReturn: 0,
+      perYearContributionOverridesUSD: [-500, null],
+    });
+    expect(r.yearlyBreakdown[0].contributionsThisYear).toBe(0);
+  });
+
+  it("annual contribution frequency: override deposits the FULL amount at month 12 of that year", () => {
+    const r = simulateInvestmentGrowth({
+      startingBalanceUSD: 0,
+      contributionUSD: 1000,
+      contributionFrequency: "annually",
+      years: 3,
+      annualRateOfReturn: 0,
+      compoundFrequency: "annually",
+      perYearContributionOverridesUSD: [null, 5000, null],
+    });
+    expect(r.yearlyBreakdown[1].contributionsThisYear).toBeCloseTo(5000, 6);
+    // Total = 1000 + 5000 + 1000 = 7000
+    expect(r.totalContributionsUSD).toBeCloseTo(7000, 6);
+  });
+});
+
+describe("annualContributionForYear (helper consumed by both engine and UI)", () => {
+  it("flat contribution, no escalator, no override → baseAnnual", () => {
+    expect(annualContributionForYear(1, 100, "monthly", 0, undefined)).toBe(
+      1200,
+    );
+    expect(annualContributionForYear(5, 100, "monthly", 0, undefined)).toBe(
+      1200,
+    );
+  });
+
+  it("annual contribution frequency: base is per-year, not multiplied", () => {
+    expect(annualContributionForYear(1, 1000, "annually", 0, undefined)).toBe(
+      1000,
+    );
+  });
+
+  it("escalator compounds geometrically year over year", () => {
+    expect(
+      annualContributionForYear(1, 100, "monthly", 0.05, undefined),
+    ).toBeCloseTo(1200, 6);
+    expect(
+      annualContributionForYear(2, 100, "monthly", 0.05, undefined),
+    ).toBeCloseTo(1260, 6);
+    expect(
+      annualContributionForYear(3, 100, "monthly", 0.05, undefined),
+    ).toBeCloseTo(1323, 6);
+  });
+
+  it("override wins over both base and escalator", () => {
+    expect(
+      annualContributionForYear(5, 100, "monthly", 0.05, [
+        null,
+        null,
+        null,
+        null,
+        9999,
+      ]),
+    ).toBe(9999);
+  });
+
+  it("override of NaN is ignored (falls through to escalated default)", () => {
+    expect(
+      annualContributionForYear(2, 100, "monthly", 0.05, [
+        null,
+        Number.NaN,
+      ]),
+    ).toBeCloseTo(1260, 6);
   });
 });

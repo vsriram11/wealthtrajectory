@@ -34,7 +34,7 @@ export type CompoundFrequency = "annually" | "monthly" | "daily";
 export type InvestmentGrowthInputs = {
   /** Initial deposit at time zero. */
   startingBalanceUSD: number;
-  /** Amount added EACH contribution period. */
+  /** Amount added EACH contribution period (per-period, not annual). */
   contributionUSD: number;
   /** How often the user contributes. */
   contributionFrequency: ContributionFrequency;
@@ -44,6 +44,29 @@ export type InvestmentGrowthInputs = {
   annualRateOfReturn: number;
   /** How often interest is credited to the account. */
   compoundFrequency: CompoundFrequency;
+  /**
+   * Optional contribution escalator. Each year's per-period contribution
+   * grows by this fraction relative to the previous year (compounded).
+   * 0.03 = "3% raise each year." Default 0 = flat contributions.
+   *
+   * Models the common "I save X% of my salary, and my salary grows
+   * Y% per year" pattern without forcing the user to compute the
+   * year-by-year contribution themselves.
+   */
+  annualContributionIncreasePct?: number;
+  /**
+   * Optional per-year contribution overrides. Sparse — index 0 = year 1.
+   * A number REPLACES the escalated default for that year; null or
+   * undefined keeps the default. The override is the TOTAL ANNUAL
+   * contribution for that year (distributed according to
+   * `contributionFrequency` — split across 12 months when monthly,
+   * deposited at month 12 when annually).
+   *
+   * Enables one-off injections (windfall year, bonus, college tuition
+   * pull-out) without abandoning the escalator for the rest of the
+   * horizon.
+   */
+  perYearContributionOverridesUSD?: ReadonlyArray<number | null | undefined>;
 };
 
 export type InvestmentGrowthYear = {
@@ -104,6 +127,35 @@ function monthlyInterestFactor(
   }
 }
 
+/**
+ * Compute the ANNUAL contribution for year N, factoring in the
+ * optional escalator and any per-year override. Pure helper used by
+ * both the simulator and the UI's "default" column.
+ *
+ *   - With no escalator, no override → baseAnnualContribution.
+ *   - With escalator, no override   → baseAnnualContribution × (1 + g)^(N-1).
+ *   - With override (number)         → the override (escalator ignored
+ *                                       for that year, NOT subsequent years).
+ */
+export function annualContributionForYear(
+  yearIndex: number, // 1-indexed
+  baseContributionPerPeriod: number,
+  contributionFrequency: ContributionFrequency,
+  annualIncreasePct: number,
+  overrides: ReadonlyArray<number | null | undefined> | undefined,
+): number {
+  const baseAnnual =
+    contributionFrequency === "monthly"
+      ? baseContributionPerPeriod * 12
+      : baseContributionPerPeriod;
+  const override = overrides?.[yearIndex - 1];
+  if (typeof override === "number" && Number.isFinite(override)) {
+    return Math.max(0, override);
+  }
+  const escalator = Math.pow(1 + annualIncreasePct, yearIndex - 1);
+  return Math.max(0, baseAnnual * escalator);
+}
+
 export function simulateInvestmentGrowth(
   inputs: InvestmentGrowthInputs,
 ): InvestmentGrowthResult {
@@ -118,6 +170,15 @@ export function simulateInvestmentGrowth(
   // -1 exactly produces (1 + r) = 0 and the daily formula's pow
   // returns 0. Safe.
   const annualRate = Math.max(-1, safeFinite(inputs.annualRateOfReturn, 0));
+  // Escalator: 0 by default. Lower-bounded at -1 by the same logic
+  // (a "100% reduction per year" cuts contributions to 0 from y=2 on;
+  // fine), upper-bounded at +Infinity but float-clamped to something
+  // sane to avoid overflow over a 100-year horizon. 10x growth per
+  // year is already an absurd input the UI will guard against.
+  const escalator = Math.max(
+    -1,
+    safeFinite(inputs.annualContributionIncreasePct ?? 0, 0),
+  );
 
   if (years === 0) {
     return {
@@ -140,6 +201,23 @@ export function simulateInvestmentGrowth(
     let contributionsThisYear = 0;
     let interestThisYear = 0;
 
+    // Resolve this year's TOTAL contribution: escalator default or
+    // explicit per-year override. Then derive the per-period amount
+    // for the contribution frequency. Monthly deposits split the
+    // annual evenly across 12 months; annual deposits land at
+    // month 12.
+    const annualForYear = annualContributionForYear(
+      year,
+      contribution,
+      inputs.contributionFrequency,
+      escalator,
+      inputs.perYearContributionOverridesUSD,
+    );
+    const perPeriod =
+      inputs.contributionFrequency === "monthly"
+        ? annualForYear / 12
+        : annualForYear;
+
     for (let month = 1; month <= 12; month++) {
       // 1. Apply interest BEFORE this month's contribution
       //    (ordinary-annuity convention; contributions earn no
@@ -157,14 +235,14 @@ export function simulateInvestmentGrowth(
 
       // 2. Add contribution for this period.
       if (inputs.contributionFrequency === "monthly") {
-        balance += contribution;
-        contributionsThisYear += contribution;
+        balance += perPeriod;
+        contributionsThisYear += perPeriod;
       } else if (
         inputs.contributionFrequency === "annually" &&
         month === 12
       ) {
-        balance += contribution;
-        contributionsThisYear += contribution;
+        balance += perPeriod;
+        contributionsThisYear += perPeriod;
       }
     }
 

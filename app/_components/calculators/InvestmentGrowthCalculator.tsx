@@ -4,6 +4,7 @@ import { useMemo, useState } from "react";
 
 import { formatUSD, formatUSDCompact } from "@/lib/format";
 import {
+  annualContributionForYear,
   simulateInvestmentGrowth,
   type CompoundFrequency,
   type ContributionFrequency,
@@ -12,16 +13,100 @@ import {
 /**
  * NerdWallet-style investment-growth calculator.
  *
- * Static / portfolio-blind: takes 6 inputs, runs pure compound-
+ * Static / portfolio-blind: takes 7 inputs, runs pure compound-
  * interest math, shows future value + contribution-vs-interest
  * breakdown + a yearly stacked-area chart. Does NOT read the user's
  * household — these are quick what-if numbers, not personalized
  * projections.
  *
- * Default values mirror the NerdWallet defaults so a returning user
- * who's seen one calculator before can immediately validate that
- * the math agrees.
+ * Defaults mirror NerdWallet's so a returning user who's seen one
+ * calculator before can immediately validate that the math agrees.
+ *
+ * Input validation: NerdWallet-style inline error messages. Each
+ * input has a (min, max) range; out-of-range values render a small
+ * red message under the input AND prevent the simulator from
+ * running on that frame (so a clearly-invalid keystroke doesn't
+ * flash garbage results). Empty strings while editing are tolerated
+ * — they re-validate on blur.
+ *
+ * Advanced "year-by-year contributions" expandable: defaults to
+ * collapsed. When expanded, shows each year's escalated default
+ * and a number input for an override. Empty input = use default.
+ * "Reset all" button clears every override.
  */
+
+// NerdWallet-style input bounds.
+const LIMITS = {
+  startingBalance: { min: 0, max: 999_999_999 },
+  contribution: { min: 0, max: 999_999 },
+  years: { min: 1, max: 100 },
+  annualRatePct: { min: -100, max: 100 },
+  // Sensible cap on escalator — beyond 50%/yr is an input error.
+  escalatorPct: { min: -100, max: 50 },
+  yearOverride: { min: 0, max: 999_999_999 },
+} as const;
+
+type ValidationErrors = {
+  startingBalance?: string;
+  contribution?: string;
+  years?: string;
+  annualRatePct?: string;
+  escalatorPct?: string;
+};
+
+function validate(
+  startingBalance: number,
+  contribution: number,
+  years: number,
+  annualRatePct: number,
+  escalatorPct: number,
+): ValidationErrors {
+  const errs: ValidationErrors = {};
+  if (!Number.isFinite(startingBalance)) {
+    errs.startingBalance = "Enter a number";
+  } else if (startingBalance < LIMITS.startingBalance.min) {
+    errs.startingBalance = "Must be 0 or more";
+  } else if (startingBalance > LIMITS.startingBalance.max) {
+    errs.startingBalance = "Too large — try under $1B";
+  }
+
+  if (!Number.isFinite(contribution)) {
+    errs.contribution = "Enter a number";
+  } else if (contribution < LIMITS.contribution.min) {
+    errs.contribution = "Must be 0 or more";
+  } else if (contribution > LIMITS.contribution.max) {
+    errs.contribution = "Too large";
+  }
+
+  if (!Number.isFinite(years)) {
+    errs.years = "Enter a number";
+  } else if (years < LIMITS.years.min) {
+    errs.years = "At least 1 year";
+  } else if (years > LIMITS.years.max) {
+    errs.years = "100 years max";
+  } else if (!Number.isInteger(years)) {
+    errs.years = "Whole years only";
+  }
+
+  if (!Number.isFinite(annualRatePct)) {
+    errs.annualRatePct = "Enter a number";
+  } else if (annualRatePct < LIMITS.annualRatePct.min) {
+    errs.annualRatePct = "Cannot lose more than 100%/yr";
+  } else if (annualRatePct > LIMITS.annualRatePct.max) {
+    errs.annualRatePct = "Unrealistic — cap is 100%/yr";
+  }
+
+  if (!Number.isFinite(escalatorPct)) {
+    errs.escalatorPct = "Enter a number";
+  } else if (escalatorPct < LIMITS.escalatorPct.min) {
+    errs.escalatorPct = "Cannot decrease more than 100%/yr";
+  } else if (escalatorPct > LIMITS.escalatorPct.max) {
+    errs.escalatorPct = "Unrealistic — cap is 50%/yr";
+  }
+
+  return errs;
+}
+
 export function InvestmentGrowthCalculator() {
   const [startingBalance, setStartingBalance] = useState<number>(1000);
   const [contribution, setContribution] = useState<number>(100);
@@ -31,6 +116,35 @@ export function InvestmentGrowthCalculator() {
   const [annualRatePct, setAnnualRatePct] = useState<number>(6);
   const [compoundFreq, setCompoundFreq] =
     useState<CompoundFrequency>("annually");
+  // Annual contribution escalator. 0 = flat (default, NerdWallet
+  // parity); typical "raise" values are 2-5% per year.
+  const [escalatorPct, setEscalatorPct] = useState<number>(0);
+  // Per-year overrides. Map: year (1-indexed) → user-typed override.
+  // Deleting the key = revert that year to default.
+  const [overrides, setOverrides] = useState<Record<number, number>>({});
+
+  const errors = validate(
+    startingBalance,
+    contribution,
+    years,
+    annualRatePct,
+    escalatorPct,
+  );
+  const hasErrors = Object.keys(errors).length > 0;
+
+  // Build the sparse override array the engine consumes. Length up
+  // to `years`; entries with no override are undefined.
+  const overrideArray = useMemo(() => {
+    const safeYears = Math.max(0, Math.floor(years));
+    const arr: (number | null)[] = new Array(safeYears).fill(null);
+    for (const [yearStr, val] of Object.entries(overrides)) {
+      const y = Number(yearStr);
+      if (y >= 1 && y <= safeYears) {
+        arr[y - 1] = val;
+      }
+    }
+    return arr;
+  }, [overrides, years]);
 
   const result = useMemo(
     () =>
@@ -41,6 +155,8 @@ export function InvestmentGrowthCalculator() {
         years,
         annualRateOfReturn: annualRatePct / 100,
         compoundFrequency: compoundFreq,
+        annualContributionIncreasePct: escalatorPct / 100,
+        perYearContributionOverridesUSD: overrideArray,
       }),
     [
       startingBalance,
@@ -49,6 +165,8 @@ export function InvestmentGrowthCalculator() {
       years,
       annualRatePct,
       compoundFreq,
+      escalatorPct,
+      overrideArray,
     ],
   );
 
@@ -60,6 +178,14 @@ export function InvestmentGrowthCalculator() {
     result.futureValueUSD > 0
       ? (result.totalInterestUSD / result.futureValueUSD) * 100
       : 0;
+
+  // Whole-year cap mirrors the years limit so the override table
+  // doesn't explode on a transiently-large `years` input.
+  const overrideRowYears = Math.min(
+    LIMITS.years.max,
+    Math.max(0, Math.floor(years)),
+  );
+  const hasAnyOverride = Object.keys(overrides).length > 0;
 
   return (
     <div className="px-5 pt-4">
@@ -74,32 +200,35 @@ export function InvestmentGrowthCalculator() {
             label="Starting balance"
             prefix="$"
             value={startingBalance}
-            min={0}
+            min={LIMITS.startingBalance.min}
+            max={LIMITS.startingBalance.max}
             step={100}
+            error={errors.startingBalance}
             onChange={setStartingBalance}
           />
           <CalcInput
             label="Years to grow"
             value={years}
-            min={0}
-            max={100}
+            min={LIMITS.years.min}
+            max={LIMITS.years.max}
             step={1}
+            error={errors.years}
             onChange={setYears}
           />
           <CalcInput
             label="Contribution amount"
             prefix="$"
             value={contribution}
-            min={0}
+            min={LIMITS.contribution.min}
+            max={LIMITS.contribution.max}
             step={50}
+            error={errors.contribution}
             onChange={setContribution}
           />
           <CalcSelect
             label="Contribution frequency"
             value={contributionFreq}
-            onChange={(v) =>
-              setContributionFreq(v as ContributionFrequency)
-            }
+            onChange={(v) => setContributionFreq(v as ContributionFrequency)}
             options={[
               { value: "monthly", label: "Monthly" },
               { value: "annually", label: "Annually" },
@@ -108,9 +237,10 @@ export function InvestmentGrowthCalculator() {
           <CalcInput
             label="Annual rate of return (%)"
             value={annualRatePct}
-            min={-100}
-            max={100}
+            min={LIMITS.annualRatePct.min}
+            max={LIMITS.annualRatePct.max}
             step={0.1}
+            error={errors.annualRatePct}
             onChange={setAnnualRatePct}
           />
           <CalcSelect
@@ -123,8 +253,28 @@ export function InvestmentGrowthCalculator() {
               { value: "daily", label: "Daily" },
             ]}
           />
+          <CalcInput
+            label="Contribution increase per year (%)"
+            value={escalatorPct}
+            min={LIMITS.escalatorPct.min}
+            max={LIMITS.escalatorPct.max}
+            step={0.1}
+            error={errors.escalatorPct}
+            onChange={setEscalatorPct}
+            hint="Models a yearly raise — e.g. 3% means each year's contribution is 3% higher than the previous"
+          />
         </div>
       </div>
+
+      {hasErrors && (
+        <div
+          className="mt-3 rounded-md border border-red-400/40 bg-red-400/5 px-3 py-2 text-[11px] leading-snug text-red-300"
+          role="alert"
+        >
+          One or more inputs are out of range — fix the highlighted
+          fields above. Results below reflect the last valid state.
+        </div>
+      )}
 
       <div className="mt-4 rounded-xl border border-border bg-bg-elevated p-4">
         <div className="text-[11px] font-medium uppercase tracking-wider text-text-muted">
@@ -156,6 +306,105 @@ export function InvestmentGrowthCalculator() {
           </div>
           <GrowthChart breakdown={result.yearlyBreakdown} />
         </div>
+      )}
+
+      {/* Advanced: editable year-by-year contributions. Same
+          `<details>` pattern as the yearly breakdown table below,
+          consistent with the MC card's "View year-by-year table"
+          modal trigger (different surface, same affordance idea —
+          power-user data behind one click). */}
+      {overrideRowYears > 0 && (
+        <details className="mt-4 rounded-xl border border-border bg-bg-elevated">
+          <summary className="flex cursor-pointer items-center justify-between gap-3 px-4 py-3">
+            <span>
+              <span className="text-[11px] font-medium uppercase tracking-wider text-text-muted">
+                Advanced
+              </span>
+              <span className="ml-2 text-[11px] text-text">
+                Custom contribution per year
+              </span>
+              {hasAnyOverride && (
+                <span className="ml-2 rounded-full bg-accent/15 px-1.5 py-0.5 text-[10px] text-accent">
+                  {Object.keys(overrides).length} override
+                  {Object.keys(overrides).length === 1 ? "" : "s"}
+                </span>
+              )}
+            </span>
+            <span className="text-[11px] text-text-muted">▼</span>
+          </summary>
+          <div className="border-t border-border px-4 py-3">
+            <div className="mb-3 flex items-start justify-between gap-3 text-[11px] leading-snug text-text-dim">
+              <span>
+                Each row defaults to the escalated annual contribution
+                ({escalatorPct === 0
+                  ? "no escalator"
+                  : `${escalatorPct}%/yr`}
+                ). Type a value in the override column to replace that
+                year only; leave it blank to keep the default. Useful
+                for windfall years, bonus pulls, or planned breaks.
+              </span>
+              {hasAnyOverride && (
+                <button
+                  type="button"
+                  onClick={() => setOverrides({})}
+                  className="shrink-0 rounded-md border border-border bg-bg-surface px-2 py-1 text-[10px] text-text-muted hover:text-text"
+                >
+                  Reset all
+                </button>
+              )}
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-[11px]">
+                <thead className="text-text-muted">
+                  <tr>
+                    <th className="px-3 py-2 text-left font-medium">Year</th>
+                    <th className="px-3 py-2 text-right font-medium">
+                      Default (escalated)
+                    </th>
+                    <th className="px-3 py-2 text-right font-medium">
+                      Override
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {Array.from({ length: overrideRowYears }, (_, idx) => {
+                    const yearIdx = idx + 1;
+                    const escalatedDefault = annualContributionForYear(
+                      yearIdx,
+                      contribution,
+                      contributionFreq,
+                      escalatorPct / 100,
+                      undefined, // ignore overrides for the DEFAULT column
+                    );
+                    const override = overrides[yearIdx];
+                    return (
+                      <tr key={yearIdx} className="border-t border-border/50">
+                        <td className="px-3 py-1.5 text-text">{yearIdx}</td>
+                        <td className="num px-3 py-1.5 text-right text-text-dim">
+                          {formatUSDCompact(escalatedDefault)}
+                        </td>
+                        <td className="px-3 py-1.5 text-right">
+                          <YearOverrideInput
+                            value={override}
+                            onChange={(v) => {
+                              if (v == null) {
+                                const next = { ...overrides };
+                                delete next[yearIdx];
+                                setOverrides(next);
+                              } else {
+                                setOverrides({ ...overrides, [yearIdx]: v });
+                              }
+                            }}
+                          />
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </details>
       )}
 
       {result.yearlyBreakdown.length > 0 && (
@@ -210,6 +459,8 @@ function CalcInput({
   min,
   max,
   step,
+  error,
+  hint,
   onChange,
 }: {
   label: string;
@@ -218,32 +469,53 @@ function CalcInput({
   min?: number;
   max?: number;
   step?: number;
+  error?: string;
+  hint?: string;
   onChange: (v: number) => void;
 }) {
   return (
-    <label className="block rounded-md border border-border bg-bg-surface px-3 py-2">
-      <span className="block text-[10px] uppercase tracking-wider text-text-muted">
-        {label}
-      </span>
-      <span className="mt-1 flex items-baseline gap-1">
-        {prefix && (
-          <span className="text-sm text-text-muted">{prefix}</span>
-        )}
-        <input
-          type="number"
-          inputMode="decimal"
-          value={value}
-          onChange={(e) => {
-            const v = Number(e.target.value);
-            if (Number.isFinite(v)) onChange(v);
-          }}
-          min={min}
-          max={max}
-          step={step}
-          className="num w-full bg-transparent text-right text-sm font-medium text-text outline-none"
-        />
-      </span>
-    </label>
+    <div>
+      <label
+        className={`block rounded-md border bg-bg-surface px-3 py-2 ${
+          error ? "border-red-400/60" : "border-border"
+        }`}
+      >
+        <span className="block text-[10px] uppercase tracking-wider text-text-muted">
+          {label}
+        </span>
+        <span className="mt-1 flex items-baseline gap-1">
+          {prefix && (
+            <span className="text-sm text-text-muted">{prefix}</span>
+          )}
+          <input
+            type="number"
+            inputMode="decimal"
+            value={value}
+            onChange={(e) => {
+              const v = Number(e.target.value);
+              if (Number.isFinite(v)) onChange(v);
+            }}
+            min={min}
+            max={max}
+            step={step}
+            aria-invalid={error ? true : undefined}
+            className="num w-full bg-transparent text-right text-sm font-medium text-text outline-none"
+          />
+        </span>
+      </label>
+      {error ? (
+        <div
+          className="mt-1 text-[10px] leading-snug text-red-300"
+          role="alert"
+        >
+          {error}
+        </div>
+      ) : hint ? (
+        <div className="mt-1 text-[10px] leading-snug text-text-dim">
+          {hint}
+        </div>
+      ) : null}
+    </div>
   );
 }
 
@@ -306,6 +578,50 @@ function Breakdown({
 }
 
 /**
+ * Year-override input. Controlled directly off the parent's
+ * `overrides` Record: when the parent's value is undefined (no
+ * override), the input shows empty; when it's a number, the input
+ * shows that number. Typing dispatches onChange with either a
+ * number (set/update) or null (delete). No local draft state —
+ * the parent is the single source of truth.
+ *
+ * Trade-off accepted: typing "0" stores 0 (= "contribute nothing
+ * this year", per engine semantics in
+ * `simulateInvestmentGrowth — perYearContributionOverridesUSD`
+ * tests). Clearing the field stores null (= revert to default).
+ * Both behaviors are correct + discoverable.
+ */
+function YearOverrideInput({
+  value,
+  onChange,
+}: {
+  value: number | undefined;
+  onChange: (v: number | null) => void;
+}) {
+  return (
+    <input
+      type="number"
+      inputMode="decimal"
+      placeholder="—"
+      value={value ?? ""}
+      onChange={(e) => {
+        const raw = e.target.value.trim();
+        if (raw === "") {
+          onChange(null);
+          return;
+        }
+        const n = Number(raw);
+        if (Number.isFinite(n)) onChange(Math.max(0, n));
+      }}
+      min={0}
+      max={999_999_999}
+      step={100}
+      className="num w-28 rounded-md border border-border bg-bg-surface px-2 py-1 text-right text-[11px] text-text outline-none focus:border-accent"
+    />
+  );
+}
+
+/**
  * Stacked-area chart of year-by-year growth: total contributions
  * (lower band) + total interest (upper band) at each year's end.
  * SVG, no external chart library — consistent with the rest of the
@@ -328,11 +644,9 @@ function GrowthChart({
   );
   const yScale = (v: number) => padding.top + plotH - (v / maxValue) * plotH;
   const xScale = (i: number) =>
-    padding.left + (breakdown.length === 1 ? 0 : (i / (breakdown.length - 1)) * plotW);
+    padding.left +
+    (breakdown.length === 1 ? 0 : (i / (breakdown.length - 1)) * plotW);
 
-  // Two polylines: contributions baseline + ending balance top.
-  // Area between them = interest. Fill the contributions band
-  // accent-colored, the interest band positive-colored.
   const contributionsPath =
     `M ${xScale(0)},${yScale(0)} ` +
     breakdown
@@ -355,9 +669,7 @@ function GrowthChart({
       .join(" ") +
     " Z";
 
-  // Y-axis gridlines at 25/50/75/100% of max.
   const ticks = [0, 0.25, 0.5, 0.75, 1].map((p) => p * maxValue);
-  // X-axis labels: first, last, and 1-2 in the middle.
   const xTickIndices =
     breakdown.length <= 2
       ? breakdown.map((_, i) => i)
@@ -370,7 +682,6 @@ function GrowthChart({
       viewBox={`0 0 ${width} ${height}`}
       className="mt-3 w-full"
     >
-      {/* Grid */}
       {ticks.map((t, i) => (
         <g key={i}>
           <line
@@ -392,10 +703,8 @@ function GrowthChart({
           </text>
         </g>
       ))}
-      {/* Stacked areas */}
       <path d={interestPath} className="fill-positive/30" />
       <path d={contributionsPath} className="fill-accent/30" />
-      {/* Top line (ending balance) */}
       <polyline
         points={breakdown
           .map((y, i) => `${xScale(i)},${yScale(y.endingBalanceUSD)}`)
@@ -404,7 +713,6 @@ function GrowthChart({
         className="stroke-positive"
         strokeWidth={1.5}
       />
-      {/* Contribution line */}
       <polyline
         points={breakdown
           .map((y, i) => `${xScale(i)},${yScale(y.totalContributions)}`)
@@ -413,7 +721,6 @@ function GrowthChart({
         className="stroke-accent"
         strokeWidth={1.5}
       />
-      {/* X-axis labels */}
       {xTickIndices.map((i) => (
         <text
           key={i}
