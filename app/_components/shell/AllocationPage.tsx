@@ -3,17 +3,19 @@
 import { useState } from "react";
 import { AllocationFutureCard } from "@/app/_components/allocation/AllocationFutureCard";
 import { AllocationPanel } from "@/app/_components/allocation/AllocationPanel";
+import { HistoryTab } from "@/app/_components/allocation/HistoryTab";
 import { LeveragedAllocationWarningCard } from "@/app/_components/allocation/LeveragedAllocationWarningCard";
 import { GlidePathCard } from "@/app/_components/allocation/GlidePathCard";
 import { PositionsList } from "@/app/_components/allocation/PositionsList";
 import { SectionHeader } from "@/app/_components/ui/SectionHeader";
 import { TargetAllocationCard } from "@/app/_components/allocation/TargetAllocationCard";
 
-type AllocationSubTab = "summary" | "positions";
+type AllocationSubTab = "summary" | "positions" | "history";
 
 const SUB_TABS: { id: AllocationSubTab; label: string }[] = [
   { id: "summary", label: "Summary" },
   { id: "positions", label: "Positions" },
+  { id: "history", label: "History" },
 ];
 
 /**
@@ -62,6 +64,7 @@ export function AllocationPage() {
 
       {tab === "summary" && <SummaryView />}
       {tab === "positions" && <PositionsView />}
+      {tab === "history" && <HistoryTab />}
     </>
   );
 }
