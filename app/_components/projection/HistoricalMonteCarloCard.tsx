@@ -13,6 +13,7 @@ import {
   runHistoricalSequences,
   type MonteCarloResult,
 } from "@/lib/projection/monteCarlo";
+import { applyCashBucketOverride } from "@/lib/projection/cashBucketAllocation";
 import { computePortfolio } from "@/lib/portfolio/portfolio";
 import { computeLeveragedEquityBuckets } from "@/lib/portfolio/leveragedEquity";
 import { ageHousehold } from "@/lib/portfolio/futureAllocation";
@@ -256,18 +257,6 @@ export function HistoricalMonteCarloCard() {
     () => computePortfolio(projectedHousehold),
     [projectedHousehold],
   );
-  // Today's (un-aged) cash share, used ONLY for the bucket-
-  // strategy "configure a cash slice" warning. The simulator
-  // consumes the AGED `portfolio.classes.cashShare`, but the
-  // warning text says "your cash allocation" — and the user's
-  // mental model is "what I configured today," not "what my
-  // portfolio will look like at retirement." A user with 5% cash
-  // today and 20y of equity-compounding ahead would correctly
-  // see <1% cash at target but the warning shouldn't nag them.
-  const cashShareToday = useMemo(
-    () => computePortfolio(scopedHousehold).classes.cashShare,
-    [scopedHousehold],
-  );
   // Detect whether the user has any mortgaged RE in the current
   // scope. Damodaran's RE series is UNLEVERED price return — for a
   // 5×-levered residence, a -10% real RE year actually wipes ~50%
@@ -401,62 +390,66 @@ export function HistoricalMonteCarloCard() {
   // max — single source of truth so the UI accepted range can't
   // drift from the effective clamp).
   const CASH_BUCKET_MAX_PCT = 50;
-  // When the user wants a bigger cash slice than the portfolio
-  // has today (e.g. 20% reserve from 3% cash), re-anchor the
-  // allocation. Extra cash is sourced PROPORTIONALLY from every
-  // non-cash class (1x stocks, 2x stocks, bonds, commodity, RE,
-  // alts) — earlier v0 only stole from regular 1x stocks, which
-  // silently sums-to-greater-than-100% allocations when the user
-  // has little 1x stocks (e.g. mostly TQQQ + RE). `resolveWeights`
-  // then normalized away the excess, giving a SMALLER actual cash
-  // slice than the methodology displayed. Proportional steals
-  // preserves sum-to-1.
-  //
-  // v1 does NOT model the equity → cash swap tax hit (would
-  // require gain assumption + taxable-share math similar to the
-  // deleveraging-tax flow); the methodology block surfaces the
-  // gap so users aren't surprised.
-  const cashFractionEffective = useMemo(() => {
-    const today = portfolio.classes.cashShare;
-    if (cashBucketSizePct == null) return today;
-    const requested = Math.max(
-      0,
-      Math.min(CASH_BUCKET_MAX_PCT / 100, cashBucketSizePct / 100),
-    );
-    return Math.max(today, requested);
-  }, [portfolio.classes.cashShare, cashBucketSizePct]);
-  // Proportional re-scale factor for non-cash classes.
-  // `scale = (1 - cashEff) / (1 - cashToday)`. When extra cash
-  // is 0, scale = 1 (no-op). When cash doubles, every non-cash
-  // class is scaled down so the sum stays at 1.
-  const nonCashScale = useMemo(() => {
-    const today = portfolio.classes.cashShare;
-    if (cashFractionEffective <= today) return 1;
-    const denominator = 1 - today;
-    if (denominator <= 0) return 1;
-    return (1 - cashFractionEffective) / denominator;
-  }, [portfolio.classes.cashShare, cashFractionEffective]);
+  // Effective bucket size in REAL (fractional) terms. Three gates
+  // must all be open for the override to apply:
+  //   1. cashBucketPriority is ON — toggling Off without resetting
+  //      the size would otherwise leak the override into baseline
+  //      runs (Round-3 audit HIGH bug).
+  //   2. cashBucketSizePct is set (user explicitly chose a value;
+  //      null means "use the projected default").
+  //   3. The glide path is NOT active — when a glide path is
+  //      configured, the engine computes per-year weights from
+  //      `weightsForYear(age)`, completely bypassing the static
+  //      `allocation`. Applying the override here would do
+  //      nothing AND silently mislead the user. The UI surfaces
+  //      this case explicitly below.
+  const cashBucketOverrideActive =
+    cashBucketPriority && cashBucketSizePct != null && !glidePathActive;
+  // The simulator runs at TARGET-DATE composition (aged), so all
+  // comparisons against the user's chosen bucket size happen
+  // against the AGED cash share — not today's. The helper-text
+  // and tax warning use the same value so the user's mental
+  // model and the simulator's math agree.
+  const projectedCashShare = portfolio.classes.cashShare;
+  const requestedCashFraction = cashBucketOverrideActive
+    ? Math.max(
+        0,
+        Math.min(CASH_BUCKET_MAX_PCT / 100, (cashBucketSizePct ?? 0) / 100),
+      )
+    : null;
+  // Single pure transformation: see lib/projection/cashBucketAllocation.ts.
+  // The helper handles requested > today (sell equity → buy cash) AND
+  // requested < today (sell cash → buy equity, "de-risk to growth").
+  // Both directions carry tax implications, surfaced below.
   const allocation = useMemo(
-    () => ({
-      stocksFraction: regularStocksFraction * nonCashScale,
-      stocks2xFraction: stocks2xFraction * nonCashScale,
-      bondsFraction: portfolio.classes.bondShare * nonCashScale,
-      cashFraction: cashFractionEffective,
-      commodityFraction: commodityShare * nonCashScale,
-      realEstateFraction: realEstateShare * nonCashScale,
-      otherFraction: otherAltsShare * nonCashScale,
-    }),
+    () =>
+      applyCashBucketOverride(
+        {
+          stocksFraction: regularStocksFraction,
+          stocks2xFraction,
+          bondsFraction: portfolio.classes.bondShare,
+          cashFraction: projectedCashShare,
+          commodityFraction: commodityShare,
+          realEstateFraction: realEstateShare,
+          otherFraction: otherAltsShare,
+        },
+        requestedCashFraction,
+      ),
     [
       regularStocksFraction,
       stocks2xFraction,
       portfolio.classes.bondShare,
-      cashFractionEffective,
+      projectedCashShare,
       commodityShare,
       realEstateShare,
       otherAltsShare,
-      nonCashScale,
+      requestedCashFraction,
     ],
   );
+  // For methodology display + warnings: the effective cash share
+  // the simulator sees. When the override is inactive, this is
+  // just the projected (aged) cash share.
+  const cashFractionEffective = allocation.cashFraction;
 
   // Post-tax starting NW. When the user has leveraged ETFs that
   // the stress test models as deleveraged-at-retirement, the
@@ -905,20 +898,22 @@ export function HistoricalMonteCarloCard() {
             />
           </div>
         </div>
-        {cashBucketPriority && (
+        {cashBucketPriority && !glidePathActive && (
           <div className="mt-2 flex items-center justify-between gap-2 rounded-md border border-border bg-bg-elevated px-3 py-2">
             <div className="min-w-0 text-[10px] leading-snug text-text-dim">
               <span className="text-text">Cash bucket size</span>{" "}
-              (override; default = today&apos;s cash share{" "}
+              (override; default = projected cash share at target{" "}
               <span className="num">
-                {(cashShareToday * 100).toFixed(2)}%
+                {(projectedCashShare * 100).toFixed(2)}%
               </span>
               )
             </div>
             <span className="flex shrink-0 items-center gap-1 rounded-md border border-border-strong bg-bg-surface px-2 py-1">
               <NumberInput
                 label="%"
-                value={cashBucketSizePct ?? Math.round(cashShareToday * 100)}
+                value={
+                  cashBucketSizePct ?? Math.round(projectedCashShare * 100)
+                }
                 onChange={(v) =>
                   setCashBucketSizePct(
                     Math.max(0, Math.min(CASH_BUCKET_MAX_PCT, v)),
@@ -932,6 +927,15 @@ export function HistoricalMonteCarloCard() {
             </span>
           </div>
         )}
+        {cashBucketPriority && glidePathActive && (
+          <div className="mt-2 rounded-md border border-amber-300/40 bg-amber-300/5 px-2.5 py-1.5 text-[10px] leading-snug text-amber-200">
+            A glide path is configured — the simulator computes
+            per-year allocation from age, so the cash bucket SIZE
+            override is ignored (the priority flag still drives
+            cash-first withdrawal at retirement). To customize the
+            bucket size, switch off the glide path in your settings.
+          </div>
+        )}
         {cashBucketPriority && cashFractionEffective < 0.005 && (
           <div className="mt-2 rounded-md border border-amber-300/40 bg-amber-300/5 px-2.5 py-1.5 text-[10px] leading-snug text-amber-200">
             Cash-bucket priority is on but your effective cash slice
@@ -940,17 +944,21 @@ export function HistoricalMonteCarloCard() {
             cash to your real portfolio.
           </div>
         )}
-        {cashBucketPriority &&
-          cashBucketSizePct != null &&
-          cashBucketSizePct / 100 > cashShareToday + 0.001 && (
+        {/* Tax-implications warning: fires whenever the requested
+            bucket size differs from the projected (aged) cash
+            share by more than the displayed precision (0.5%, since
+            the input is integer percent and the display uses 2
+            decimals). Two-way: equity → cash sells equity at
+            cap-gains; cash → equity has no direct tax hit, but
+            we still flag the composition change explicitly. */}
+        {cashBucketOverrideActive &&
+          Math.abs(
+            (cashBucketSizePct ?? 0) / 100 - projectedCashShare,
+          ) > 0.005 && (
             <div className="mt-2 rounded-md border border-amber-300/40 bg-amber-300/5 px-2.5 py-1.5 text-[10px] leading-snug text-amber-200">
-              You&apos;ve sized the bucket above today&apos;s cash
-              share. In reality, funding the larger bucket means
-              selling equity at retirement — capital-gains tax on
-              that sale is NOT modeled in this v1. Treat the
-              success rate as an upper bound; the real-world
-              number is lower by roughly the tax cost on the
-              equity-to-cash swap.
+              {((cashBucketSizePct ?? 0) / 100) > projectedCashShare
+                ? "You've sized the bucket ABOVE the projected cash share. In reality, funding the larger bucket means selling equity at retirement — capital-gains tax on that sale is NOT modeled in this v1. Treat the success rate as an upper bound; the real-world number is lower by roughly the tax cost on the equity-to-cash swap."
+                : "You've sized the bucket BELOW the projected cash share (de-risking out of cash into equity). The composition swap is modeled, but any cap-gains realized when re-deploying cash to equity is NOT. Treat this as a clean swap for v1."}
             </div>
           )}
 
