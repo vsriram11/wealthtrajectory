@@ -324,6 +324,107 @@ describe("runWithdrawalSequence — Round 5 audit fixes", () => {
     expect(defaultLTCG.rows[0].taxesPaidUSD).toBeCloseTo(7_619.05, 0);
   });
 
+  it("Round 11: years=Infinity is clamped (no infinite loop)", () => {
+    const r = runWithdrawalSequence(
+      baseInputs({
+        startingBalances: { taxable: 100_000, pretax: 0, roth: 0, hsa: 0 },
+        realCAGRByBucket: { taxable: 0, pretax: 0, roth: 0, hsa: 0 },
+        startingAge: 60,
+        years: Number.POSITIVE_INFINITY,
+        annualRealSpendUSD: 10_000,
+      }),
+    );
+    // Clamped to ≤ 200 years per the safety bound.
+    expect(r.rows.length).toBeLessThanOrEqual(200);
+  });
+
+  it("Round 11: NaN years degrades to 0-year simulation", () => {
+    const r = runWithdrawalSequence(
+      baseInputs({
+        startingBalances: { taxable: 100_000, pretax: 0, roth: 0, hsa: 0 },
+        realCAGRByBucket: { taxable: 0, pretax: 0, roth: 0, hsa: 0 },
+        startingAge: 60,
+        years: Number.NaN,
+        annualRealSpendUSD: 10_000,
+      }),
+    );
+    expect(r.rows).toHaveLength(0);
+    expect(r.depletedYear).toBe(-1);
+  });
+
+  it("Round 11: NaN CAGR degrades to 0 growth (no NaN propagation)", () => {
+    const r = runWithdrawalSequence(
+      baseInputs({
+        startingBalances: {
+          taxable: 100_000,
+          pretax: 0,
+          roth: 0,
+          hsa: 0,
+        },
+        realCAGRByBucket: {
+          taxable: Number.NaN,
+          pretax: 0,
+          roth: 0,
+          hsa: 0,
+        },
+        startingAge: 60,
+        years: 3,
+        annualRealSpendUSD: 10_000,
+      }),
+    );
+    // Balances stay finite throughout — no NaN poisoning.
+    expect(Number.isFinite(r.endingTotalUSD)).toBe(true);
+    expect(Number.isFinite(r.totalTaxesPaidUSD)).toBe(true);
+    for (const row of r.rows) {
+      expect(Number.isFinite(row.endingBalances.taxable)).toBe(true);
+      expect(Number.isFinite(row.taxesPaidUSD)).toBe(true);
+    }
+  });
+
+  it("Round 11: ltcgRate > ordinaryRate is clamped to ordinaryRate", () => {
+    // A user mis-configuring ltcg=0.40, ordinary=0.20 would invert
+    // the bucket priority (taxable more expensive than pretax). The
+    // engine now clamps ltcg ≤ ordinary defensively.
+    const inverted = runWithdrawalSequence(
+      baseInputs({
+        startingBalances: {
+          taxable: 100_000,
+          pretax: 0,
+          roth: 0,
+          hsa: 0,
+        },
+        realCAGRByBucket: { taxable: 0, pretax: 0, roth: 0, hsa: 0 },
+        startingAge: 60,
+        years: 1,
+        annualRealSpendUSD: 10_000,
+        retirementTaxRate: 0.2,
+        longTermCapGainsRate: 0.4, // > ordinary
+      }),
+    );
+    const normal = runWithdrawalSequence(
+      baseInputs({
+        startingBalances: {
+          taxable: 100_000,
+          pretax: 0,
+          roth: 0,
+          hsa: 0,
+        },
+        realCAGRByBucket: { taxable: 0, pretax: 0, roth: 0, hsa: 0 },
+        startingAge: 60,
+        years: 1,
+        annualRealSpendUSD: 10_000,
+        retirementTaxRate: 0.2,
+        longTermCapGainsRate: 0.2, // = ordinary
+      }),
+    );
+    // Inverted run should match the normal (clamped) run — not
+    // produce a 2× higher tax.
+    expect(inverted.totalTaxesPaidUSD).toBeCloseTo(
+      normal.totalTaxesPaidUSD,
+      0,
+    );
+  });
+
   it("pretax bucket continues to use ordinary rate (not LTCG)", () => {
     // Verify the bucket-rate split is correct: only taxable gets
     // LTCG treatment.

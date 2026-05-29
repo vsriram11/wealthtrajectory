@@ -350,21 +350,30 @@ export function planBucketFunding(
       // deleveraging engine + bucket-funding engine from
       // double-taxing the same holding).
       if (excludedHoldingIds?.has(holding.id)) continue;
+      // Sanitize valueUSD at the boundary: NaN / Infinity / negative
+      // (data corruption from manual entry or Drive-sync artifact)
+      // → 0. Without this, downstream aggregates poison every
+      // share computation. Round-11 audit HIGH. Engine-purity
+      // contract: bad input contributes 0, not NaN.
+      const valueUSD =
+        Number.isFinite(holding.valueUSD)
+          ? Math.max(0, holding.valueUSD)
+          : 0;
       // Cash always counts toward the cash-equivalent share —
       // even if marked illiquid (a frozen savings account is
       // still cash for the SORR-buffer accounting).
       if (holding.kind === "cash") {
-        cashUSD += holding.valueUSD;
+        cashUSD += valueUSD;
         continue;
       }
       // Liquidity gate (primary residence, private stock, isIlliquid).
       if (!isLiquid(holding)) {
-        excludedIlliquidUSD += holding.valueUSD;
+        excludedIlliquidUSD += valueUSD;
         if (
           holding.kind === "real_estate" &&
           holding.isPrimaryResidence === true
         ) {
-          excludedPrimaryResidenceUSD += holding.valueUSD;
+          excludedPrimaryResidenceUSD += valueUSD;
         }
         continue;
       }
@@ -372,13 +381,13 @@ export function planBucketFunding(
       // buffer — they're not sold (per user: "short duration
       // bonds 1 year or less are basically cash already").
       if (isCashEquivalentBond(holding)) {
-        shortDurationBondUSD += holding.valueUSD;
+        shortDurationBondUSD += valueUSD;
         continue;
       }
       // User-explicit opt-out — keep this holding (high-conviction
       // pick, employer concentration, etc.).
       if (isExcludedFromCashBucketSale(holding)) {
-        excludedUserOptOutUSD += holding.valueUSD;
+        excludedUserOptOutUSD += valueUSD;
         continue;
       }
       const bucket = classifyHolding(holding);

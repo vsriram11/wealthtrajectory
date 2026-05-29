@@ -792,6 +792,46 @@ describe("planBucketFunding", () => {
     expect(plan.sales.find((s) => s.holdingId === "h-ntsx")).toBeUndefined();
   });
 
+  it("Round 11: NaN valueUSD on a holding degrades to 0 contribution (no poisoning)", () => {
+    const hh = household([
+      account({ category: "BROKERAGE" }, [
+        holding({ kind: "equity", valueUSD: 100_000 }),
+        holding({ kind: "equity", valueUSD: Number.NaN }),
+      ]),
+    ]);
+    const plan = planBucketFunding(hh, 100_000, 0.5, 0.20);
+    // The NaN holding doesn't poison aggregates; the other $100k
+    // is still sold normally for $50k face.
+    expect(Number.isFinite(plan.amountRaisedUSD)).toBe(true);
+    expect(plan.amountRaisedUSD).toBeCloseTo(50_000, 1);
+    expect(Number.isFinite(plan.totalTaxOwedUSD)).toBe(true);
+  });
+
+  it("Round 11: negative valueUSD on a holding clamps to 0 (no over-statement)", () => {
+    const hh = household([
+      account({ category: "BROKERAGE" }, [
+        holding({ kind: "equity", valueUSD: 100_000 }),
+        holding({ kind: "equity", valueUSD: -50_000 }),
+      ]),
+    ]);
+    const plan = planBucketFunding(hh, 100_000, 0.5, 0.20);
+    // Only $100k of real value exists; the -$50k entry is treated
+    // as $0. Plan raises $50k from the real $100k holding.
+    expect(plan.amountRaisedUSD).toBeCloseTo(50_000, 1);
+  });
+
+  it("Round 11: negative cash holding (corrupt input) doesn't depress effective cash share", () => {
+    const hh = household([
+      account({ category: "BROKERAGE" }, [
+        holding({ kind: "equity", valueUSD: 100_000 }),
+        holding({ kind: "cash", valueUSD: -50_000 }),
+      ]),
+    ]);
+    // Negative cash treated as 0, so effective cash = 0 / 100k = 0.
+    const plan = planBucketFunding(hh, 100_000, 0.5, 0.20);
+    expect(plan.effectiveCashEquivalentShare).toBe(0);
+  });
+
   it("sales list is sorted by sale priority (leverage desc) for stable UI display", () => {
     const hh = household([
       account({ category: "BROKERAGE" }, [

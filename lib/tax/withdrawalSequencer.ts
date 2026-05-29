@@ -195,21 +195,42 @@ function simulateYear(
   const cagr = inputs.realCAGRByBucket;
   const order = inputs.order ?? DEFAULT_ORDER;
   const rmdStartAge = inputs.rmdStartAge ?? 73;
-  const ordinaryRate = Math.max(0, Math.min(0.99, inputs.retirementTaxRate));
+  const ordinaryRate = Math.max(
+    0,
+    Math.min(
+      0.99,
+      Number.isFinite(inputs.retirementTaxRate)
+        ? inputs.retirementTaxRate
+        : 0.2,
+    ),
+  );
   // LTCG rate defaults to half the ordinary rate (rough proxy:
   // user's "ordinary marginal" is typically 22-32% federal while
   // LTCG is 0/15/20% federal). Round-5 audit fix.
-  const ltcgRate =
-    inputs.longTermCapGainsRate != null
+  // Round-11 audit: ALSO clamp ltcgRate to ≤ ordinaryRate.
+  // Real-world LTCG never exceeds ordinary; a user mis-configuring
+  // ltcg > ordinary would invert the bucket-priority rationale
+  // (taxable would be MORE expensive than pretax) and quietly
+  // produce a pessimal drawdown plan. Clamp defensively.
+  const rawLtcg =
+    inputs.longTermCapGainsRate != null &&
+    Number.isFinite(inputs.longTermCapGainsRate)
       ? Math.max(0, Math.min(0.99, inputs.longTermCapGainsRate))
       : ordinaryRate * 0.5;
+  const ltcgRate = Math.min(rawLtcg, ordinaryRate);
 
-  // 1. Grow all balances.
+  // 1. Grow all balances. Clamp per-bucket CAGR to a finite,
+  // non-pathological range; Round-11 audit found NaN CAGR
+  // silently produced NaN balances that propagated through every
+  // sum. Engine NaN-safety contract: bad input → 0 growth,
+  // not NaN.
+  const safeCAGR = (c: number) =>
+    Number.isFinite(c) ? Math.max(-1, Math.min(5, c)) : 0;
   const grown: BucketBalances = {
-    taxable: Math.max(0, startBal.taxable * (1 + cagr.taxable)),
-    pretax: Math.max(0, startBal.pretax * (1 + cagr.pretax)),
-    roth: Math.max(0, startBal.roth * (1 + cagr.roth)),
-    hsa: Math.max(0, startBal.hsa * (1 + cagr.hsa)),
+    taxable: Math.max(0, startBal.taxable * (1 + safeCAGR(cagr.taxable))),
+    pretax: Math.max(0, startBal.pretax * (1 + safeCAGR(cagr.pretax))),
+    roth: Math.max(0, startBal.roth * (1 + safeCAGR(cagr.roth))),
+    hsa: Math.max(0, startBal.hsa * (1 + safeCAGR(cagr.hsa))),
   };
 
   // 2. RMD this year (if age ≥ start). IRS Pub 590-B specifies
@@ -313,12 +334,18 @@ function simulateYear(
 export function runWithdrawalSequence(
   inputs: WithdrawalSequencerInputs,
 ): WithdrawalSequenceResult {
+  // Boundary: clamp years to finite, non-negative, ≤200 (no real
+  // retirement horizon exceeds that; protects against NaN/Infinity
+  // → infinite loop). Round-11 audit HIGH.
+  const safeYears = Number.isFinite(inputs.years)
+    ? Math.max(0, Math.min(200, Math.floor(inputs.years)))
+    : 0;
   const rows: YearRow[] = [];
   let bal = copyBalances(inputs.startingBalances);
   let depletedYear = -1;
   let totalTax = 0;
   let totalNet = 0;
-  for (let y = 0; y < inputs.years; y++) {
+  for (let y = 0; y < safeYears; y++) {
     const age = inputs.startingAge + y;
     const row = simulateYear(bal, age, inputs, y);
     rows.push(row);
