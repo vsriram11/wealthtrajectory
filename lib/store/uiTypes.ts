@@ -17,6 +17,7 @@ export type PageId =
   | "projections"
   | "plan"
   | "data"
+  | "calculators"
   | "glossary";
 
 export type AllocClassTab =

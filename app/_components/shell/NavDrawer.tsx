@@ -36,6 +36,11 @@ const NAV: { id: PageId; label: string; sub: string; pro?: boolean }[] = [
     sub: "Backup, encryption, members, disclosures",
   },
   {
+    id: "calculators",
+    label: "Calculators",
+    sub: "Static planning tools — investment growth and more",
+  },
+  {
     id: "glossary",
     label: "Glossary",
     sub: "Plain-language definitions + sources for every term",
