@@ -489,9 +489,15 @@ export async function maybeRecordMonthlySnapshot(
     if (maxAutoRows > 0) {
       const all = await handle.snapshots.orderBy("t").toArray();
       // Identify auto-snapshots: lack of `label` is the marker.
-      const autoRows = all.filter((r) => r.label == null);
-      if (autoRows.length > maxAutoRows) {
-        const overflow = autoRows.length - maxAutoRows;
+      // EXCLUDE the row we just inserted — without this, an
+      // already-over-cap collection plus a put at an old
+      // monthAnchor could immediately prune the just-inserted
+      // row, defeating the whole monthly cadence.
+      const autoRows = all.filter(
+        (r) => r.label == null && r.t !== monthAnchor,
+      );
+      if (autoRows.length > maxAutoRows - 1) {
+        const overflow = autoRows.length - (maxAutoRows - 1);
         // Oldest first — autoRows is already sorted by t ascending.
         const toDelete = autoRows.slice(0, overflow).map((r) => r.t);
         await Promise.all(

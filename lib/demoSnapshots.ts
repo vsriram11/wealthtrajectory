@@ -189,7 +189,16 @@ function buildBackdatedHousehold(monthsAgo: number): Household {
   const scale = (h: Holding): Holding => {
     const cls = holdingClass(h);
     const factor = classBackFactor(cls, monthsAgo);
-    const newValue = h.valueUSD * factor;
+    // Defense in depth: if DEMO_HOUSEHOLD ever ships a NaN value
+    // (or a future test injects one to verify resilience), the
+    // multiplication would propagate NaN through householdNetWorth
+    // and then maybeRecordSnapshot's `<= 0` gate would skip it
+    // silently — invisible demo-history truncation. Floor to 0
+    // so the math degrades gracefully (per CLAUDE.md "no NaN
+    // poisoning of downstream accumulators").
+    const newValue = Number.isFinite(h.valueUSD)
+      ? h.valueUSD * factor
+      : 0;
     // Shape-preserving back-scale: just update valueUSD. The
     // returned holding keeps every other field (kind, geo, shares,
     // etc) identical so downstream engines work without special-

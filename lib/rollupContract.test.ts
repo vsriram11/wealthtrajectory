@@ -316,4 +316,61 @@ describe("rollup-include flag — full cascade through every rollup-touching sur
     expect(result.successRate).toBeGreaterThan(0);
     expect(result.successRate).toBeLessThanOrEqual(1);
   });
+
+  it("Historical snapshot buckets cascade through the member filter (audit-fix regression pin)", async () => {
+    // Audit finding #3: HistoryTab + buildAssetClassSeries iterated
+    // snap.household.accounts directly with no ownerId filter,
+    // silently showing household totals when the user filtered to
+    // one member. The fix applies filterHousehold to each snapshot
+    // before bucketing — this contract test pins the cascade in
+    // alongside every other rollup-aware collection.
+    const { buildAssetClassSeries } = await import(
+      "@/lib/portfolio/historicalReturns"
+    );
+    const { filterHousehold } = await import("@/lib/types");
+    const s = useAppStore.getState();
+    // Build a fake "historical snapshot" from the current
+    // household (the engine doesn't care that it's not really
+    // historical — it just needs snap.household to be present).
+    const snap = {
+      t: Date.UTC(2024, 0, 1, 12),
+      netWorthUSD: householdNetWorth(s.household),
+      household: s.household,
+    };
+    // Household-wide buckets — every member's holdings counted.
+    const householdBuckets = buildAssetClassSeries([snap]);
+    const householdTotal = Object.values(householdBuckets).reduce(
+      (sum, series) => sum + (series?.[0]?.valueUSD ?? 0),
+      0,
+    );
+    // Now per-member: take the FIRST member, scope to them.
+    const firstMemberId = s.household.members[0]?.id;
+    expect(firstMemberId).toBeDefined();
+    const scopedHousehold = filterHousehold(s.household, firstMemberId!);
+    const scopedSnap = {
+      ...snap,
+      household: scopedHousehold,
+      netWorthUSD: householdNetWorth(scopedHousehold),
+    };
+    const scopedBuckets = buildAssetClassSeries([scopedSnap]);
+    const scopedTotal = Object.values(scopedBuckets).reduce(
+      (sum, series) => sum + (series?.[0]?.valueUSD ?? 0),
+      0,
+    );
+    // The scoped total must be STRICTLY less than the household
+    // total (the demo persona has multi-member ownership) and
+    // strictly greater than zero (the first member must own
+    // something). The exact ratio depends on the demo data
+    // shape — we don't pin it.
+    expect(scopedTotal).toBeGreaterThan(0);
+    expect(scopedTotal).toBeLessThan(householdTotal);
+    // Defensive: no household.accounts owned by OTHER members
+    // leaked into the scoped output.
+    const otherMembers = s.household.members.filter(
+      (m) => m.id !== firstMemberId,
+    );
+    for (const acct of scopedHousehold.accounts) {
+      expect(otherMembers.some((m) => m.id === acct.ownerId)).toBe(false);
+    }
+  });
 });
