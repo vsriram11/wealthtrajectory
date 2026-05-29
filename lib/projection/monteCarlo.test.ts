@@ -696,13 +696,15 @@ describe("simulatePath — cashBucketPriority (orthogonal to rebalance policy)",
       "annual-yes",
       { rebalance: "annual" },
     );
-    // Tolerance: `toBeCloseTo(x, -2)` = ±$50 absolute. Per-class
-    // sum (bucket arm) vs `nwAfterReturns + cfWithGrowth` (no-bucket
-    // arm) accumulate float-noise across 5 years; the user-visible
-    // intent is "indistinguishable at NW-display scale," not bit-
-    // identical. Matches the exhaustion test's looseness.
+    // Tolerance: `toBeCloseTo(x, 2)` = ±$0.005 absolute. The two
+    // arms are ALGEBRAICALLY identical at year-end (bucket sum
+    // collapses to `nwAfterReturns + cfWithGrowth`, same as the
+    // no-bucket arm); the only delta is float reordering. On $1M
+    // over 5 years that's well under a cent. Previously ±$50 —
+    // 50000× looser than the math demands, which would silently
+    // accept a systematic ~$40/year bias from a future refactor.
     for (let i = 0; i < noBucket.trajectory.length; i++) {
-      expect(withBucket.trajectory[i]).toBeCloseTo(noBucket.trajectory[i], -2);
+      expect(withBucket.trajectory[i]).toBeCloseTo(noBucket.trajectory[i], 2);
     }
   });
 
@@ -804,18 +806,36 @@ describe("simulatePath — cashBucketPriority (orthogonal to rebalance policy)",
       "bucket-none",
       { rebalance: "none" },
     );
-    // Same rebalance policy on both sides → divergence MUST come
-    // from the cashBucketPriority flag firing. If it weren't firing
-    // in y=yearsPre, the two arms would be byte-identical at all
-    // indices.
+    // PIN THE GATE BOUNDARY. Subtle structural property of the bucket
+    // strategy: in the firing year ITSELF, year-end TOTAL NW is
+    // mathematically constrained to equal `nwAfterReturns +
+    // cfWithGrowth` (the algebra of cash-first + spillover collapses
+    // to the same total). Only the COMPOSITION differs. Total-NW
+    // divergence appears one year LATER, as that composition delta
+    // propagates through the next year's returns.
+    //
+    // Indexing for this setup (yearsPre=1, horizon=5, totalYears=6):
+    //   trajectory[0] = startingNW
+    //   trajectory[1] = end of y=0 (accumulation) — identical
+    //   trajectory[2] = end of y=1 (first retirement; bucket fires)
+    //     — same TOTAL, different composition
+    //   trajectory[3] = end of y=2 — divergence visible here
+    //
+    // An off-by-one (`y > yearsPre`) would push the firing year to
+    // y=2 and the visible divergence to trajectory[4]. So pinning
+    // trajectory[3] as divergent (and trajectory[2] as same-total)
+    // distinguishes correct from off-by-one.
+    expect(withBucket.trajectory[1]).toBeCloseTo(noBucket.trajectory[1], 2);
+    expect(withBucket.trajectory[2]).toBeCloseTo(noBucket.trajectory[2], 2);
+    expect(
+      Math.abs(withBucket.trajectory[3] - noBucket.trajectory[3]),
+    ).toBeGreaterThan(1);
+    // Divergence compounds across the remaining horizon.
     let maxAbsDelta = 0;
     for (let i = 0; i < withBucket.trajectory.length; i++) {
       const d = Math.abs(withBucket.trajectory[i] - noBucket.trajectory[i]);
       if (d > maxAbsDelta) maxAbsDelta = d;
     }
-    // Material divergence (> $10) signals the cash-first logic
-    // actually fires across the multi-year window. If it weren't
-    // firing, the test would see ~$0 delta and fail.
     expect(maxAbsDelta).toBeGreaterThan(10);
   });
 
@@ -863,38 +883,68 @@ describe("simulatePath — cashBucketPriority (orthogonal to rebalance policy)",
     // The trigger gate is `y >= yearsPre`. During accumulation,
     // the bucket flag should have NO effect on trajectory —
     // contributions flow proportionally either way.
+    //
+    // Use a mixed setup (accumulation THEN retirement) so the
+    // gate's boundary is exercised: trajectory[0..3] (yearsPre=3
+    // years of accumulation) MUST be identical, then divergence
+    // is allowed to appear from trajectory[4] onward (retirement
+    // years). A degenerate `retirementHorizonYears: 0` test would
+    // tell us nothing about the gate — there'd be no retirement
+    // year to NOT fire in.
     const inputs: MonteCarloInputs = {
       startingNetWorthUSD: 100_000,
       allocation: ALLOC_95_STOCKS_5_CASH,
-      annualSpendUSD: 0,
+      annualSpendUSD: 60_000,
       annualContributionUSD: 20_000,
       yearsUntilRetirement: 3,
-      retirementHorizonYears: 0,
+      retirementHorizonYears: 2,
     };
-    const stocks = [-0.2, 0.1, 0.1];
+    const stocks = [-0.2, 0.1, 0.1, -0.1, 0.05];
     const noBucket = simulatePath(
       inputs,
       stocks,
-      [0, 0, 0],
-      [0, 0, 0],
-      [0, 0, 0],
-      [0, 0, 0],
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
       "no-bucket-accum",
-      { rebalance: "annual" },
+      { rebalance: "none" },
     );
     const withBucket = simulatePath(
       { ...inputs, spending: spendingWithBucket() },
       stocks,
-      [0, 0, 0],
-      [0, 0, 0],
-      [0, 0, 0],
-      [0, 0, 0],
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
       "with-bucket-accum",
-      { rebalance: "annual" },
+      { rebalance: "none" },
     );
-    for (let i = 0; i < noBucket.trajectory.length; i++) {
+    // yearsPre=3, horizon=2, totalYears=5. trajectory has 6 elements:
+    //   [0] = startingNW
+    //   [1..3] = ends of y=0..2 (accumulation; bucket dormant)
+    //   [4] = end of y=3 (first retirement year; bucket fires —
+    //         same TOTAL nw, different composition)
+    //   [5] = end of y=4 (second retirement year; composition
+    //         propagation visible → divergent total)
+    //
+    // Accumulation years must be bit-identical between arms (the
+    // contract this test pins).
+    for (let i = 0; i <= 3; i++) {
       expect(withBucket.trajectory[i]).toBeCloseTo(noBucket.trajectory[i], 6);
     }
+    // First retirement year (firing): year-end total IS the same
+    // (math invariant of the bucket branch); composition differs
+    // but we can't see that from trajectory alone.
+    expect(withBucket.trajectory[4]).toBeCloseTo(noBucket.trajectory[4], 2);
+    // Second retirement year: composition propagation finally shows
+    // up as a total-NW divergence. If gate were off-by-one
+    // (`y > yearsPre`), the bucket would only fire at y=4 and
+    // trajectory[5] would also be the same-total (firing year),
+    // failing this assertion.
+    expect(
+      Math.abs(withBucket.trajectory[5] - noBucket.trajectory[5]),
+    ).toBeGreaterThan(1);
   });
 
   it("positive income is not lost when bucket drains portfolio to zero (regression)", () => {
@@ -936,6 +986,88 @@ describe("simulatePath — cashBucketPriority (orthogonal to rebalance policy)",
     // (Cash returns 0%, so rImplied=0 and cfWithGrowth = cf.)
     expect(result.trajectory[1]).toBeCloseTo(30_000, 0);
     expect(result.survived).toBe(true);
+  });
+
+  it("none + bucket DELIVERS SORR shielding in a real crash scenario", () => {
+    // The raison d'être of the bucket strategy: in a deep
+    // early-retirement crash, the cash bucket shields equity from
+    // being sold at the bottom, so the household's terminal wealth
+    // is HIGHER than the no-bucket arm (not just "different").
+    // Setup: -30% / -20% / +10% / +10% / +10% — classic SORR.
+    // 10% cash slice, $40k spend, 5-year horizon. Bucket arm must
+    // end strictly higher than no-bucket arm.
+    const inputs: MonteCarloInputs = {
+      startingNetWorthUSD: 1_000_000,
+      allocation: { stocksFraction: 0.9, bondsFraction: 0, cashFraction: 0.1 },
+      annualSpendUSD: 40_000,
+      retirementHorizonYears: 5,
+    };
+    const stocks = [-0.3, -0.2, 0.1, 0.1, 0.1];
+    const noBucket = simulatePath(
+      inputs,
+      stocks,
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      "sorr-no",
+      { rebalance: "none" },
+    );
+    const withBucket = simulatePath(
+      { ...inputs, spending: spendingWithBucket() },
+      stocks,
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      "sorr-yes",
+      { rebalance: "none" },
+    );
+    // Bucket strategy delivers higher terminal wealth in SORR
+    // scenario. If a regression broke the shielding property, this
+    // test fails — the cash-first logic isn't actually protecting
+    // equity from sell-at-the-bottom.
+    expect(withBucket.endingNetWorthUSD).toBeGreaterThan(
+      noBucket.endingNetWorthUSD,
+    );
+  });
+
+  it("bucket flag on with retirement never reached (yearsUntilRetirement > totalYears) is byte-equal to no-bucket", () => {
+    // If `yearsUntilRetirement` exceeds the simulated horizon, the
+    // bucket gate (`y >= yearsPre`) never opens. The flag should be
+    // a structural no-op — every trajectory point equal between arms.
+    const inputs: MonteCarloInputs = {
+      startingNetWorthUSD: 500_000,
+      allocation: ALLOC_95_STOCKS_5_CASH,
+      annualSpendUSD: 40_000,
+      annualContributionUSD: 30_000,
+      yearsUntilRetirement: 100, // never reached
+      retirementHorizonYears: 5,
+    };
+    const stocks = [0.1, -0.1, 0.05, 0.08, 0.06];
+    const noBucket = simulatePath(
+      inputs,
+      stocks,
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      "noret-no",
+      { rebalance: "none" },
+    );
+    const withBucket = simulatePath(
+      { ...inputs, spending: spendingWithBucket() },
+      stocks,
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      "noret-yes",
+      { rebalance: "none" },
+    );
+    for (let i = 0; i < noBucket.trajectory.length; i++) {
+      expect(withBucket.trajectory[i]).toBeCloseTo(noBucket.trajectory[i], 6);
+    }
   });
 
   it("negative income deficit is not silently dropped when portfolio drained (regression)", () => {

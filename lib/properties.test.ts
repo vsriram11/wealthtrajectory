@@ -530,12 +530,22 @@ describe("monteCarlo.ts — yearly + ending percentile ordering", () => {
             bondsFraction: 0,
             cashFraction: 0,
           };
-          const annual = runHistoricalSequences({
-            startingNetWorthUSD: startingNW,
-            allocation: allStocks,
-            annualSpendUSD: annualSpend,
-            retirementHorizonYears: horizonYears,
-          });
+          // Hold rebalance constant on both arms so the only thing
+          // varying is the bucket flag. (Earlier version passed
+          // default `annual` on one arm and `none` on the other,
+          // confounding two axes — only worked here because 100%
+          // stocks makes BOTH no-ops. A future refactor that
+          // broke the bucket flag specifically with 0% cash could
+          // pass this test if `rebalance: "none"` also changed.)
+          const annual = runHistoricalSequences(
+            {
+              startingNetWorthUSD: startingNW,
+              allocation: allStocks,
+              annualSpendUSD: annualSpend,
+              retirementHorizonYears: horizonYears,
+            },
+            { rebalance: "none" },
+          );
           const bucket = runHistoricalSequences(
             {
               startingNetWorthUSD: startingNW,
@@ -570,13 +580,62 @@ describe("monteCarlo.ts — yearly + ending percentile ordering", () => {
     );
   });
 
-  // (A "1-year horizon ≡ annual" invariant was considered but is
-  // tautological — `bucketFiresThisYear` requires `y > 0`, so a
-  // 1-year horizon has no firing year by construction. The
-  // engine code path isn't exercised, so the property pins
-  // nothing observable. The zero-cash invariant above + the
-  // point-tests in monteCarlo.test.ts cover the meaningful
-  // bucket-policy cases.)
+  // Engine gate is `y >= yearsPre`. With default `yearsPre = 0`
+  // (no `yearsUntilRetirement`), the bucket DOES fire from y=0
+  // onward. Coverage for that path lives in the point-tests in
+  // monteCarlo.test.ts (per-year boundary assertions) and the
+  // bucket-vs-income monotonicity property below.
+
+  it("bucket flag + positive income: income still strictly does not reduce successRate", () => {
+    // Compose two contracts the engine claims to honor: (a)
+    // positive income is monotonic in successRate (already pinned
+    // by the non-bucket version above) AND (b) the cash-bucket
+    // priority correctly routes income back into the portfolio
+    // when the bucket withdrawal drained it. The Round-1 audit
+    // caught a path-dependent bug where positive income vanished
+    // into a zero-total portfolio under the bucket flag — that
+    // bug would surface here as a `withIncome.successRate <
+    // noIncome.successRate` violation on random inputs.
+    fc.assert(
+      fc.property(
+        startingNWArb,
+        annualSpendArb,
+        horizonArb,
+        allocationArb,
+        fc.double({ min: 0, max: 100_000, noNaN: true, noDefaultInfinity: true }),
+        (startingNW, annualSpend, horizonYears, allocation, perYearIncome) => {
+          const baseInputs = {
+            startingNetWorthUSD: startingNW,
+            allocation,
+            annualSpendUSD: annualSpend,
+            retirementHorizonYears: horizonYears,
+            otherTreatedAsStocks: true,
+            spending: {
+              variableUSD: 0,
+              haircut: { rate: 0, onlyAfterDownYear: false },
+              cashBucketPriority: true,
+            },
+          };
+          const noIncome = runHistoricalSequences(baseInputs, {
+            rebalance: "none",
+          });
+          const withIncome = runHistoricalSequences(
+            {
+              ...baseInputs,
+              incomePerYearUSD: Array(Math.floor(horizonYears / 2)).fill(
+                perYearIncome,
+              ),
+            },
+            { rebalance: "none" },
+          );
+          expect(withIncome.successRate).toBeGreaterThanOrEqual(
+            noIncome.successRate,
+          );
+        },
+      ),
+      { numRuns: 8 },
+    );
+  });
 });
 
 /* ============================================================ */
