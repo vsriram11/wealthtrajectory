@@ -90,10 +90,22 @@ export function PersistenceHydrator() {
       }, 250);
       if (snapTimer) clearTimeout(snapTimer);
       snapTimer = setTimeout(() => {
-        void maybeRecordSnapshot(
-          householdNetWorth(state.household),
-          state.household,
-        );
+        void (async () => {
+          const wrote = await maybeRecordSnapshot(
+            householdNetWorth(state.household),
+            state.household,
+          );
+          // R1-D7 audit CRITICAL fix: when the auto-snapshotter
+          // actually writes a row, bump the sync-revision counter so
+          // CloudSyncer's debounced uploader sees the change and
+          // pushes to Drive. Without this, automatic snapshots were
+          // local-only until some unrelated slice happened to
+          // change. Skip on min-interval no-ops so we don't amplify
+          // debounce load.
+          if (wrote) {
+            useAppStore.getState().bumpSnapshotsRevision();
+          }
+        })();
       }, 1500);
     });
     return () => {
@@ -109,12 +121,21 @@ export function PersistenceHydrator() {
   // each waypoint rather than back-projecting today's shares.
   useEffect(() => {
     const t = setTimeout(() => {
-      const s = useAppStore.getState();
-      if (s.mode !== "real") return;
-      void maybeRecordSnapshot(
-        householdNetWorth(s.household),
-        s.household,
-      );
+      void (async () => {
+        const s = useAppStore.getState();
+        if (s.mode !== "real") return;
+        const wrote = await maybeRecordSnapshot(
+          householdNetWorth(s.household),
+          s.household,
+        );
+        // R1-D7 audit CRITICAL fix: bump revision when the baseline
+        // open-the-app-and-leave snapshot actually lands, so the
+        // signed-in user's quarterly-check-in pattern reliably reaches
+        // Drive. Skip on min-interval guard (no-op IDB).
+        if (wrote) {
+          useAppStore.getState().bumpSnapshotsRevision();
+        }
+      })();
     }, 3000);
     return () => clearTimeout(t);
   }, []);

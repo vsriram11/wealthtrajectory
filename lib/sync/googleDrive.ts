@@ -92,11 +92,45 @@ async function downloadFile(token: string, fileId: string): Promise<string> {
   return res.text();
 }
 
+/**
+ * Google Drive simple-upload (uploadType=media) and multipart-upload
+ * (uploadType=multipart) both cap at 5 MB. Beyond that, the API
+ * requires resumable upload (uploadType=resumable), which involves a
+ * preflight session URL + chunked PUTs. R1-D8 audit MED fix: refuse
+ * to attempt a > 4 MB upload (1 MB safety margin) and surface a
+ * clear, user-actionable error instead of letting Drive return a
+ * generic 413 / 400. Resumable upload support is a follow-up
+ * (tracked separately); for now the guard prevents silent failures
+ * for long-tail users with many history-bearing snapshots.
+ */
+const DRIVE_UPLOAD_SAFETY_BYTES = 4 * 1024 * 1024;
+
+export class DrivePayloadTooLargeError extends Error {
+  constructor(sizeBytes: number) {
+    super(
+      `Drive backup payload is ${(sizeBytes / 1024 / 1024).toFixed(2)} MB — exceeds the 4 MB safety threshold. Trim older snapshots (Data → History snapshots) and try again.`,
+    );
+    this.name = "DrivePayloadTooLargeError";
+  }
+}
+
 async function uploadFile(
   token: string,
   name: string,
   content: string,
 ): Promise<DriveBackupRef> {
+  // R1-D8 audit MED guard: refuse oversized uploads with a clear
+  // error rather than letting Drive 413 and surface a generic
+  // "Drive create 413" string in googleSyncError.
+  // TextEncoder.encode() gives us the actual UTF-8 byte count
+  // (which is what Drive's content-length sees). For all-ASCII
+  // payloads this equals string length, but cyrillic / emoji /
+  // non-ASCII characters in user labels would otherwise produce
+  // false negatives on a string.length check.
+  const bytes = new TextEncoder().encode(content).length;
+  if (bytes > DRIVE_UPLOAD_SAFETY_BYTES) {
+    throw new DrivePayloadTooLargeError(bytes);
+  }
   const all = await findAllFiles(token, name);
   if (all.length > 0) {
     // PATCH the newest. If duplicates exist (from past races), delete

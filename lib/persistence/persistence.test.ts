@@ -280,4 +280,32 @@ describe("maybeRecordSnapshot — auto-snapshot guard", () => {
     await maybeRecordSnapshot(110_000, hh, start + 500, 100);
     expect(await loadSnapshots()).toHaveLength(2);
   });
+
+  it("returns true when a row is written, false on every no-op path (R1-D7 audit pin)", async () => {
+    // R1-D7 audit CRITICAL: PersistenceHydrator's auto-snapshotter
+    // calls bumpSnapshotsRevision only when a row is ACTUALLY
+    // written. The function must therefore distinguish between
+    // "wrote a row" (true) and "skipped" (false). Without this
+    // signal, callers either bump every 1.5s (amplifying upload
+    // debounce) or never bump (silent local-only auto-snapshots).
+    const { maybeRecordSnapshot } = await freshModule();
+    // Invalid NW → false
+    expect(await maybeRecordSnapshot(0)).toBe(false);
+    expect(await maybeRecordSnapshot(-1)).toBe(false);
+    expect(await maybeRecordSnapshot(Number.NaN)).toBe(false);
+    // Empty household → false
+    expect(await maybeRecordSnapshot(100_000, EMPTY_HH)).toBe(false);
+    // Valid first write → true
+    const hh = { ...EMPTY_HH, accounts: [{ id: "a1" }] as never };
+    const start = 1_700_000_000_000;
+    expect(await maybeRecordSnapshot(100_000, hh, start)).toBe(true);
+    // Second call inside debounce window → false (no-op).
+    expect(
+      await maybeRecordSnapshot(110_000, hh, start + 60_000),
+    ).toBe(false);
+    // Outside debounce → true.
+    expect(
+      await maybeRecordSnapshot(150_000, hh, start + 13 * 60 * 60 * 1000),
+    ).toBe(true);
+  });
 });

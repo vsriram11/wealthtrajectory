@@ -375,6 +375,15 @@ export function SnapshotsManager() {
     }
     setEditNWError("");
     setBusy(true);
+    // R1-D6 audit HIGH fix: if `moveSnapshot` succeeds (deletes the
+    // old row, writes the new one) but then `recordSnapshot` throws,
+    // OR if moveSnapshot itself fails mid delete-then-put, IDB has
+    // ALREADY mutated and Drive needs to know. Track in a flag so
+    // the `finally` block can bump unconditionally on any path that
+    // may have touched IDB. The bump is monotonic, so an over-bump
+    // is harmless (CloudSyncer just runs once extra), but a
+    // missed-bump silently strands the edit local-only forever.
+    let idbMayHaveMutated = false;
     try {
       // Find the original snapshot to preserve household + other
       // fields that aren't user-editable here.
@@ -384,6 +393,7 @@ export function SnapshotsManager() {
       // with two rows (one old, one new) at different t values.
       if (newT !== originalT) {
         await moveSnapshot(originalT, newT);
+        idbMayHaveMutated = true;
       }
       // Now `put` at the final t with updated scalar fields.
       // structuredClone the household for the same defensive-clone
@@ -403,11 +413,12 @@ export function SnapshotsManager() {
         delete (updated as { label?: string }).label;
       }
       await recordSnapshot(updated);
-      bumpSnapshotsRevision();
+      idbMayHaveMutated = true;
       await refresh();
       setStatusMessage("Snapshot updated.");
       handleCancelEdit();
     } finally {
+      if (idbMayHaveMutated) bumpSnapshotsRevision();
       setBusy(false);
     }
   };

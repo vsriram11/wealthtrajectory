@@ -54,6 +54,9 @@ export function DataIO() {
     (s) => s.healthImportanceWeights,
   );
   const importPayload = useAppStore((s) => s.importPayload);
+  const bumpSnapshotsRevision = useAppStore(
+    (s) => s.bumpSnapshotsRevision,
+  );
   const passphrase = useAppStore((s) => s.encryptionPassphrase);
 
   const [error, setError] = useState<string | null>(null);
@@ -87,6 +90,10 @@ export function DataIO() {
       // brings BACK the user's snapshot history (and isn't silently
       // a "restore everything except snapshots" half-job).
       await applyImportedPayload(parsed, importPayload);
+      // R1-D10 audit CRITICAL fix: bump snapshot revision so
+      // subscribers (HistoryView, GrowthVelocityCard, Insights,
+      // Review) re-read fresh data after a file import.
+      if (parsed.snapshots !== undefined) bumpSnapshotsRevision();
       setError(null);
       setPendingCiphertext(null);
       setDecryptInput("");

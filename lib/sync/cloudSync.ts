@@ -280,6 +280,16 @@ export async function pullFromDrive(
     // store-backed slices AND IDB-backed snapshots both move atomically
     // (caller can't forget the snapshot mirror).
     await applyImportedPayload(parsed, s.importPayload);
+    // R1-D10 audit CRITICAL fix: bump snapshot revision when the
+    // import potentially changed the snapshot collection, so
+    // subscribers (HistoryView, GrowthVelocityCard, Insights,
+    // Review) re-read snapshots from IDB on the next render. Only
+    // bump when the payload actually carried a snapshots field —
+    // otherwise the import was a no-op for snapshots and the bump
+    // would trigger a redundant CloudSyncer upload cycle.
+    if (parsed.snapshots !== undefined) {
+      s.bumpSnapshotsRevision();
+    }
     s.setGoogleSyncState({
       googleSyncing: false,
       googleLastSyncAt: Date.now(),

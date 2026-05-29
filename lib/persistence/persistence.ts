@@ -312,12 +312,20 @@ export async function moveSnapshot(
   }
 }
 
+/**
+ * Returns `true` iff a row was actually written. R1-D7 audit
+ * CRITICAL fix: callers need this signal so they can bump the
+ * sync-revision counter exactly when an IDB write happened, but not
+ * on the (very common) min-interval no-op path. Without it, the
+ * auto-snapshotter was either silent-to-CloudSyncer (current bug)
+ * or would bump every 1.5s and amplify the debounced upload load.
+ */
 export async function maybeRecordSnapshot(
   netWorthUSD: number,
   household?: Household,
   now = Date.now(),
   minIntervalMs = 12 * 60 * 60 * 1000,
-): Promise<void> {
+): Promise<boolean> {
   // Never persist a zero / negative net-worth auto-snapshot. The
   // most common cause: PersistenceHydrator's 3-second timer fires
   // before household state has finished loading from IDB or Drive,
@@ -326,19 +334,21 @@ export async function maybeRecordSnapshot(
   // every chart bucket at-or-after `now` snaps to $0 and the
   // history chart looks broken until the user manually deletes
   // the bad row.
-  if (!Number.isFinite(netWorthUSD) || netWorthUSD <= 0) return;
-  if (household && household.accounts.length === 0) return;
+  if (!Number.isFinite(netWorthUSD) || netWorthUSD <= 0) return false;
+  if (household && household.accounts.length === 0) return false;
 
   const handle = getDB();
-  if (!handle) return;
+  if (!handle) return false;
   try {
     const last = await handle.snapshots.orderBy("t").reverse().first();
-    if (last && now - last.t < minIntervalMs) return;
+    if (last && now - last.t < minIntervalMs) return false;
     const row: SnapshotRow = household
       ? { t: now, netWorthUSD, household }
       : { t: now, netWorthUSD };
     await handle.snapshots.put(row);
+    return true;
   } catch (e) {
     console.warn("WealthTrajectory: failed to maybe-record", e);
+    return false;
   }
 }

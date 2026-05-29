@@ -75,6 +75,9 @@ export function GoogleSyncCard() {
   const incomeStreams = useAppStore((s) => s.incomeStreams);
   const encryptionPassphrase = useAppStore((s) => s.encryptionPassphrase);
   const importPayload = useAppStore((s) => s.importPayload);
+  const bumpSnapshotsRevision = useAppStore(
+    (s) => s.bumpSnapshotsRevision,
+  );
   const setUser = useAppStore((s) => s.setUser);
   const setSyncState = useAppStore((s) => s.setGoogleSyncState);
 
@@ -126,6 +129,11 @@ export function GoogleSyncCard() {
         // first-cloud-pull path can't leave snapshot history
         // stranded.
         await applyImportedPayload(parsed, importPayload);
+        // R1-D10 audit CRITICAL fix: bump snapshot revision so
+        // History/Insights/Review consumers re-read after the
+        // first-cloud-pull. Only when the payload actually carried
+        // snapshots — see pullFromDrive comment.
+        if (parsed.snapshots !== undefined) bumpSnapshotsRevision();
         setSyncState({
           googleSyncing: false,
           googleLastSyncAt: Date.now(),
@@ -155,6 +163,10 @@ export function GoogleSyncCard() {
       // user keeps their old local snapshots while overwriting all
       // other slices.
       await applyImportedPayload(parsed, importPayload);
+      // R1-D10 audit CRITICAL fix: bump snapshot revision so
+      // History/Insights/Review consumers re-read after a
+      // merge-prefer-cloud import.
+      if (parsed.snapshots !== undefined) bumpSnapshotsRevision();
       setSyncState({ googleLastSyncAt: Date.now() });
       setStep({ kind: "idle" });
     } catch (e) {
