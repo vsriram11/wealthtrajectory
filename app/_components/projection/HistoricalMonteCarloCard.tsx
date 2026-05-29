@@ -354,14 +354,74 @@ export function HistoricalMonteCarloCard() {
   // is materially larger than on a baseline. Routing this through the
   // projected household is what the user observed differing across
   // scenarios already.
+  // Cash-bucket size override gating + the resolved requested
+  // fraction. MUST be derived BEFORE leveragedBuckets +
+  // bucketFundingPlan so those two engines can compose without
+  // double-tax (Round-1 audit). The override has three gates:
+  //   1. cashBucketPriority is ON
+  //   2. cashBucketSizePct is set
+  //   3. No glide path active (glide bypasses static allocation)
+  const CASH_BUCKET_MAX_PCT = 50;
+  const cashBucketOverrideActive =
+    cashBucketPriority && cashBucketSizePct != null && !glidePathActive;
+  const projectedCashShare = portfolio.classes.cashShare;
+  const requestedCashFraction = cashBucketOverrideActive
+    ? Math.max(
+        0,
+        Math.min(CASH_BUCKET_MAX_PCT / 100, (cashBucketSizePct ?? 0) / 100),
+      )
+    : null;
+
+  // Bucket-funding plan: models the cost of raising the user's
+  // requested cash bucket (sells highest-leverage equity first,
+  // primary residence + opt-outs excluded, cap-gains on taxable-
+  // account portions, short bonds counted as cash-equivalent).
+  // Compute BEFORE leveragedBuckets so the deleveraging engine can
+  // skip holdings already consumed for cash — preventing the
+  // Round-1 audit's double-tax bug.
+  const bucketFundingPlan = useMemo(
+    () =>
+      planBucketFunding(
+        projectedHousehold,
+        portfolio.netWorthUSD,
+        cashBucketOverrideActive && requestedCashFraction != null
+          ? requestedCashFraction
+          : portfolio.classes.cashShare,
+        effective.retirementTaxRate ?? 0,
+      ),
+    [
+      projectedHousehold,
+      portfolio.netWorthUSD,
+      portfolio.classes.cashShare,
+      cashBucketOverrideActive,
+      requestedCashFraction,
+      effective.retirementTaxRate,
+    ],
+  );
+  // Map<holdingId, USD-consumed-by-bucket-funding> for the
+  // deleveraging engine. Empty when no bucket sales fired.
+  const bucketFundingConsumed = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const s of bucketFundingPlan.sales) {
+      m.set(s.holdingId, s.faceValueSoldUSD);
+    }
+    return m;
+  }, [bucketFundingPlan.sales]);
+
+  // Deleveraging restructure tax — computed on the household
+  // POST bucket-funding so a leveraged ETF that was sold for cash
+  // doesn't also get re-taxed for the 3x→2x restructure (it's gone).
   const leveragedBuckets = useMemo(
     () =>
       computeLeveragedEquityBuckets(
         projectedHousehold,
         effective.retirementTaxRate,
+        undefined,
+        bucketFundingConsumed,
       ),
-    [projectedHousehold, effective.retirementTaxRate],
+    [projectedHousehold, effective.retirementTaxRate, bucketFundingConsumed],
   );
+
   // Decompose equity into face values to recompose post-tax.
   // `regular1xEquityUSD` is the equity that's neither recognized 2x
   // nor leveraged-being-restructured — it stays at full face value.
@@ -403,41 +463,16 @@ export function HistoricalMonteCarloCard() {
     portfolio.netWorthUSD > 0
       ? leveragedBuckets.deleveragingTaxHitUSD / portfolio.netWorthUSD
       : 0;
-  // Cash-bucket size override (cap shared with the NumberInput's
-  // max — single source of truth so the UI accepted range can't
-  // drift from the effective clamp).
-  const CASH_BUCKET_MAX_PCT = 50;
-  // Effective bucket size in REAL (fractional) terms. Three gates
-  // must all be open for the override to apply:
-  //   1. cashBucketPriority is ON — toggling Off without resetting
-  //      the size would otherwise leak the override into baseline
-  //      runs (Round-3 audit HIGH bug).
-  //   2. cashBucketSizePct is set (user explicitly chose a value;
-  //      null means "use the projected default").
-  //   3. The glide path is NOT active — when a glide path is
-  //      configured, the engine computes per-year weights from
-  //      `weightsForYear(age)`, completely bypassing the static
-  //      `allocation`. Applying the override here would do
-  //      nothing AND silently mislead the user. The UI surfaces
-  //      this case explicitly below.
-  const cashBucketOverrideActive =
-    cashBucketPriority && cashBucketSizePct != null && !glidePathActive;
-  // The simulator runs at TARGET-DATE composition (aged), so all
-  // comparisons against the user's chosen bucket size happen
-  // against the AGED cash share — not today's. The helper-text
-  // and tax warning use the same value so the user's mental
-  // model and the simulator's math agree.
-  const projectedCashShare = portfolio.classes.cashShare;
-  const requestedCashFraction = cashBucketOverrideActive
-    ? Math.max(
-        0,
-        Math.min(CASH_BUCKET_MAX_PCT / 100, (cashBucketSizePct ?? 0) / 100),
-      )
-    : null;
   // Single pure transformation: see lib/projection/cashBucketAllocation.ts.
-  // The helper handles requested > today (sell equity → buy cash) AND
-  // requested < today (sell cash → buy equity, "de-risk to growth").
-  // Both directions carry tax implications, surfaced below.
+  // Passes the bucket-funding plan's POST-TAX effective cash
+  // fraction (NOT the raw requested fraction). Round-1 audit HIGH:
+  // if user requests 25% cash but raising it costs $T in tax,
+  // actual post-tax cash is less than 25%; piping the raw request
+  // through magicked $T of cash out of thin air. The plan's
+  // `effectiveCashFractionPostTax` reconciles this correctly +
+  // also handles the partial-funding case (shortfallUSD > 0 ⇒
+  // can't raise the full request ⇒ allocation runs at the
+  // achievable fraction, not the requested one).
   const allocation = useMemo(
     () =>
       applyCashBucketOverride(
@@ -450,7 +485,9 @@ export function HistoricalMonteCarloCard() {
           realEstateFraction: realEstateShare,
           otherFraction: otherAltsShare,
         },
-        requestedCashFraction,
+        cashBucketOverrideActive
+          ? bucketFundingPlan.effectiveCashFractionPostTax
+          : null,
       ),
     [
       regularStocksFraction,
@@ -460,7 +497,8 @@ export function HistoricalMonteCarloCard() {
       commodityShare,
       realEstateShare,
       otherAltsShare,
-      requestedCashFraction,
+      cashBucketOverrideActive,
+      bucketFundingPlan.effectiveCashFractionPostTax,
     ],
   );
   // For methodology display + warnings: the effective cash share
@@ -476,31 +514,13 @@ export function HistoricalMonteCarloCard() {
   // taxable-account portions, reduce starting NW by the tax.
   // Primary residence + private stock + isIlliquid + user opt-outs
   // (excludeFromCashBucketSale) are excluded.
-  const bucketFundingPlan = useMemo(
-    () =>
-      planBucketFunding(
-        projectedHousehold,
-        portfolio.netWorthUSD,
-        portfolio.classes.cashShare,
-        cashBucketOverrideActive && requestedCashFraction != null
-          ? requestedCashFraction
-          : portfolio.classes.cashShare,
-        effective.retirementTaxRate ?? 0,
-      ),
-    [
-      projectedHousehold,
-      portfolio.netWorthUSD,
-      portfolio.classes.cashShare,
-      cashBucketOverrideActive,
-      requestedCashFraction,
-      effective.retirementTaxRate,
-    ],
-  );
-
   // Scale the bucket-funding tax to the user's overridden starting
   // NW (matches the deleverage-tax scaling pattern at line ~399).
   // This way "what if I had $X starting" scenarios get a
   // proportional tax drag rather than a fixed dollar amount.
+  // (The plan itself is computed at line ~370 above, before
+  // `computeLeveragedEquityBuckets`, so the leveraging engine can
+  // skip already-consumed holdings — Round-1 audit ordering fix.)
   const bucketFundingTaxFraction =
     portfolio.netWorthUSD > 0
       ? bucketFundingPlan.totalTaxOwedUSD / portfolio.netWorthUSD

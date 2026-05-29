@@ -52,6 +52,10 @@ import {
   type Holding,
   type Household,
 } from "@/lib/types";
+import { MULTI_ASSET_WRAPPER_TICKERS } from "@/lib/portfolio/leveragedEquity";
+
+/** Single source of truth for "this ticker is a capital-efficient multi-asset wrapper." */
+const SET_MULTI_ASSET_WRAPPER = new Set<string>(MULTI_ASSET_WRAPPER_TICKERS);
 
 /**
  * Maximum bond duration (years) at which the holding is treated as
@@ -150,9 +154,27 @@ export type BucketFundingPlan = {
    * Cash-equivalent share the user ALREADY has (cash holdings +
    * short-duration bonds with averageDurationYears <= 1). The amount
    * needed to raise is computed against THIS share, not raw cash%,
-   * because short bonds are already in the SORR buffer.
+   * because short bonds are already in the SORR buffer. Normalized
+   * against the caller-passed `totalNetWorthUSD` for denominator
+   * consistency.
    */
   effectiveCashEquivalentShare: number;
+  /**
+   * The cash fraction the SIMULATOR should actually run with —
+   * post-tax. When the user requests X% cash but raising the cash
+   * costs $T in tax, the actually-raised cash is less than the
+   * requested face, and the post-tax NW is also less. Pass THIS
+   * value to `applyCashBucketOverride` (not the raw requested
+   * fraction) so the simulator's cash dollars match the plan's
+   * actual cash dollars. Round-1 audit HIGH: prior versions piped
+   * the requested fraction through and magicked $T worth of cash
+   * out of thin air.
+   *   = (preExistingCashUSD + amountRaisedUSD - totalTaxOwedUSD)
+   *     / (totalNetWorthUSD - totalTaxOwedUSD)
+   * When no tax fires (or requested ≤ effective cash equivalent),
+   * this equals the user's request.
+   */
+  effectiveCashFractionPostTax: number;
   /** Total dollars the user wants to raise to hit the requested cash%. */
   amountToRaiseUSD: number;
   /** Actually raised (= min(amountToRaise, totalSellableValue)). */
@@ -215,6 +237,16 @@ function classifyHolding(h: Holding): SaleBucket | null {
   if (h.kind === "cash") return null;
   if (isCashEquivalentBond(h)) return null;
   if (h.kind === "equity") {
+    // Multi-asset capital-efficient wrappers (NTSX/GDE/RSST/etc.)
+    // have leverage > 1 but are EXPLICITLY designed for long-term
+    // hold — same exclusion the deleveraging engine applies. They
+    // also have decomposed composition specs (per-class breakdown
+    // upstream), so flagging them as "leveraged" double-counts.
+    // Treat as regular equity for sale priority. Round-1 audit fix.
+    const isWrapper =
+      (h.composition && h.composition.length > 0) ||
+      SET_MULTI_ASSET_WRAPPER.has(h.symbol);
+    if (isWrapper) return "regularEquity";
     return h.leverage > 1 ? "leveragedEquity" : "regularEquity";
   }
   if (h.kind === "bond") return "bonds";
@@ -268,28 +300,26 @@ function labelFor(h: Holding): string {
 export function planBucketFunding(
   household: Household,
   totalNetWorthUSD: number,
-  /**
-   * Cash share (pure cash holdings) from the projected portfolio.
-   * Caller computes this from the simulator's allocation. Short-
-   * duration bonds are ADDED on top inside this function — they
-   * shouldn't have to be passed in pre-summed (they live on the
-   * household, not the allocation summary).
-   */
-  projectedCashShare: number,
   requestedCashFraction: number,
   retirementTaxRate: number,
+  /**
+   * Optional set of holding IDs the caller has separately consumed
+   * (e.g. the deleveraging restructure already applied to this
+   * holding). The engine treats these as effectively gone for
+   * sale purposes — neither sold nor counted in cash-equivalent.
+   * Round-1 audit: prevents double-tax when deleveraging +
+   * bucket-funding both want the same TQQQ.
+   */
+  excludedHoldingIds?: ReadonlySet<string>,
   gainFraction: number = DEFAULT_GAIN_FRACTION,
 ): BucketFundingPlan {
   // Boundary sanitization. NaN/Infinity → trivial empty plan.
   const safeNW = Number.isFinite(totalNetWorthUSD)
     ? Math.max(0, totalNetWorthUSD)
     : 0;
-  const safeProjected = Number.isFinite(projectedCashShare)
-    ? Math.max(0, Math.min(1, projectedCashShare))
-    : 0;
   const safeRequested = Number.isFinite(requestedCashFraction)
     ? Math.max(0, Math.min(1, requestedCashFraction))
-    : safeProjected;
+    : 0;
   const effectiveTaxRate = Number.isFinite(retirementTaxRate)
     ? Math.max(0, Math.min(0.99, retirementTaxRate))
     : 0;
@@ -299,7 +329,14 @@ export function planBucketFunding(
 
   // Walk every (account, holding) pair: classify, count excluded
   // value by reason (illiquid / primary-residence / opt-out / short
-  // bond), build sale candidates.
+  // bond), tally cash, build sale candidates.
+  //
+  // Single-pass: walking the household here means we own both the
+  // numerator (cash USD, short-bond USD) and the denominator (the
+  // caller-passed `totalNetWorthUSD`) for the cash-equivalent
+  // share — no risk of the gross-vs-net denominator mismatch
+  // Round-1 audit flagged on the prior projectedCashShare param.
+  let cashUSD = 0;
   let excludedIlliquidUSD = 0;
   let excludedPrimaryResidenceUSD = 0;
   let excludedUserOptOutUSD = 0;
@@ -309,6 +346,17 @@ export function planBucketFunding(
     const isTaxable =
       TAX_TREATMENT_BY_CATEGORY[account.category] === "TAXABLE";
     for (const holding of account.holdings) {
+      // Caller-supplied exclusion (Round-1 audit: prevents the
+      // deleveraging engine + bucket-funding engine from
+      // double-taxing the same holding).
+      if (excludedHoldingIds?.has(holding.id)) continue;
+      // Cash always counts toward the cash-equivalent share —
+      // even if marked illiquid (a frozen savings account is
+      // still cash for the SORR-buffer accounting).
+      if (holding.kind === "cash") {
+        cashUSD += holding.valueUSD;
+        continue;
+      }
       // Liquidity gate (primary residence, private stock, isIlliquid).
       if (!isLiquid(holding)) {
         excludedIlliquidUSD += holding.valueUSD;
@@ -334,18 +382,20 @@ export function planBucketFunding(
         continue;
       }
       const bucket = classifyHolding(holding);
-      if (bucket == null) continue; // cash — can't sell cash for cash
+      if (bucket == null) continue;
       candidates.push({ holding, account, bucket, isTaxable });
     }
   }
 
-  // Effective cash-equivalent share = projected cash + short bonds.
-  // Used as the BASELINE for amount-to-raise (not raw cash).
-  const shortBondShare = safeNW > 0 ? shortDurationBondUSD / safeNW : 0;
-  const effectiveCashEquivalentShare = Math.min(
-    1,
-    safeProjected + shortBondShare,
-  );
+  // Effective cash-equivalent share = (cash + short bonds) / NW.
+  // Both numerator and denominator are consistent now (NW = caller-
+  // passed `totalNetWorthUSD`, typically `portfolio.netWorthUSD`
+  // which is net of liabilities). Used as the BASELINE for
+  // amount-to-raise.
+  const effectiveCashEquivalentShare =
+    safeNW > 0
+      ? Math.min(1, (cashUSD + shortDurationBondUSD) / safeNW)
+      : 0;
   const amountToRaiseUSD = Math.max(
     0,
     (safeRequested - effectiveCashEquivalentShare) * safeNW,
@@ -430,8 +480,23 @@ export function planBucketFunding(
   }));
   const sales = candidateLedger.filter((s) => s.faceValueSoldUSD > 0);
 
+  // Post-tax effective cash fraction: what the SIMULATOR should
+  // actually run with. Numerator = existing cash + sales net of
+  // tax. Denominator = NW net of tax. Without this, the simulator
+  // would pretend `requestedCashFraction × postTaxNW` worth of cash
+  // exists, magicking $totalTaxOwed of cash out of thin air
+  // (Round-1 audit HIGH). When tax is zero (no taxable-account
+  // sales) this equals the user's request.
+  const postTaxNW = Math.max(0, safeNW - totalTaxOwedUSD);
+  const netCashFromSales = Math.max(0, amountRaisedUSD - totalTaxOwedUSD);
+  const effectiveCashFractionPostTax =
+    postTaxNW > 0
+      ? Math.min(1, (cashUSD + netCashFromSales) / postTaxNW)
+      : 0;
+
   return {
     effectiveCashEquivalentShare,
+    effectiveCashFractionPostTax,
     amountToRaiseUSD,
     amountRaisedUSD,
     shortfallUSD: Math.max(0, amountToRaiseUSD - amountRaisedUSD),

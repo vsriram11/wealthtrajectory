@@ -185,13 +185,16 @@ function household(accounts: Account[]): Household {
 }
 
 describe("planBucketFunding", () => {
-  it("requested <= projected: zero amount, zero tax, empty sales", () => {
+  it("requested <= effective cash equivalent: zero amount, zero tax, empty sales", () => {
+    // Household has $10k cash + $90k equity → 10% effective cash.
+    // Requesting 5% < 10% → no need to raise anything.
     const hh = household([
       account({ category: "BROKERAGE" }, [
-        holding({ kind: "equity", valueUSD: 100_000 }),
+        holding({ kind: "equity", valueUSD: 90_000 }),
+        holding({ kind: "cash", valueUSD: 10_000 }),
       ]),
     ]);
-    const plan = planBucketFunding(hh, 100_000, 0.10, 0.05, 0.20);
+    const plan = planBucketFunding(hh, 100_000, 0.05, 0.20);
     expect(plan.amountToRaiseUSD).toBe(0);
     expect(plan.amountRaisedUSD).toBe(0);
     expect(plan.totalTaxOwedUSD).toBe(0);
@@ -208,7 +211,7 @@ describe("planBucketFunding", () => {
         holding({ kind: "cash", valueUSD: 50_000 }),
       ]),
     ]);
-    const plan = planBucketFunding(hh, 1_000_000, 0.05, 0.25, 0.20);
+    const plan = planBucketFunding(hh, 1_000_000, 0.25, 0.20);
     expect(plan.amountToRaiseUSD).toBeCloseTo(200_000, 2);
     expect(plan.amountRaisedUSD).toBeCloseTo(200_000, 2);
     expect(plan.totalTaxOwedUSD).toBeCloseTo(40_000, 2);
@@ -243,7 +246,7 @@ describe("planBucketFunding", () => {
     ]);
     // Need to raise $150k. Should drain TQQQ (100k) first, then 50k
     // from SSO (2x). 1x SPY untouched.
-    const plan = planBucketFunding(hh, 300_000, 0, 0.5, 0.20);
+    const plan = planBucketFunding(hh, 300_000, 0.5, 0.20);
     expect(plan.amountToRaiseUSD).toBeCloseTo(150_000, 2);
     const leveragedBucket = plan.perBucket.find(
       (b) => b.bucket === "leveragedEquity",
@@ -269,13 +272,14 @@ describe("planBucketFunding", () => {
         }),
       ]),
     ]);
-    // Total NW $950k, request bumping cash from ~5% to 50% → raise
-    // ~$427k. But only $100k of equity is sellable; primary
-    // residence is OFF-LIMITS even though it's $800k of paper value.
-    const plan = planBucketFunding(hh, 950_000, 0.05, 0.5, 0.20);
-    expect(plan.amountToRaiseUSD).toBeCloseTo(427_500, 1);
+    // Total NW $950k, cash $50k → effective 5.263% cash. Request
+    // bumping to 50% → raise (0.5 - 0.0526) × $950k ≈ $425k. But
+    // only $100k of equity is sellable; primary residence is OFF-
+    // LIMITS even though it's $800k of paper value.
+    const plan = planBucketFunding(hh, 950_000, 0.5, 0.20);
+    expect(plan.amountToRaiseUSD).toBeCloseTo(425_000, 1);
     expect(plan.amountRaisedUSD).toBeCloseTo(100_000, 1);
-    expect(plan.shortfallUSD).toBeCloseTo(327_500, 1);
+    expect(plan.shortfallUSD).toBeCloseTo(325_000, 1);
     expect(plan.excludedPrimaryResidenceUSD).toBe(800_000);
     expect(plan.excludedIlliquidUSD).toBe(800_000);
   });
@@ -291,7 +295,7 @@ describe("planBucketFunding", () => {
         holding({ kind: "equity", valueUSD: 100_000 }),
       ]),
     ]);
-    const plan = planBucketFunding(hh, 600_000, 0, 0.5, 0.20);
+    const plan = planBucketFunding(hh, 600_000, 0.5, 0.20);
     // Wants $300k; only equity ($100k) is sellable; private stock
     // $500k is excluded as illiquid.
     expect(plan.amountRaisedUSD).toBeCloseTo(100_000, 1);
@@ -312,7 +316,7 @@ describe("planBucketFunding", () => {
         holding({ kind: "equity", valueUSD: 100_000 }),
       ]),
     ]);
-    const plan = planBucketFunding(hh, 300_000, 0, 0.5, 0.20);
+    const plan = planBucketFunding(hh, 300_000, 0.5, 0.20);
     expect(plan.amountRaisedUSD).toBeCloseTo(100_000, 1);
     expect(plan.excludedIlliquidUSD).toBe(200_000);
   });
@@ -328,7 +332,7 @@ describe("planBucketFunding", () => {
         }),
       ]),
     ]);
-    const plan = planBucketFunding(hh, 300_000, 0, 0.5, 0.20);
+    const plan = planBucketFunding(hh, 300_000, 0.5, 0.20);
     expect(plan.amountRaisedUSD).toBeCloseTo(150_000, 1);
     expect(plan.excludedPrimaryResidenceUSD).toBe(0);
     const reBucket = plan.perBucket.find((b) => b.bucket === "realEstate")!;
@@ -347,7 +351,7 @@ describe("planBucketFunding", () => {
         holding({ kind: "equity", valueUSD: 100_000 }),
       ]),
     ]);
-    const plan = planBucketFunding(hh, 300_000, 0, 0.5, 0.20);
+    const plan = planBucketFunding(hh, 300_000, 0.5, 0.20);
     expect(plan.amountRaisedUSD).toBeCloseTo(150_000, 1);
     expect(plan.totalTaxOwedUSD).toBe(0);
   });
@@ -374,7 +378,7 @@ describe("planBucketFunding", () => {
       ]),
     ]);
     // Raise $80k — comes entirely from IRA → zero tax.
-    const plan = planBucketFunding(hh, 200_000, 0, 0.4, 0.20);
+    const plan = planBucketFunding(hh, 200_000, 0.4, 0.20);
     expect(plan.amountRaisedUSD).toBeCloseTo(80_000, 1);
     expect(plan.totalTaxOwedUSD).toBeCloseTo(0, 1);
   });
@@ -402,7 +406,7 @@ describe("planBucketFunding", () => {
         }),
       ]),
     ]);
-    const plan = planBucketFunding(hh, 200_000, 0, 0.5, 0.20);
+    const plan = planBucketFunding(hh, 200_000, 0.5, 0.20);
     const lev = plan.perBucket.find((b) => b.bucket === "leveragedEquity")!;
     expect(lev.faceValueSoldUSD).toBeCloseTo(100_000, 1);
     expect(lev.taxOwedUSD).toBeCloseTo(20_000, 1); // 100k × 1.0 × 0.2
@@ -421,7 +425,7 @@ describe("planBucketFunding", () => {
         holding({ kind: "crypto", valueUSD: 100_000 }),
       ]),
     ]);
-    const plan = planBucketFunding(hh, 500_000, 0, 0.5, 0.20);
+    const plan = planBucketFunding(hh, 500_000, 0.5, 0.20);
     expect(plan.amountToRaiseUSD).toBeCloseTo(250_000, 1);
     expect(
       plan.perBucket.find((b) => b.bucket === "regularEquity")!
@@ -447,8 +451,8 @@ describe("planBucketFunding", () => {
         holding({ kind: "equity", valueUSD: 100_000 }),
       ]),
     ]);
-    const full = planBucketFunding(hh, 100_000, 0, 1.0, 0.20, 1.0);
-    const half = planBucketFunding(hh, 100_000, 0, 1.0, 0.20, 0.5);
+    const full = planBucketFunding(hh, 100_000, 1.0, 0.20, undefined, 1.0);
+    const half = planBucketFunding(hh, 100_000, 1.0, 0.20, undefined, 0.5);
     expect(full.totalTaxOwedUSD).toBeCloseTo(20_000, 1);
     expect(half.totalTaxOwedUSD).toBeCloseTo(10_000, 1);
   });
@@ -459,9 +463,9 @@ describe("planBucketFunding", () => {
         holding({ kind: "equity", valueUSD: 100_000 }),
       ]),
     ]);
-    const negative = planBucketFunding(hh, 100_000, 0, 1.0, -0.5, 1.0);
+    const negative = planBucketFunding(hh, 100_000, 1.0, -0.5, undefined, 1.0);
     expect(negative.totalTaxOwedUSD).toBe(0);
-    const tooHigh = planBucketFunding(hh, 100_000, 0, 1.0, 5.0, 1.0);
+    const tooHigh = planBucketFunding(hh, 100_000, 1.0, 5.0, undefined, 1.0);
     // Clamped to 0.99 → tax ≈ $99k on $100k sale at full gain.
     expect(tooHigh.totalTaxOwedUSD).toBeCloseTo(99_000, 1);
   });
@@ -479,7 +483,7 @@ describe("planBucketFunding", () => {
         }),
       ]),
     ]);
-    const plan = planBucketFunding(hh, 1_000_000, 0, 0.5, 0.20);
+    const plan = planBucketFunding(hh, 1_000_000, 0.5, 0.20);
     expect(plan.amountToRaiseUSD).toBeCloseTo(500_000, 1);
     expect(plan.amountRaisedUSD).toBeCloseTo(50_000, 1);
     expect(plan.shortfallUSD).toBeCloseTo(450_000, 1);
@@ -496,7 +500,7 @@ describe("planBucketFunding", () => {
       Number.NaN,
       Number.NaN,
       Number.NaN,
-      Number.NaN,
+      undefined,
       Number.NaN,
     );
     expect(plan.amountToRaiseUSD).toBe(0);
@@ -509,14 +513,14 @@ describe("planBucketFunding", () => {
         holding({ kind: "equity", valueUSD: 100_000 }),
       ]),
     ]);
-    const above1 = planBucketFunding(hh, 100_000, 0, 1.5, 0.20);
+    const above1 = planBucketFunding(hh, 100_000, 1.5, 0.20);
     // Clamped to 1.0 → amountToRaise = 100k. Only $100k sellable
     // → raised = 100k, no shortfall.
     expect(above1.amountToRaiseUSD).toBeCloseTo(100_000, 1);
     expect(above1.amountRaisedUSD).toBeCloseTo(100_000, 1);
 
-    const below0 = planBucketFunding(hh, 100_000, 0.05, -0.2, 0.20);
-    // Clamped to 0 — requested < projected → zero plan.
+    const below0 = planBucketFunding(hh, 100_000, -0.2, 0.20);
+    // Clamped to 0 — requested ≤ effective cash equivalent → zero plan.
     expect(below0.amountToRaiseUSD).toBe(0);
   });
 
@@ -532,7 +536,7 @@ describe("planBucketFunding", () => {
     // Raise $200k. Sorted order: IRA-1x (tax-advantaged first within
     // same leverage tier) gets drained FIRST → 200k from IRA, 0 from
     // brokerage. Tax = 0.
-    const plan = planBucketFunding(hh, 400_000, 0, 0.5, 0.20);
+    const plan = planBucketFunding(hh, 400_000, 0.5, 0.20);
     expect(plan.amountRaisedUSD).toBeCloseTo(200_000, 1);
     expect(plan.totalTaxOwedUSD).toBe(0);
   });
@@ -543,7 +547,7 @@ describe("planBucketFunding", () => {
         holding({ kind: "bond", valueUSD: 100_000 }),
       ]),
     ]);
-    const plan = planBucketFunding(hh, 100_000, 0, 0.5, 0.20);
+    const plan = planBucketFunding(hh, 100_000, 0.5, 0.20);
     expect(plan.perBucket.map((b) => b.bucket)).toEqual([
       "leveragedEquity",
       "regularEquity",
@@ -569,7 +573,7 @@ describe("planBucketFunding", () => {
         holding({ kind: "cash", valueUSD: 50_000 }),
       ]),
     ]);
-    const plan = planBucketFunding(hh, 1_000_000, 0.05, 0.25, 0.20);
+    const plan = planBucketFunding(hh, 1_000_000, 0.25, 0.20);
     expect(plan.shortDurationBondUSD).toBe(200_000);
     expect(plan.effectiveCashEquivalentShare).toBeCloseTo(0.25, 6);
     expect(plan.amountToRaiseUSD).toBeCloseTo(0, 1);
@@ -591,7 +595,7 @@ describe("planBucketFunding", () => {
         holding({ kind: "cash", valueUSD: 50_000 }),
       ]),
     ]);
-    const plan = planBucketFunding(hh, 1_000_000, 0.05, 0.25, 0.20);
+    const plan = planBucketFunding(hh, 1_000_000, 0.25, 0.20);
     expect(plan.shortDurationBondUSD).toBe(100_000);
     expect(plan.effectiveCashEquivalentShare).toBeCloseTo(0.15, 6);
     expect(plan.amountToRaiseUSD).toBeCloseTo(100_000, 1);
@@ -608,7 +612,7 @@ describe("planBucketFunding", () => {
         }),
       ]),
     ]);
-    const plan = planBucketFunding(hh, 100_000, 0, 0.5, 0.20);
+    const plan = planBucketFunding(hh, 100_000, 0.5, 0.20);
     expect(plan.shortDurationBondUSD).toBe(0);
     // The bond IS sold to fund the bucket.
     expect(plan.amountRaisedUSD).toBeCloseTo(50_000, 1);
@@ -634,7 +638,7 @@ describe("planBucketFunding", () => {
         }),
       ]),
     ]);
-    const plan = planBucketFunding(hh, 400_000, 0, 0.5, 0.20);
+    const plan = planBucketFunding(hh, 400_000, 0.5, 0.20);
     expect(plan.excludedUserOptOutUSD).toBe(200_000);
     // Amount to raise = $200k. Only h-sellable is available — gets
     // drained entirely.
@@ -653,11 +657,139 @@ describe("planBucketFunding", () => {
         }),
       ]),
     ]);
-    const plan = planBucketFunding(hh, 100_000, 0, 0.5, 0.20);
+    const plan = planBucketFunding(hh, 100_000, 0.5, 0.20);
     expect(plan.sales).toHaveLength(0);
     // The opt-out is the ONLY potential sale; with it excluded,
     // shortfall is the full amount-to-raise.
     expect(plan.shortfallUSD).toBeCloseTo(50_000, 1);
+  });
+
+  it("effectiveCashFractionPostTax: pure rebalance (no taxable sales) = requested fraction", () => {
+    // Round-1 audit HIGH: simulator must run with the post-tax
+    // effective cash fraction. When taxes are zero (all sales from
+    // tax-advantaged accounts), this equals the user's request.
+    const hh = household([
+      account({ category: "TRAD_IRA" }, [
+        holding({ kind: "equity", valueUSD: 100_000 }),
+      ]),
+    ]);
+    const plan = planBucketFunding(hh, 100_000, 0.4, 0.20);
+    expect(plan.totalTaxOwedUSD).toBe(0);
+    expect(plan.effectiveCashFractionPostTax).toBeCloseTo(0.4, 6);
+  });
+
+  it("effectiveCashFractionPostTax: with taxable sales, fraction is LESS than requested (no phantom cash)", () => {
+    // Round-1 audit HIGH walk-through. NW=$1M, $50k cash + $950k
+    // equity in BROKERAGE. Request 25% cash → need to raise $200k
+    // from equity. Tax = $200k × 1.0 × 0.20 = $40k. Actual cash
+    // = $50k + ($200k - $40k tax) = $210k. Post-tax NW = $960k.
+    // Effective post-tax cash fraction = 210/960 ≈ 21.875%.
+    // The OLD code piped 25% requested through → simulator ran with
+    // 25% × $960k = $240k cash, magicking $30k of cash out of thin
+    // air. Now: simulator runs with 21.875% × $960k = $210k. ✓
+    const hh = household([
+      account({ category: "BROKERAGE" }, [
+        holding({ kind: "equity", valueUSD: 950_000 }),
+        holding({ kind: "cash", valueUSD: 50_000 }),
+      ]),
+    ]);
+    const plan = planBucketFunding(hh, 1_000_000, 0.25, 0.20);
+    expect(plan.totalTaxOwedUSD).toBeCloseTo(40_000, 1);
+    expect(plan.effectiveCashFractionPostTax).toBeCloseTo(210_000 / 960_000, 5);
+    // Strictly less than the requested 25% — no phantom cash.
+    expect(plan.effectiveCashFractionPostTax).toBeLessThan(0.25);
+  });
+
+  it("effectiveCashFractionPostTax: shortfall caps the achievable fraction", () => {
+    // Round-1 audit HIGH: when the sellable pool can't fund the
+    // request, the simulator must run with what's ACTUALLY
+    // achievable, not the requested fraction. NW=$950k, $50k cash,
+    // $100k equity (sellable), $800k primary residence (off-limits).
+    // Request 50%. Raise as much as possible: $100k face → $20k tax
+    // → actual cash = $50k + $80k = $130k. Post-tax NW = $930k.
+    // Effective fraction = 130/930 ≈ 13.98%. Much less than 50%
+    // requested but TRUTHFUL.
+    const hh = household([
+      account({ category: "BROKERAGE" }, [
+        holding({ kind: "equity", valueUSD: 100_000 }),
+        holding({ kind: "cash", valueUSD: 50_000 }),
+      ]),
+      account({ category: "REAL_ESTATE" }, [
+        holding({
+          kind: "real_estate",
+          valueUSD: 800_000,
+          isPrimaryResidence: true,
+        }),
+      ]),
+    ]);
+    const plan = planBucketFunding(hh, 950_000, 0.5, 0.20);
+    expect(plan.shortfallUSD).toBeGreaterThan(0);
+    expect(plan.effectiveCashFractionPostTax).toBeCloseTo(
+      130_000 / 930_000,
+      5,
+    );
+    expect(plan.effectiveCashFractionPostTax).toBeLessThan(0.5);
+  });
+
+  it("excludedHoldingIds: holdings consumed by the deleveraging restructure are SKIPPED (no double-tax)", () => {
+    // Round-1 audit CRITICAL fix. When the caller passes a set of
+    // already-consumed holding IDs (e.g. the deleveraging engine
+    // claimed them), bucket-funding leaves them alone — neither
+    // counted in cash-equivalent, neither sold.
+    const hh = household([
+      account({ category: "BROKERAGE" }, [
+        holding({
+          kind: "equity",
+          symbol: "TQQQ",
+          leverage: 3,
+          valueUSD: 100_000,
+          id: castHoldingId("h-tqqq"),
+        }),
+        holding({
+          kind: "equity",
+          symbol: "SPY",
+          leverage: 1,
+          valueUSD: 100_000,
+          id: castHoldingId("h-spy"),
+        }),
+      ]),
+    ]);
+    const excluded = new Set<string>(["h-tqqq"]);
+    const plan = planBucketFunding(hh, 200_000, 0.5, 0.20, excluded);
+    // Bucket funding must NOT touch TQQQ — falls through to SPY.
+    expect(plan.sales.find((s) => s.holdingId === "h-tqqq")).toBeUndefined();
+    expect(plan.sales.find((s) => s.holdingId === "h-spy")).toBeDefined();
+  });
+
+  it("multi-asset wrapper equity (NTSX, GDE, RSST) is NOT classified as leveragedEquity (regression: shouldn't sell first)", () => {
+    // Round-1 audit MED: NTSX-like wrappers have leverage > 1 but
+    // are designed for long-term hold. Selling them first inverts
+    // user intent. Now classified as `regularEquity`.
+    const hh = household([
+      account({ category: "BROKERAGE" }, [
+        holding({
+          kind: "equity",
+          symbol: "NTSX",
+          leverage: 1.5,
+          valueUSD: 100_000,
+          id: castHoldingId("h-ntsx"),
+        }),
+        holding({
+          kind: "equity",
+          symbol: "TQQQ",
+          leverage: 3,
+          valueUSD: 100_000,
+          id: castHoldingId("h-tqqq"),
+        }),
+      ]),
+    ]);
+    // Need $50k. TQQQ (legitimate 3x leveraged) drains first; NTSX
+    // (wrapper) is treated as regular equity and not touched.
+    const plan = planBucketFunding(hh, 200_000, 0.25, 0.20);
+    expect(
+      plan.sales.find((s) => s.holdingId === "h-tqqq")!.faceValueSoldUSD,
+    ).toBeCloseTo(50_000, 1);
+    expect(plan.sales.find((s) => s.holdingId === "h-ntsx")).toBeUndefined();
   });
 
   it("sales list is sorted by sale priority (leverage desc) for stable UI display", () => {
@@ -686,7 +818,7 @@ describe("planBucketFunding", () => {
         }),
       ]),
     ]);
-    const plan = planBucketFunding(hh, 300_000, 0, 0.99, 0.20);
+    const plan = planBucketFunding(hh, 300_000, 0.99, 0.20);
     // Should sell all three. Sorted by leverage desc: TQQQ → SSO → SPY.
     expect(plan.sales.map((s) => s.label)).toEqual(["TQQQ", "SSO", "SPY"]);
   });

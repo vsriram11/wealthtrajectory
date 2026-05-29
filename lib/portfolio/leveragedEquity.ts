@@ -225,11 +225,22 @@ export function classifyDeleverageStrategy(
  *                      1.0 (conservative). Pass a lower value
  *                      (e.g. 0.5) for a less-conservative model;
  *                      future feature could let the user tune this.
+ * @param consumedByBucketFunding  Optional map of holding-id →
+ *                                 dollars sold by the cash-bucket
+ *                                 funding pathway. When provided,
+ *                                 deleveraging tax + bucket value
+ *                                 are computed against the REMAINING
+ *                                 (unsold) face of each holding —
+ *                                 preventing the Round-1 audit's
+ *                                 double-tax bug (TQQQ taxed once
+ *                                 by bucket funding + once by
+ *                                 deleveraging at face).
  */
 export function computeLeveragedEquityBuckets(
   household: Household,
   retirementTaxRate: number = DEFAULT_RETIREMENT_TAX_RATE,
   gainFraction: number = DEFAULT_GAIN_FRACTION,
+  consumedByBucketFunding?: ReadonlyMap<string, number>,
 ): LeveragedEquityBuckets {
   let stocks2xUSD = 0;
   let nonRecognizedLeveragedUSD = 0;
@@ -264,16 +275,26 @@ export function computeLeveragedEquityBuckets(
       // preset.
       if (SET_MULTI_ASSET_WRAPPER.has(symbol)) continue;
 
+      // Subtract any portion already consumed by the bucket-funding
+      // pathway. The cash-bucket plan may have sold some or all of
+      // a leveraged holding to fund the SORR reserve — that
+      // portion is gone (converted to cash), so the deleveraging
+      // restructure operates only on what remains. Round-1 audit
+      // fix.
+      const consumed = consumedByBucketFunding?.get(holding.id) ?? 0;
+      const remainingValueUSD = Math.max(0, holding.valueUSD - consumed);
+      if (remainingValueUSD <= 0) continue;
+
       if (RECOGNIZED_SET.has(symbol)) {
         // Recognized 2x SPY proxy — already at the modeled leverage,
         // no deleveraging needed, no tax hit.
-        stocks2xUSD += holding.valueUSD;
+        stocks2xUSD += remainingValueUSD;
         continue;
       }
 
       // Non-recognized leveraged: figure out deleverage strategy
       const strategy = classifyDeleverageStrategy(symbol);
-      const value = holding.valueUSD;
+      const value = remainingValueUSD;
       nonRecognizedLeveragedUSD += value;
 
       // Tax hit (if taxable account); tax-advantaged contributes 0.
