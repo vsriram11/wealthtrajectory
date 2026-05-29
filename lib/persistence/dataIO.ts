@@ -346,7 +346,12 @@ export function parseImport(text: string): ExportPayload {
   // rows here (legitimately underwater state is real — see Round-1
   // audit fix in persistence.loadSnapshots).
   if (coerced.snapshots !== undefined && !Array.isArray(coerced.snapshots)) {
-    coerced.snapshots = [];
+    // Round-2 audit fix: was assigning `[]` which is `!== undefined`,
+    // so `applyImportedPayload` would call `replaceAllSnapshots([])`
+    // and silently wipe local IDB rows on import of a corrupt
+    // payload. Deleting the field instead falls through to the
+    // "preserve local" back-compat branch.
+    delete coerced.snapshots;
   }
   if (Array.isArray(coerced.snapshots)) {
     coerced.snapshots = (coerced.snapshots as unknown[]).flatMap((s) => {
@@ -380,6 +385,16 @@ export function parseImport(text: string): ExportPayload {
         (typeof row.appState !== "object" || Array.isArray(row.appState))
       ) {
         delete row.appState;
+      }
+      // `source` must be one of the allowed enum values, else
+      // strip it. Defends against hand-edited JSON with
+      // `source: "auto-prune-me"` or similar.
+      if (
+        row.source != null &&
+        row.source !== "auto" &&
+        row.source !== "manual"
+      ) {
+        delete row.source;
       }
       return [row];
     });

@@ -291,6 +291,16 @@ export function CloudSyncer() {
             return;
           }
 
+          // CRITICAL: include snapshots in the Drive payload.
+          // Round-2 audit fix — the previous inline exportData
+          // call omitted the snapshots field, so every
+          // debounced auto-upload (the common path, fires after
+          // any state change) overwrote Drive with a snapshot-
+          // less backup. A subsequent device wiped/restored
+          // from Drive lost ALL snapshot history. pushToDrive
+          // (cloudSync.ts:460) does it right; this code path
+          // diverged silently.
+          const snapshotsForUpload = await loadSnapshots();
           const json = exportData({
             household: s.household,
             assumptions: s.assumptions,
@@ -305,6 +315,7 @@ export function CloudSyncer() {
             incomeStreams: s.incomeStreams,
             healthPlans: s.healthPlans,
             healthImportanceWeights: s.healthImportanceWeights,
+            snapshots: snapshotsForUpload,
           });
           // When the user has enabled end-to-end encryption (PRD §7.10),
           // wrap the payload in an fp-enc-v1 envelope before upload.

@@ -105,9 +105,19 @@ export function cagr(series: ClassSeries): number | null {
   if (first.valueUSD <= 0) return null;
   const elapsedMs = last.t - first.t;
   if (elapsedMs < 24 * 60 * 60 * 1000) return null;
+  // Total loss: V_end is exactly 0 (e.g. Lehman, a defaulted bond
+  // written off, a delisted stock). The honest CAGR for a position
+  // that went to zero is -100%, not "null/no data" — surfacing
+  // -1 is the most informative thing a returns engine can do.
+  // Audit round-2 BLOCK fix.
+  if (last.valueUSD === 0) return -1;
   const years = elapsedMs / MS_PER_YEAR;
   const ratio = last.valueUSD / first.valueUSD;
-  if (!Number.isFinite(ratio) || ratio <= 0) return null;
+  // ratio < 0 means negative V_end (negative wealth — only
+  // possible if a future engine starts recording net-negative
+  // bucket values like under-water options). For now treat as
+  // pathological and return null.
+  if (!Number.isFinite(ratio) || ratio < 0) return null;
   const result = Math.pow(ratio, 1 / years) - 1;
   return Number.isFinite(result) ? result : null;
 }

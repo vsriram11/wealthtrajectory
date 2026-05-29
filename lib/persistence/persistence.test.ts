@@ -390,6 +390,7 @@ describe("maybeRecordMonthlySnapshot — monthly auto-snapshot policy (R-monthly
       t: Date.UTC(2020, 0, 1, 12, 0, 0, 0),
       netWorthUSD: 50_000,
       label: "Pre-promotion baseline",
+      source: "manual",
     });
     // Then write 4 monthly auto-snapshots with cap=2. After the
     // dust settles, the user-labeled row should still be there
@@ -403,8 +404,82 @@ describe("maybeRecordMonthlySnapshot — monthly auto-snapshot policy (R-monthly
     expect(rows).toHaveLength(3);
     expect(rows.some((r) => r.label === "Pre-promotion baseline")).toBe(true);
     // Auto-rows present: months 2 and 3 (Mar + Apr).
-    const autos = rows.filter((r) => r.label == null);
+    const autos = rows.filter((r) => r.source === "auto");
     expect(autos.map((r) => r.netWorthUSD).sort()).toEqual([102_000, 103_000]);
+  });
+
+  it("does NOT prune UNLABELED MANUAL snapshots (audit BLOCK fix #2 regression pin)", async () => {
+    // Critical audit finding: the prior `label == null` heuristic
+    // conflated "auto" with "unlabeled user save," silently
+    // destroying user data on 240+ month horizons. The
+    // source-field fix distinguishes them explicitly.
+    const { loadSnapshots, maybeRecordMonthlySnapshot, recordSnapshot } =
+      await freshModule();
+    // User manually saves WITHOUT a label (SnapshotsManager allows
+    // this — draftLabel is optional). Pre-fix, this would be
+    // misclassified as auto-prunable.
+    await recordSnapshot({
+      t: Date.UTC(2020, 0, 1, 12, 0, 0, 0),
+      netWorthUSD: 50_000,
+      // No label!
+      source: "manual",
+    });
+    // Drive the auto-snapshotter past its cap with cap=2.
+    for (let m = 0; m < 4; m++) {
+      const t = Date.UTC(2024, m, 15, 12, 0, 0, 0);
+      await maybeRecordMonthlySnapshot(100_000 + m * 1_000, HH, t, 2);
+    }
+    const rows = await loadSnapshots();
+    // The unlabeled manual row from 2020 MUST survive.
+    expect(rows.some((r) => r.t === Date.UTC(2020, 0, 1, 12, 0, 0, 0))).toBe(true);
+    // And it's classified as manual, not auto.
+    const manualRow = rows.find(
+      (r) => r.t === Date.UTC(2020, 0, 1, 12, 0, 0, 0),
+    );
+    expect(manualRow?.source).toBe("manual");
+  });
+
+  it("LEGACY rows (no source field) are treated as untouchable on prune (back-compat)", async () => {
+    // Pre-feature IDB rows lack `source` entirely. The pruner
+    // MUST NOT delete them under the source-fix, because we can't
+    // tell whether they were auto or manual.
+    const { loadSnapshots, maybeRecordMonthlySnapshot, recordSnapshot } =
+      await freshModule();
+    // Simulate a pre-feature row.
+    await recordSnapshot({
+      t: Date.UTC(2020, 0, 1, 12, 0, 0, 0),
+      netWorthUSD: 50_000,
+      // No source, no label — exactly what existed in IDB before this PR.
+    });
+    for (let m = 0; m < 4; m++) {
+      const t = Date.UTC(2024, m, 15, 12, 0, 0, 0);
+      await maybeRecordMonthlySnapshot(100_000 + m * 1_000, HH, t, 2);
+    }
+    const rows = await loadSnapshots();
+    // The legacy row must still be there.
+    expect(rows.some((r) => r.t === Date.UTC(2020, 0, 1, 12, 0, 0, 0))).toBe(true);
+  });
+
+  it("concurrent maybeRecordSnapshot calls don't double-write (audit fix #7 — transactionality)", async () => {
+    // Audit finding: two concurrent invocations both passed the
+    // min-interval check before either wrote, then both wrote
+    // ~1.5s apart with different `t` values. Wrap-in-transaction
+    // fix should serialize the read-check-write.
+    const { loadSnapshots, maybeRecordSnapshot } = await freshModule();
+    const now = 1_700_000_000_000;
+    // Fire 5 concurrent calls all "at" the same time.
+    const results = await Promise.all([
+      maybeRecordSnapshot(100_000, HH, now),
+      maybeRecordSnapshot(100_000, HH, now + 1),
+      maybeRecordSnapshot(100_000, HH, now + 2),
+      maybeRecordSnapshot(100_000, HH, now + 3),
+      maybeRecordSnapshot(100_000, HH, now + 4),
+    ]);
+    // Exactly ONE should have written; the rest no-op via the
+    // min-interval guard (now-last.t = 0..4 ms << 12h window).
+    const wrote = results.filter((r) => r === true).length;
+    expect(wrote).toBe(1);
+    expect(await loadSnapshots()).toHaveLength(1);
   });
 });
 

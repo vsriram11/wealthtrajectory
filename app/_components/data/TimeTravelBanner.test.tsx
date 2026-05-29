@@ -168,6 +168,29 @@ describe("TimeTravelBanner", () => {
     expect(screen.queryByText(/Snapshot saved/i)).toBeNull();
   });
 
+  it("beforeunload listener registered while active, removed on exit (audit UI#7 regression pin)", () => {
+    const addSpy = vi.spyOn(window, "addEventListener");
+    const removeSpy = vi.spyOn(window, "removeEventListener");
+    act(() => {
+      useAppStore.getState().enterTimeTravel("2023-06-15");
+    });
+    const { unmount } = render(<TimeTravelBanner />);
+    // beforeunload registered when active.
+    expect(
+      addSpy.mock.calls.some((args) => args[0] === "beforeunload"),
+    ).toBe(true);
+    // Exit and check removal.
+    act(() => {
+      useAppStore.getState().exitTimeTravelDiscard();
+    });
+    expect(
+      removeSpy.mock.calls.some((args) => args[0] === "beforeunload"),
+    ).toBe(true);
+    unmount();
+    addSpy.mockRestore();
+    removeSpy.mockRestore();
+  });
+
   it("Save flow: malformed parseISO is a no-op (defense against URL/DevTools manipulation)", async () => {
     // Force a malformed date directly into the slice (skipping the
     // modal's validation) to verify the banner's own parseISO

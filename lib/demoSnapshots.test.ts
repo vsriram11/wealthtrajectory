@@ -14,10 +14,18 @@ describe("buildDemoSnapshots", () => {
     }
   });
 
-  it("anchors each snapshot to first-of-month at noon UTC (matches monthly-auto policy)", () => {
+  it("anchors HISTORICAL snapshots to first-of-month noon UTC (matches monthly-auto policy)", () => {
+    // Round-2 audit BLOCK fix: the NEWEST snapshot (monthsAgo=0)
+    // now anchors to `now` itself rather than first-of-current-
+    // month, because the latter could sit weeks behind the wall
+    // clock for users opening the app mid-month. The HISTORICAL
+    // snapshots (monthsAgo >= 1) still anchor to first-of-month
+    // noon UTC for clean primary-key collision with the
+    // production monthly-auto policy.
     const snaps = buildDemoSnapshots(NOW);
-    for (const s of snaps) {
-      const d = new Date(s.t);
+    // All snapshots EXCEPT the newest are at first-of-month noon UTC.
+    for (let i = 0; i < snaps.length - 1; i++) {
+      const d = new Date(snaps[i].t);
       expect(d.getUTCDate()).toBe(1);
       expect(d.getUTCHours()).toBe(12);
       expect(d.getUTCMinutes()).toBe(0);
@@ -25,10 +33,12 @@ describe("buildDemoSnapshots", () => {
     }
   });
 
-  it("newest snapshot anchors to the current calendar month at first-of-month noon UTC", () => {
+  it("newest snapshot anchors to `now` itself (audit BLOCK fix — was first-of-current-month, in the past)", () => {
     const snaps = buildDemoSnapshots(NOW);
     const newest = snaps[snaps.length - 1];
-    expect(newest.t).toBe(Date.UTC(2026, 4, 1, 12, 0, 0, 0)); // 2026-05-01 noon
+    // Now `now` itself, not the first-of-month anchor that could
+    // sit up to ~30 days behind wall clock.
+    expect(newest.t).toBe(NOW);
   });
 
   it("oldest snapshot is 59 months before the newest (5-year window)", () => {

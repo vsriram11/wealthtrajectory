@@ -685,7 +685,13 @@ describe("snapshots in export → parseImport (audit R1 CRITICAL — Drive sync 
     ]);
   });
 
-  it("non-array snapshots field coerces to []", () => {
+  it("non-array snapshots field coerces to UNDEFINED, NOT [] (round-2 audit data-loss fix)", () => {
+    // CRITICAL audit fix: previously this coerced to [] which
+    // is `!== undefined`, so `applyImportedPayload` would call
+    // `replaceAllSnapshots([])` and SILENTLY WIPE local IDB
+    // rows on import of a corrupt payload. The fix deletes the
+    // field instead, falling through to the "preserve local
+    // snapshots when field is absent" back-compat branch.
     const raw = {
       schema: 1,
       exportedAt: Date.now(),
@@ -695,7 +701,7 @@ describe("snapshots in export → parseImport (audit R1 CRITICAL — Drive sync 
       snapshots: { not: "an array" },
     };
     const parsed = parseImport(JSON.stringify(raw));
-    expect(parsed.snapshots).toEqual([]);
+    expect(parsed.snapshots).toBeUndefined();
   });
 
   it("applyImportedPayload does NOT call replaceAllSnapshots when payload has no snapshots field (back-compat invariant)", async () => {

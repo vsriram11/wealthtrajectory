@@ -65,19 +65,27 @@ export function HistoryTab() {
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
   const [loading, setLoading] = useState(true);
 
+  // Two independent effect branches per audit fix UI#6 — the
+  // demo branch must NOT depend on snapshotsRevision (which only
+  // bumps on real-mode IDB writes); otherwise a leftover real-
+  // mode revision value triggers spurious regeneration of the
+  // demo timeline (with a fresh Date.now() anchor, silently
+  // shifting the whole 5-year window).
   useEffect(() => {
+    if (mode !== "demo") return;
+    // Demo timeline is stable across the session — generated
+    // once per entry into demo mode. Anchored to the moment of
+    // entry so the back-cast 5-year window doesn't shift if the
+    // user sits on the tab past midnight.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSnapshots(buildDemoSnapshots(Date.now()));
+    setLoading(false);
+  }, [mode]);
+
+  useEffect(() => {
+    if (mode === "demo") return;
     let cancelled = false;
     void (async () => {
-      // Demo mode: PersistenceHydrator never writes to IDB in demo
-      // (gated by mode === "real"), so loadSnapshots would always
-      // be empty. Fall back to the synthetic 5-year demo history
-      // so the tab has substantive content to show — the same
-      // back-cast holdings the rest of the demo persona uses.
-      if (mode === "demo") {
-        setSnapshots(buildDemoSnapshots(Date.now()));
-        setLoading(false);
-        return;
-      }
       const rows = await loadSnapshots();
       if (cancelled) return;
       setSnapshots(rows);

@@ -215,11 +215,24 @@ function buildBackdatedHousehold(monthsAgo: number): Household {
 }
 
 /**
- * Anchor a timestamp to first-of-month at noon UTC `monthsAgo`
- * months before `now`. Matches `maybeRecordMonthlySnapshot`'s
- * anchoring so demo + real snapshots round-trip identically.
+ * Anchor a timestamp `monthsAgo` months before `now`.
+ *
+ *   - monthsAgo >= 1: first-of-month at noon UTC. Matches
+ *     `maybeRecordMonthlySnapshot`'s anchoring so historical
+ *     demo + real snapshots align on the same primary keys
+ *     (collision-friendly with the production policy).
+ *
+ *   - monthsAgo === 0: `now` itself. Round-2 audit BLOCK fix:
+ *     anchoring "today's" demo snapshot to first-of-current-
+ *     month-at-noon-UTC placed the newest point in the PAST
+ *     (up to ~30 days behind wall clock for users opening the
+ *     app late in the month). Confusing for History charts that
+ *     are supposed to end at "today." The exception means the
+ *     newest demo row sits at the actual current moment, which
+ *     is what users expect.
  */
 function monthAnchor(now: number, monthsAgo: number): number {
+  if (monthsAgo === 0) return now;
   const d = new Date(now);
   const targetMonth = d.getUTCMonth() - monthsAgo;
   return Date.UTC(

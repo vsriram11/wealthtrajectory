@@ -1800,3 +1800,154 @@ describe("tax model — property-based invariants", () => {
     );
   });
 });
+
+/* =============================================================
+ * historicalReturns + demoSnapshots invariants — round-2 audit
+ * property-test set. Pins consistency between cagr / totalReturn,
+ * bounds on drawdown, demo-timeline shape.
+ * =========================================================== */
+
+describe("historicalReturns — algebraic invariants", () => {
+  const lazyImports = async () => {
+    const hr = await import("@/lib/portfolio/historicalReturns");
+    const ds = await import("@/lib/demoSnapshots");
+    return { ...hr, ...ds };
+  };
+
+  const MS_PER_YEAR_LOCAL = 365.25 * 24 * 60 * 60 * 1000;
+  const t0 = 1_700_000_000_000;
+
+  function twoPointSeries(
+    vStart: number,
+    vEnd: number,
+    years: number,
+  ): Array<{ t: number; valueUSD: number }> {
+    return [
+      { t: t0, valueUSD: vStart },
+      { t: t0 + years * MS_PER_YEAR_LOCAL, valueUSD: vEnd },
+    ];
+  }
+
+  it("cagr is monotone in V_end (V_start fixed)", async () => {
+    const { cagr } = await lazyImports();
+    fc.assert(
+      fc.property(
+        fc.double({ min: 1, max: 1e6, noNaN: true, noDefaultInfinity: true }),
+        fc.double({ min: 1, max: 1e6, noNaN: true, noDefaultInfinity: true }),
+        fc.double({ min: 1, max: 1e6, noNaN: true, noDefaultInfinity: true }),
+        fc.double({ min: 0.5, max: 30, noNaN: true, noDefaultInfinity: true }),
+        (vStart, vEndA, vEndB, years) => {
+          const [lo, hi] = vEndA <= vEndB ? [vEndA, vEndB] : [vEndB, vEndA];
+          const cLo = cagr(twoPointSeries(vStart, lo, years));
+          const cHi = cagr(twoPointSeries(vStart, hi, years));
+          expect(cLo).not.toBeNull();
+          expect(cHi).not.toBeNull();
+          expect(cHi!).toBeGreaterThanOrEqual(cLo! - 1e-12);
+        },
+      ),
+      { numRuns: 200 },
+    );
+  });
+
+  it("cagr === 0 when V_end === V_start (no return)", async () => {
+    const { cagr } = await lazyImports();
+    fc.assert(
+      fc.property(
+        fc.double({ min: 1, max: 1e9, noNaN: true, noDefaultInfinity: true }),
+        fc.double({ min: 0.5, max: 30, noNaN: true, noDefaultInfinity: true }),
+        (v, years) => {
+          const c = cagr(twoPointSeries(v, v, years));
+          expect(c).not.toBeNull();
+          expect(Math.abs(c!)).toBeLessThan(1e-12);
+        },
+      ),
+      { numRuns: 100 },
+    );
+  });
+
+  it("cagr === -1 when V_end is exactly 0 (audit BLOCK fix for total loss)", async () => {
+    const { cagr } = await lazyImports();
+    fc.assert(
+      fc.property(
+        fc.double({ min: 1, max: 1e9, noNaN: true, noDefaultInfinity: true }),
+        fc.double({ min: 0.5, max: 30, noNaN: true, noDefaultInfinity: true }),
+        (vStart, years) => {
+          const c = cagr(twoPointSeries(vStart, 0, years));
+          expect(c).toBe(-1);
+        },
+      ),
+      { numRuns: 50 },
+    );
+  });
+
+  it("1 + totalReturn === (1 + cagr)^years (algebraic consistency)", async () => {
+    const { cagr, totalReturn } = await lazyImports();
+    fc.assert(
+      fc.property(
+        fc.double({ min: 1, max: 1e6, noNaN: true, noDefaultInfinity: true }),
+        fc.double({ min: 1, max: 1e6, noNaN: true, noDefaultInfinity: true }),
+        fc.double({ min: 0.5, max: 30, noNaN: true, noDefaultInfinity: true }),
+        (vStart, vEnd, years) => {
+          const s = twoPointSeries(vStart, vEnd, years);
+          const tr = totalReturn(s);
+          const cg = cagr(s);
+          expect(tr).not.toBeNull();
+          expect(cg).not.toBeNull();
+          const lhs = 1 + tr!;
+          const rhs = Math.pow(1 + cg!, years);
+          expect(Math.abs(lhs - rhs)).toBeLessThan(
+            Math.max(1e-6, Math.abs(lhs) * 1e-8),
+          );
+        },
+      ),
+      { numRuns: 200 },
+    );
+  });
+
+  it("maxDrawdown.lossPct ∈ [0, 1] for any non-negative series", async () => {
+    const { maxDrawdown } = await lazyImports();
+    const seriesArb = fc
+      .array(
+        fc.double({
+          min: 0.01,
+          max: 1e9,
+          noNaN: true,
+          noDefaultInfinity: true,
+        }),
+        { minLength: 2, maxLength: 80 },
+      )
+      .map((vals) =>
+        vals.map((v, i) => ({ t: i * (MS_PER_YEAR_LOCAL / 12), valueUSD: v })),
+      );
+    fc.assert(
+      fc.property(seriesArb, (s) => {
+        const dd = maxDrawdown(s);
+        if (dd === null) return;
+        expect(dd.lossPct).toBeGreaterThanOrEqual(0);
+        expect(dd.lossPct).toBeLessThanOrEqual(1);
+      }),
+      { numRuns: 200 },
+    );
+  });
+
+  it("demoSnapshots: class series span the full window with monotone-ascending t", async () => {
+    const { buildDemoSnapshots, buildAssetClassSeries } = await lazyImports();
+    const now = Date.UTC(2026, 4, 15, 12);
+    const snaps = buildDemoSnapshots(now, 60);
+    const series = buildAssetClassSeries(snaps);
+    for (const [, ser] of Object.entries(series)) {
+      expect(ser!.length).toBe(60);
+      for (let i = 1; i < ser!.length; i++) {
+        expect(ser![i].t).toBeGreaterThan(ser![i - 1].t);
+      }
+      // Historical points (all but newest) at first-of-month
+      // noon UTC. The newest = `now` itself per the audit fix.
+      for (let i = 0; i < ser!.length - 1; i++) {
+        const d = new Date(ser![i].t);
+        expect(d.getUTCDate()).toBe(1);
+        expect(d.getUTCHours()).toBe(12);
+      }
+    }
+    expect(Object.keys(series).length).toBeGreaterThan(0);
+  });
+});

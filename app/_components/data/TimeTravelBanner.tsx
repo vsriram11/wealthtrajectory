@@ -110,6 +110,12 @@ export function TimeTravelBanner() {
         netWorthUSD: householdNetWorth(householdClone),
         household: householdClone,
         appState,
+        // Manual provenance — protects this snapshot from being
+        // auto-pruned by the monthly cap. Time-travel snapshots
+        // are deliberate user actions and should be as durable
+        // as the labeled checkpoint-style snapshots from
+        // SnapshotsManager.
+        source: "manual",
       };
       await recordSnapshot(snap);
       // Bump the snapshot revision so CloudSyncer sees the
@@ -134,6 +140,12 @@ export function TimeTravelBanner() {
     exitTimeTravelDiscard();
   };
 
+  // Contrast note (audit UI#8 follow-up): `text-bg = #0a0d12`
+  // (near-black) on `bg-amber-300/95 = #fcd34d` (bright amber)
+  // produces a contrast ratio of ~13.7:1 — clears WCAG AAA
+  // (7:1) comfortably. The app is dark-mode-only (no light
+  // theme defined in tailwind.config.ts), so there's no
+  // alternate theme where this would regress.
   return (
     <div
       role="region"

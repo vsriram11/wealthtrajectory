@@ -181,6 +181,15 @@ export function AuthHydrator() {
         } else if (s.mode !== "real" || isDemoHousehold(s.household)) {
           // Signed-in user starting fresh — drop them into empty real mode.
           s.switchToReal();
+          // Round-2 audit fix: include snapshots even on the
+          // fresh-install upload path. Typically empty for a new
+          // user but a returning user could land here too (e.g.
+          // they had local IDB snapshots from a prior signed-out
+          // session, then signed in for the first time — those
+          // pre-signin snapshots must reach Drive).
+          const snapshotsForUpload = await (
+            await import("@/lib/persistence/persistence")
+          ).loadSnapshots();
           const json = exportData({
             household: useAppStore.getState().household,
             assumptions: useAppStore.getState().assumptions,
@@ -195,6 +204,7 @@ export function AuthHydrator() {
             incomeStreams: useAppStore.getState().incomeStreams,
             healthPlans: useAppStore.getState().healthPlans,
             healthImportanceWeights: useAppStore.getState().healthImportanceWeights,
+            snapshots: snapshotsForUpload,
           });
           const passphrase =
             useAppStore.getState().encryptionPassphrase;

@@ -253,6 +253,12 @@ export function SnapshotsManager() {
             }
           : {}),
         ...(draftLabel.trim() ? { label: draftLabel.trim() } : {}),
+        // Manual provenance — protects this snapshot from being
+        // auto-pruned. SnapshotsManager allows unlabeled saves
+        // (draftLabel is optional), and the previous prune logic
+        // (label == null → safe to delete) silently destroyed
+        // unlabeled user saves on 240+ month horizons.
+        source: "manual",
       };
       await recordSnapshot(snap);
       bumpSnapshotsRevision();
@@ -385,6 +391,12 @@ export function SnapshotsManager() {
         ...(original.appState
           ? { appState: structuredClone(original.appState) }
           : {}),
+        // Editing through SnapshotsManager is a manual action —
+        // upgrade source to "manual" even if the original was
+        // an auto-snapshot the user adopted. Without this,
+        // editing an auto-row would leave source="auto" and
+        // the row could later be pruned despite user intent.
+        source: "manual",
       };
       // If editLabel was cleared but original had a label, drop the
       // field (since the spread above only includes it conditionally).

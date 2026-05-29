@@ -116,6 +116,23 @@ export type Snapshot = {
    * back to the date when absent.
    */
   label?: string;
+  /**
+   * Provenance flag distinguishing auto-snapshots from user-
+   * initiated ones. `maybeRecordSnapshot` and
+   * `maybeRecordMonthlySnapshot` stamp `"auto"`; SnapshotsManager
+   * + TimeTravelBanner stamp `"manual"`. The monthly-prune cap
+   * ONLY prunes `source === "auto"` rows, protecting unlabeled
+   * user-saved snapshots from being silently deleted on
+   * long-horizon installs (audit round-2 BLOCK fix — the
+   * previous `label == null` heuristic conflated "auto" with
+   * "unlabeled user save," and the UI explicitly allows the
+   * latter via SnapshotsManager.handleAdd).
+   *
+   * Back-compat: absent on pre-feature rows. The pruner treats
+   * `source` not exactly equal to `"auto"` as untouchable — so
+   * legacy IDB rows survive the cap unchanged.
+   */
+  source?: "auto" | "manual";
 };
 
 /**
@@ -152,7 +169,58 @@ type SnapshotRow = {
   household?: Household;
   appState?: SnapshotAppState;
   label?: string;
+  source?: "auto" | "manual";
 };
+
+/**
+ * Single source of truth for the field set we persist on a
+ * snapshot row. `replaceAllSnapshots` (and the JSON-import path)
+ * uses this to spread-through every known field rather than a
+ * hand-maintained whitelist — the previous whitelist silently
+ * dropped `appState` until the audit caught it (cf. 8d5d5b6).
+ *
+ * Adding a new field to `Snapshot` MUST add the key here too,
+ * and the compile-time exhaustiveness check below will fail until
+ * it does.
+ */
+export const SNAPSHOT_PERSISTED_FIELDS = [
+  "t",
+  "netWorthUSD",
+  "household",
+  "appState",
+  "label",
+  "source",
+] as const;
+
+// Compile-time exhaustiveness check: this type alias compiles iff
+// every key of `Snapshot` is listed in SNAPSHOT_PERSISTED_FIELDS.
+// If you add a field to `Snapshot` and forget to add it above,
+// _SnapshotFieldCoverage resolves to `never` and TypeScript
+// fails. Defense against the "I added a field but forgot
+// replaceAllSnapshots" footgun.
+type _SnapshotFieldCoverage = Exclude<
+  keyof Snapshot,
+  (typeof SNAPSHOT_PERSISTED_FIELDS)[number]
+> extends never
+  ? true
+  : never;
+// Force the type to be evaluated so a divergence is a compile
+// error, not a silent dead branch.
+const _ensureSnapshotFieldCoverage: _SnapshotFieldCoverage = true;
+void _ensureSnapshotFieldCoverage;
+
+function snapshotToRow(s: Snapshot): SnapshotRow {
+  // Build the row by picking known fields from `s`. Unknown
+  // fields (e.g. a hand-edited JSON with `notes: "x"`) are
+  // stripped here — Dexie tolerates extras but we don't want
+  // foreign keys to leak into our IDB rows.
+  const row: SnapshotRow = { t: s.t, netWorthUSD: s.netWorthUSD };
+  if (s.household !== undefined) row.household = s.household;
+  if (s.appState !== undefined) row.appState = s.appState;
+  if (s.label !== undefined) row.label = s.label;
+  if (s.source !== undefined) row.source = s.source;
+  return row;
+}
 
 class WealthTrajectoryDB extends Dexie {
   kv!: Table<KvRow, string>;
@@ -262,7 +330,11 @@ export async function recordSnapshot(snapshot: Snapshot): Promise<void> {
   const handle = getDB();
   if (!handle) return;
   try {
-    await handle.snapshots.put(snapshot);
+    // Route through snapshotToRow so a hand-built Snapshot with
+    // extras (or one missing the new `source` field that we
+    // want pruned-safe) goes through the same projection as
+    // bulk imports.
+    await handle.snapshots.put(snapshotToRow(snapshot));
   } catch (e) {
     console.warn("WealthTrajectory: failed to record snapshot", e);
   }
@@ -325,22 +397,14 @@ export async function replaceAllSnapshots(rows: Snapshot[]): Promise<void> {
     await handle.snapshots.clear();
     if (rows.length > 0) {
       try {
-        // CRITICAL: include every field of the Snapshot schema —
-        // the previous whitelist {t, netWorthUSD, household, label}
-        // silently DROPPED `appState` on every Drive-restore and
-        // JSON-import path, which defeated the entire snapshot-
-        // appState feature on round-trip. New fields added to the
-        // Snapshot type MUST be added here too (or refactored to a
-        // pass-through that strips only unknown keys).
-        await handle.snapshots.bulkPut(
-          rows.map((r) => ({
-            t: r.t,
-            netWorthUSD: r.netWorthUSD,
-            ...(r.household ? { household: r.household } : {}),
-            ...(r.appState ? { appState: r.appState } : {}),
-            ...(r.label ? { label: r.label } : {}),
-          })),
-        );
+        // Use the shared snapshotToRow helper so adding a new
+        // field to Snapshot lights up persistence + sync + import
+        // automatically. The compile-time _SnapshotFieldCoverage
+        // check (above) enforces that the helper stays in lock-
+        // step with the type. Round-2 audit fix: replaced the
+        // hand-maintained whitelist (which silently dropped
+        // `appState` until 8d5d5b6 caught it via test).
+        await handle.snapshots.bulkPut(rows.map(snapshotToRow));
       } catch (e) {
         // Dexie's `bulkPut` resolves with a BulkError on partial
         // failures BY DEFAULT (the txn commits with whatever rows
@@ -414,13 +478,32 @@ export async function maybeRecordSnapshot(
   const handle = getDB();
   if (!handle) return false;
   try {
-    const last = await handle.snapshots.orderBy("t").reverse().first();
-    if (last && now - last.t < minIntervalMs) return false;
-    const row: SnapshotRow = { t: now, netWorthUSD };
-    if (household) row.household = household;
-    if (appState) row.appState = appState;
-    await handle.snapshots.put(row);
-    return true;
+    // Wrap the read-check-write in a Dexie transaction so two
+    // concurrent invocations (e.g. PersistenceHydrator's
+    // baseline-effect AND its subscribe-debounce firing within
+    // 1.5s of each other) can't BOTH pass the min-interval
+    // check, BOTH put rows, and end up with two near-duplicate
+    // snapshots ~1.5s apart. Round-2 audit fix #7.
+    let wrote = false;
+    await handle.transaction("rw", handle.snapshots, async () => {
+      const last = await handle.snapshots.orderBy("t").reverse().first();
+      if (last && now - last.t < minIntervalMs) return;
+      const row: SnapshotRow = {
+        t: now,
+        netWorthUSD,
+        // Auto-snapshotter stamp — the prune logic uses this to
+        // distinguish auto rows (safely deletable past the cap)
+        // from manual user saves (untouchable). The previous
+        // `label == null` heuristic mis-classified unlabeled
+        // manual saves; this is explicit.
+        source: "auto",
+      };
+      if (household) row.household = household;
+      if (appState) row.appState = appState;
+      await handle.snapshots.put(row);
+      wrote = true;
+    });
+    return wrote;
   } catch (e) {
     console.warn("WealthTrajectory: failed to maybe-record", e);
     return false;
@@ -474,38 +557,48 @@ export async function maybeRecordMonthlySnapshot(
     0,
   );
   try {
-    // Same-month idempotency: if a row already exists at this
-    // monthAnchor, refuse to overwrite (don't clobber a user's
-    // mid-month manual snapshot OR another auto-snapshot from
-    // earlier this month with potentially-different state). This
-    // is the "first-call wins" semantic per the policy.
-    const existing = await handle.snapshots.get(monthAnchor);
-    if (existing) return false;
-    const row: SnapshotRow = { t: monthAnchor, netWorthUSD };
-    if (household) row.household = household;
-    if (appState) row.appState = appState;
-    await handle.snapshots.put(row);
-    // Prune oldest auto-snapshots (unlabeled) past the cap.
-    if (maxAutoRows > 0) {
-      const all = await handle.snapshots.orderBy("t").toArray();
-      // Identify auto-snapshots: lack of `label` is the marker.
-      // EXCLUDE the row we just inserted — without this, an
-      // already-over-cap collection plus a put at an old
-      // monthAnchor could immediately prune the just-inserted
-      // row, defeating the whole monthly cadence.
-      const autoRows = all.filter(
-        (r) => r.label == null && r.t !== monthAnchor,
-      );
-      if (autoRows.length > maxAutoRows - 1) {
-        const overflow = autoRows.length - (maxAutoRows - 1);
-        // Oldest first — autoRows is already sorted by t ascending.
-        const toDelete = autoRows.slice(0, overflow).map((r) => r.t);
-        await Promise.all(
-          toDelete.map((t) => handle.snapshots.delete(t)),
+    // Wrap read-check-write in a transaction (same rationale as
+    // maybeRecordSnapshot — concurrent mounts must not
+    // double-write at this anchor). Round-2 audit fix #7.
+    let wrote = false;
+    await handle.transaction("rw", handle.snapshots, async () => {
+      // Same-month idempotency: if a row already exists at this
+      // monthAnchor (auto OR manual), refuse to overwrite. This
+      // is the "first-call wins" semantic per the policy.
+      const existing = await handle.snapshots.get(monthAnchor);
+      if (existing) return;
+      const row: SnapshotRow = {
+        t: monthAnchor,
+        netWorthUSD,
+        source: "auto",
+      };
+      if (household) row.household = household;
+      if (appState) row.appState = appState;
+      await handle.snapshots.put(row);
+      // Prune oldest AUTO snapshots past the cap. Uses the
+      // explicit `source === "auto"` marker (round-2 audit fix
+      // — the previous `label == null` heuristic mis-classified
+      // unlabeled manual saves as auto-prunable). Legacy rows
+      // (lacking `source` entirely, from pre-feature IDB) are
+      // treated as untouchable for safety. EXCLUDE the row we
+      // just inserted from the prune pool — see existing
+      // comment for the over-cap-old-anchor edge case.
+      if (maxAutoRows > 0) {
+        const all = await handle.snapshots.orderBy("t").toArray();
+        const autoRows = all.filter(
+          (r) => r.source === "auto" && r.t !== monthAnchor,
         );
+        if (autoRows.length > maxAutoRows - 1) {
+          const overflow = autoRows.length - (maxAutoRows - 1);
+          const toDelete = autoRows.slice(0, overflow).map((r) => r.t);
+          await Promise.all(
+            toDelete.map((t) => handle.snapshots.delete(t)),
+          );
+        }
       }
-    }
-    return true;
+      wrote = true;
+    });
+    return wrote;
   } catch (e) {
     console.warn("WealthTrajectory: failed to maybe-record-monthly", e);
     return false;
