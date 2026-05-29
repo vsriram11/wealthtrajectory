@@ -1,0 +1,510 @@
+import { describe, expect, it } from "vitest";
+
+import {
+  EMPTY_INCOME,
+  FEDERAL_LTCG_BRACKETS_2025,
+  FEDERAL_ORDINARY_BRACKETS_2025,
+  STANDARD_DEDUCTION_2025,
+  computeFederalTax,
+  computeStateTax,
+  computeUsTax,
+  type UsTaxInputs,
+} from "./usTax";
+import { US_STATE_NAMES, type USState } from "./usStateTaxBrackets";
+
+const baseInputs = (overrides: Partial<UsTaxInputs> = {}): UsTaxInputs => ({
+  taxYear: 2025,
+  filingStatus: "single",
+  state: "NONE",
+  income: { ...EMPTY_INCOME, ...(overrides.income ?? {}) },
+  retirementContribUSD: overrides.retirementContribUSD ?? 0,
+  itemizedDeductionUSD:
+    overrides.itemizedDeductionUSD === undefined
+      ? null
+      : overrides.itemizedDeductionUSD,
+  ...(overrides.filingStatus !== undefined
+    ? { filingStatus: overrides.filingStatus }
+    : {}),
+  ...(overrides.state !== undefined ? { state: overrides.state } : {}),
+});
+
+describe("computeFederalTax — zero / boundary cases", () => {
+  it("zero income → zero tax for any filing status", () => {
+    for (const fs of ["single", "mfj", "hoh", "mfs"] as const) {
+      const r = computeFederalTax(baseInputs({ filingStatus: fs }));
+      expect(r.totalFederalTaxUSD).toBe(0);
+      expect(r.effectiveRateOverall).toBe(0);
+      expect(r.marginalRateOrdinary).toBe(0);
+    }
+  });
+
+  it("NaN-safety: NaN inputs degrade to zero, never NaN/Infinity", () => {
+    const r = computeFederalTax({
+      taxYear: 2025,
+      filingStatus: "single",
+      state: "NONE",
+      income: {
+        wagesUSD: Number.NaN,
+        selfEmploymentUSD: Number.NaN,
+        interestIncomeUSD: Number.NaN,
+        ordinaryDividendsUSD: Number.NaN,
+        shortTermCapGainsUSD: Number.NaN,
+        qualifiedDividendsUSD: Number.NaN,
+        longTermCapGainsUSD: Number.NaN,
+        otherOrdinaryUSD: Number.NaN,
+      },
+      retirementContribUSD: Number.NaN,
+      itemizedDeductionUSD: Number.NaN,
+    });
+    expect(Number.isFinite(r.totalFederalTaxUSD)).toBe(true);
+    expect(r.totalFederalTaxUSD).toBe(0);
+  });
+
+  it("negative income inputs are clamped to zero", () => {
+    const r = computeFederalTax(
+      baseInputs({ income: { ...EMPTY_INCOME, wagesUSD: -1000 } }),
+    );
+    expect(r.totalFederalTaxUSD).toBe(0);
+  });
+});
+
+describe("computeFederalTax — single filer ordinary brackets", () => {
+  it("$50k wages, single → known ordinary tax (post standard deduction)", () => {
+    const r = computeFederalTax(
+      baseInputs({ income: { ...EMPTY_INCOME, wagesUSD: 50_000 } }),
+    );
+    // AGI = 50,000; taxable = 50,000 − 15,000 = 35,000
+    // Tax: 11,925 × 10% = 1,192.50; (35,000 − 11,925) × 12% = 2,769.00
+    // = 3,961.50 federal income tax
+    expect(r.taxableOrdinaryIncomeUSD).toBe(35_000);
+    expect(r.ordinaryTaxUSD).toBeCloseTo(3_961.5, 2);
+    // Plus FICA: SS 50k * 6.2% = 3,100; Medicare 50k * 1.45% = 725
+    expect(r.ficaSsUSD).toBeCloseTo(3_100, 2);
+    expect(r.ficaMedicareUSD).toBeCloseTo(725, 2);
+    expect(r.additionalMedicareUSD).toBe(0);
+  });
+
+  it("marginal rate reflects the top occupied bracket", () => {
+    const r = computeFederalTax(
+      baseInputs({ income: { ...EMPTY_INCOME, wagesUSD: 200_000 } }),
+    );
+    // Taxable 185,000 → top of 24% bracket (kicks in at 103,350; ceiling 197,300)
+    expect(r.marginalRateOrdinary).toBe(0.24);
+  });
+});
+
+describe("computeFederalTax — MFJ", () => {
+  it("MFJ $100k wages + $20k LTCG: ordinary tax + 0% LTCG fill below threshold", () => {
+    const r = computeFederalTax(
+      baseInputs({
+        filingStatus: "mfj",
+        income: {
+          ...EMPTY_INCOME,
+          wagesUSD: 100_000,
+          longTermCapGainsUSD: 20_000,
+        },
+      }),
+    );
+    // Ordinary AGI 100k; taxable 100k − 30k = 70,000
+    // 10% on 23,850 = 2,385; 12% on (70k − 23,850) = 12% × 46,150 = 5,538
+    // Ordinary tax ≈ 7,923
+    expect(r.ordinaryTaxUSD).toBeCloseTo(7_923, 2);
+    // LTCG starts at $70k stacked; MFJ 0% bracket ends at 96,700
+    // → all $20k LTCG falls in 0% bracket
+    expect(r.ltcgTaxUSD).toBe(0);
+    expect(r.marginalRateLTCG).toBe(0); // top dollar in 0% bracket
+  });
+
+  it("MFS bracket thresholds equal single (except top); top kicks in at $375,800", () => {
+    expect(FEDERAL_ORDINARY_BRACKETS_2025.mfs[6].threshold).toBe(375_800);
+    expect(FEDERAL_ORDINARY_BRACKETS_2025.single[6].threshold).toBe(626_350);
+  });
+});
+
+describe("computeFederalTax — LTCG stacking", () => {
+  it("$20k wages + $80k LTCG single: 0% bracket on most LTCG", () => {
+    const r = computeFederalTax(
+      baseInputs({
+        income: {
+          ...EMPTY_INCOME,
+          wagesUSD: 20_000,
+          longTermCapGainsUSD: 80_000,
+        },
+      }),
+    );
+    // AGI = 100k; deduction 15k applied to ordinary first
+    // taxableOrdinary = 20k − 15k = 5,000 (all in 10%)
+    // Ordinary tax = 500
+    expect(r.taxableOrdinaryIncomeUSD).toBe(5_000);
+    expect(r.ordinaryTaxUSD).toBeCloseTo(500, 2);
+    // LTCG = 80k, stacks at 5k; 0% bracket ends at 48,350
+    // → 48,350 − 5,000 = 43,350 of LTCG in 0%
+    // → 80,000 − 43,350 = 36,650 at 15% = 5,497.50
+    expect(r.ltcgTaxUSD).toBeCloseTo(5_497.5, 2);
+  });
+
+  it("wealth-analyze-style example: $40k wages + $50k LTCG single", () => {
+    // 2025 brackets:
+    //   ordinary taxable = 40k − 15k = 25k
+    //   10% on 11,925 = 1,192.50
+    //   12% on (25,000 − 11,925) = 12% × 13,075 = 1,569.00
+    //   ordinary tax = 2,761.50
+    //
+    //   LTCG starts at 25k stacked. 0% bracket ends at 48,350.
+    //   → 23,350 of LTCG at 0%
+    //   → 50,000 − 23,350 = 26,650 at 15% = 3,997.50
+    const r = computeFederalTax(
+      baseInputs({
+        income: {
+          ...EMPTY_INCOME,
+          wagesUSD: 40_000,
+          longTermCapGainsUSD: 50_000,
+        },
+      }),
+    );
+    expect(r.taxableOrdinaryIncomeUSD).toBe(25_000);
+    expect(r.ordinaryTaxUSD).toBeCloseTo(2_761.5, 2);
+    expect(r.ltcgTaxUSD).toBeCloseTo(3_997.5, 2);
+  });
+
+  it("LTCG bracket breakdown rows always cover all schedule brackets", () => {
+    const r = computeFederalTax(
+      baseInputs({ income: { ...EMPTY_INCOME, wagesUSD: 50_000 } }),
+    );
+    expect(r.ltcgBracketBreakdown).toHaveLength(
+      FEDERAL_LTCG_BRACKETS_2025.single.length,
+    );
+  });
+
+  it("qualified dividends are taxed at LTCG rates, not ordinary", () => {
+    const r = computeFederalTax(
+      baseInputs({
+        income: {
+          ...EMPTY_INCOME,
+          wagesUSD: 50_000,
+          ordinaryDividendsUSD: 10_000,
+          qualifiedDividendsUSD: 10_000,
+        },
+      }),
+    );
+    // ordinary divs $10k = qualified divs $10k → 0 non-qual divs
+    // ordinaryIncome = 50,000 wages; taxable = 35,000
+    // ordTax same as $50k wages alone = 3,961.50
+    expect(r.ordinaryTaxUSD).toBeCloseTo(3_961.5, 2);
+    // LTCG = $10k qualified divs, stacks at 35k.
+    // 0% bracket ends 48,350; 10k all in 0%.
+    expect(r.ltcgTaxUSD).toBe(0);
+  });
+});
+
+describe("computeFederalTax — Medicare / NIIT", () => {
+  it("Additional Medicare 0.9% kicks in above threshold for single ($200k)", () => {
+    const r = computeFederalTax(
+      baseInputs({ income: { ...EMPTY_INCOME, wagesUSD: 300_000 } }),
+    );
+    // 100k wages above threshold * 0.9% = 900
+    expect(r.additionalMedicareUSD).toBeCloseTo(900, 2);
+  });
+
+  it("MFJ Additional Medicare threshold is $250k", () => {
+    const r = computeFederalTax(
+      baseInputs({
+        filingStatus: "mfj",
+        income: { ...EMPTY_INCOME, wagesUSD: 300_000 },
+      }),
+    );
+    // 50k above threshold * 0.9% = 450
+    expect(r.additionalMedicareUSD).toBeCloseTo(450, 2);
+  });
+
+  it("NIIT 3.8% applies to investment income above MAGI threshold", () => {
+    const r = computeFederalTax(
+      baseInputs({
+        income: {
+          ...EMPTY_INCOME,
+          wagesUSD: 180_000,
+          longTermCapGainsUSD: 50_000,
+        },
+      }),
+    );
+    // MAGI ≈ 230k. AGI = 180k + 50k = 230k.
+    // Above 200k threshold by 30k. NII = 50k.
+    // NIIT = 3.8% × min(50k, 30k) = 3.8% × 30k = 1,140
+    expect(r.niitUSD).toBeCloseTo(1_140, 2);
+  });
+
+  it("No NIIT when investment income is zero", () => {
+    const r = computeFederalTax(
+      baseInputs({ income: { ...EMPTY_INCOME, wagesUSD: 500_000 } }),
+    );
+    expect(r.niitUSD).toBe(0);
+  });
+});
+
+describe("computeFederalTax — Social Security wage base", () => {
+  it("SS portion caps at 2025 wage base ($176,100)", () => {
+    const r = computeFederalTax(
+      baseInputs({ income: { ...EMPTY_INCOME, wagesUSD: 300_000 } }),
+    );
+    expect(r.ficaSsUSD).toBeCloseTo(176_100 * 0.062, 2);
+  });
+
+  it("Medicare 1.45% has no cap", () => {
+    const r = computeFederalTax(
+      baseInputs({ income: { ...EMPTY_INCOME, wagesUSD: 500_000 } }),
+    );
+    expect(r.ficaMedicareUSD).toBeCloseTo(500_000 * 0.0145, 2);
+  });
+});
+
+describe("computeFederalTax — Self-employment", () => {
+  it("SE tax = 15.3% of 92.35% of SE income; half is deductible", () => {
+    const r = computeFederalTax(
+      baseInputs({ income: { ...EMPTY_INCOME, selfEmploymentUSD: 50_000 } }),
+    );
+    // Net SE = 50,000 * 0.9235 = 46,175
+    // SE tax = 46,175 * 0.153 = 7,064.78
+    expect(r.seTaxUSD).toBeCloseTo(46_175 * 0.153, 2);
+    // Half SE tax deductible → preTaxAdjustments includes that half
+    expect(r.preTaxAdjustmentsUSD).toBeCloseTo(r.seTaxUSD / 2, 2);
+  });
+
+  it("Self-employed at $100k → known total federal tax", () => {
+    const r = computeFederalTax(
+      baseInputs({
+        income: { ...EMPTY_INCOME, selfEmploymentUSD: 100_000 },
+      }),
+    );
+    // Net SE = 92,350; SE tax = 14,129.55
+    // Half-SE = 7,064.775
+    // ordinaryAfterAdj = 100,000 − 7,064.775 = 92,935.225
+    // taxable = 92,935.225 − 15,000 = 77,935.225
+    // Tax: 11,925*0.10 + (48,475-11,925)*0.12 + (77,935.225-48,475)*0.22
+    //    = 1,192.50 + 4,386.00 + 6,481.35 = 12,059.85 (approx)
+    expect(r.seTaxUSD).toBeCloseTo(14_129.55, 2);
+    expect(r.ordinaryTaxUSD).toBeCloseTo(12_059.75, 1);
+    expect(r.totalFederalTaxUSD).toBeCloseTo(
+      r.seTaxUSD + r.ordinaryTaxUSD,
+      1,
+    );
+  });
+});
+
+describe("computeFederalTax — Deductions", () => {
+  it("itemized > standard → itemized honored", () => {
+    const r = computeFederalTax(
+      baseInputs({
+        income: { ...EMPTY_INCOME, wagesUSD: 100_000 },
+        itemizedDeductionUSD: 25_000,
+      }),
+    );
+    expect(r.deductionUSD).toBe(25_000);
+    expect(r.deductionSource).toBe("itemized");
+  });
+
+  it("itemized < standard → standard wins", () => {
+    const r = computeFederalTax(
+      baseInputs({
+        income: { ...EMPTY_INCOME, wagesUSD: 100_000 },
+        itemizedDeductionUSD: 5_000,
+      }),
+    );
+    expect(r.deductionUSD).toBe(STANDARD_DEDUCTION_2025.single);
+    expect(r.deductionSource).toBe("standard");
+  });
+
+  it("retirement contributions reduce wages above-the-line", () => {
+    const r = computeFederalTax(
+      baseInputs({
+        income: { ...EMPTY_INCOME, wagesUSD: 100_000 },
+        retirementContribUSD: 20_000,
+      }),
+    );
+    // AGI = 100k − 20k = 80k; taxable = 80k − 15k = 65k
+    expect(r.agiUSD).toBe(80_000);
+    expect(r.taxableOrdinaryIncomeUSD).toBe(65_000);
+  });
+
+  it("retirement contribution capped at wages (prevents negative AGI)", () => {
+    const r = computeFederalTax(
+      baseInputs({
+        income: { ...EMPTY_INCOME, wagesUSD: 50_000 },
+        retirementContribUSD: 100_000,
+      }),
+    );
+    expect(r.agiUSD).toBe(0);
+  });
+});
+
+describe("computeStateTax — basic categories", () => {
+  it("WA → no state income tax (with LTCG note)", () => {
+    const r = computeUsTax(
+      baseInputs({
+        state: "WA",
+        income: { ...EMPTY_INCOME, wagesUSD: 100_000 },
+      }),
+    );
+    expect(r.state.hasIncomeTax).toBe(false);
+    expect(r.state.stateTaxUSD).toBe(0);
+    expect(r.state.note).toMatch(/Washington/);
+  });
+
+  it("NONE → no state tax", () => {
+    const r = computeUsTax(
+      baseInputs({ income: { ...EMPTY_INCOME, wagesUSD: 100_000 } }),
+    );
+    expect(r.state.stateTaxUSD).toBe(0);
+  });
+
+  it("CO flat 4.4% applies to federal-style taxable income", () => {
+    const r = computeUsTax(
+      baseInputs({
+        state: "CO",
+        income: { ...EMPTY_INCOME, wagesUSD: 100_000 },
+      }),
+    );
+    // Federal taxable = 100k − 15k = 85k
+    // CO has no state std ded modeled → 85k × 4.4% = 3,740
+    expect(r.state.stateTaxUSD).toBeCloseTo(85_000 * 0.044, 2);
+  });
+
+  it("CA single $100k wages → progressive brackets applied", () => {
+    const r = computeUsTax(
+      baseInputs({
+        state: "CA",
+        income: { ...EMPTY_INCOME, wagesUSD: 100_000 },
+      }),
+    );
+    expect(r.state.stateTaxUSD).toBeGreaterThan(0);
+    // CA effective rate at this level should be in the single digits
+    expect(r.state.effectiveRate).toBeGreaterThan(0.03);
+    expect(r.state.effectiveRate).toBeLessThan(0.07);
+  });
+});
+
+describe("computeUsTax — top-level", () => {
+  it("returns federal + state + take-home consistently", () => {
+    const r = computeUsTax(
+      baseInputs({
+        state: "CO",
+        income: {
+          ...EMPTY_INCOME,
+          wagesUSD: 75_000,
+          interestIncomeUSD: 500,
+        },
+      }),
+    );
+    expect(r.totalTaxUSD).toBeCloseTo(
+      r.federal.totalFederalTaxUSD + r.state.stateTaxUSD,
+      2,
+    );
+    expect(r.takeHomeUSD).toBeCloseTo(
+      r.federal.totalGrossIncomeUSD - r.totalTaxUSD,
+      2,
+    );
+  });
+
+  it("overall effective rate = totalTax / gross", () => {
+    const r = computeUsTax(
+      baseInputs({
+        state: "CA",
+        income: { ...EMPTY_INCOME, wagesUSD: 100_000 },
+      }),
+    );
+    expect(r.overallEffectiveRate).toBeCloseTo(
+      r.totalTaxUSD / r.federal.totalGrossIncomeUSD,
+      6,
+    );
+  });
+
+  it("doesn't mutate inputs", () => {
+    const inputs = baseInputs({
+      income: { ...EMPTY_INCOME, wagesUSD: 100_000 },
+    });
+    const snapshot = JSON.parse(JSON.stringify(inputs));
+    computeUsTax(inputs);
+    expect(inputs).toEqual(snapshot);
+  });
+
+  it("same inputs → same result (reproducibility)", () => {
+    const inputs = baseInputs({
+      state: "CA",
+      income: {
+        ...EMPTY_INCOME,
+        wagesUSD: 150_000,
+        longTermCapGainsUSD: 30_000,
+      },
+    });
+    const a = computeUsTax(inputs);
+    const b = computeUsTax(inputs);
+    expect(a).toEqual(b);
+  });
+});
+
+describe("computeStateTax — coverage of all state shapes", () => {
+  it("every state's bracket schedules apply cleanly to a $75k wage scenario", () => {
+    const allStates = Object.keys(US_STATE_NAMES) as USState[];
+    for (const s of allStates) {
+      const r = computeUsTax(
+        baseInputs({
+          state: s,
+          income: { ...EMPTY_INCOME, wagesUSD: 75_000 },
+        }),
+      );
+      expect(Number.isFinite(r.state.stateTaxUSD)).toBe(true);
+      expect(r.state.stateTaxUSD).toBeGreaterThanOrEqual(0);
+      expect(r.totalTaxUSD).toBeGreaterThanOrEqual(0);
+    }
+  });
+});
+
+describe("computeFederalTax — bracket breakdown integrity", () => {
+  it("sum of bracket-row tax = ordinary tax (no rounding drift)", () => {
+    const r = computeFederalTax(
+      baseInputs({ income: { ...EMPTY_INCOME, wagesUSD: 250_000 } }),
+    );
+    const sum = r.ordinaryBracketBreakdown.reduce((acc, b) => acc + b.taxUSD, 0);
+    expect(sum).toBeCloseTo(r.ordinaryTaxUSD, 4);
+  });
+
+  it("sum of bracket-row income = taxable ordinary income", () => {
+    const r = computeFederalTax(
+      baseInputs({ income: { ...EMPTY_INCOME, wagesUSD: 250_000 } }),
+    );
+    const sum = r.ordinaryBracketBreakdown.reduce(
+      (acc, b) => acc + b.incomeInBracketUSD,
+      0,
+    );
+    expect(sum).toBeCloseTo(r.taxableOrdinaryIncomeUSD, 4);
+  });
+
+  it("LTCG breakdown: floors stack ABOVE ordinary taxable income", () => {
+    const r = computeFederalTax(
+      baseInputs({
+        income: {
+          ...EMPTY_INCOME,
+          wagesUSD: 60_000,
+          longTermCapGainsUSD: 30_000,
+        },
+      }),
+    );
+    // Total LTCG income in breakdown rows equals taxableLtcg
+    const lcgSum = r.ltcgBracketBreakdown.reduce(
+      (acc, b) => acc + b.incomeInBracketUSD,
+      0,
+    );
+    expect(lcgSum).toBeCloseTo(r.taxableLtcgUSD, 4);
+  });
+});
+
+describe("State helper — computeStateTax pure function", () => {
+  it("works when called directly with a federal result", () => {
+    const inputs = baseInputs({
+      state: "CO",
+      income: { ...EMPTY_INCOME, wagesUSD: 75_000 },
+    });
+    const fed = computeFederalTax(inputs);
+    const state = computeStateTax(inputs, fed);
+    expect(state.stateTaxUSD).toBeGreaterThan(0);
+  });
+});

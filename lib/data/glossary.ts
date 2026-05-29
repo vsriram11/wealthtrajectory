@@ -443,6 +443,22 @@ export const GLOSSARY: GlossarySection[] = [
           "fv calculator",
         ],
       },
+      {
+        term: "US Tax calculator",
+        definition:
+          "A portfolio-blind, wealth-analyze-style federal + state tax estimator on the Static Calculators page (tax year 2025). Computes federal ordinary income tax (10/12/22/24/32/35/37% brackets by filing status), federal long-term capital gains + qualified dividends at preferential 0/15/20% rates STACKED on top of ordinary income, FICA (6.2% Social Security to the $176,100 wage base + 1.45% Medicare uncapped), Additional Medicare 0.9% above filing-status thresholds, NIIT 3.8% on net investment income above MAGI thresholds, self-employment tax (15.3% × 92.35% with half deductible), and state income tax for the selected state (no-tax / flat / progressive). Does NOT model: AMT, QBI deduction (§199A), tax credits (CTC / EITC / education / dependent care / saver's), dependents, IRMAA Medicare premium surcharges, local income tax (NYC / Philly / SF), pass-through-entity SALT-cap workarounds, WA's $270k LTCG threshold with primary-residence exclusion, or other state-specific quirks. Like the Investment Growth tab, it's static and portfolio-blind — for personalized tax-aware projections see the Projections and Plan pages.",
+        aliases: [
+          "tax calculator",
+          "federal tax",
+          "income tax",
+          "state tax",
+          "ltcg",
+          "capital gains tax",
+          "niit",
+          "fica",
+          "paycheck calculator",
+        ],
+      },
     ],
   },
 ];

@@ -3,11 +3,13 @@
 import { useState } from "react";
 
 import { InvestmentGrowthCalculator } from "@/app/_components/calculators/InvestmentGrowthCalculator";
+import { UsTaxCalculator } from "@/app/_components/calculators/UsTaxCalculator";
 
-type CalculatorsSubTab = "investment-growth";
+type CalculatorsSubTab = "investment-growth" | "us-tax";
 
 const SUB_TABS: { id: CalculatorsSubTab; label: string }[] = [
   { id: "investment-growth", label: "Investment growth" },
+  { id: "us-tax", label: "US Tax" },
 ];
 
 /**
@@ -75,6 +77,7 @@ export function CalculatorsPage() {
         aria-labelledby={`calc-tab-${tab}`}
       >
         {tab === "investment-growth" && <InvestmentGrowthCalculator />}
+        {tab === "us-tax" && <UsTaxCalculator />}
       </div>
     </>
   );
