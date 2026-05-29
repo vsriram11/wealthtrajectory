@@ -5,6 +5,7 @@ import {
   loadSnapshots,
   type Snapshot,
 } from "@/lib/persistence/persistence";
+import { buildDemoSnapshots } from "@/lib/demoSnapshots";
 import { useAppStore } from "@/lib/store";
 import {
   buildAssetClassSeries,
@@ -60,6 +61,16 @@ export function HistoryTab() {
   useEffect(() => {
     let cancelled = false;
     void (async () => {
+      // Demo mode: PersistenceHydrator never writes to IDB in demo
+      // (gated by mode === "real"), so loadSnapshots would always
+      // be empty. Fall back to the synthetic 5-year demo history
+      // so the tab has substantive content to show — the same
+      // back-cast holdings the rest of the demo persona uses.
+      if (mode === "demo") {
+        setSnapshots(buildDemoSnapshots(Date.now()));
+        setLoading(false);
+        return;
+      }
       const rows = await loadSnapshots();
       if (cancelled) return;
       setSnapshots(rows);
