@@ -2,7 +2,12 @@
 
 import { useRef, useState } from "react";
 import { useAppStore } from "@/lib/store";
-import { exportData, parseImport } from "@/lib/persistence/dataIO";
+import {
+  applyImportedPayload,
+  exportData,
+  parseImport,
+} from "@/lib/persistence/dataIO";
+import { loadSnapshots } from "@/lib/persistence/persistence";
 import { encryptString, looksEncrypted, unwrapBackup } from "@/lib/sync/crypto";
 
 /**
@@ -74,24 +79,14 @@ export function DataIO() {
    * Common path: given decrypted plaintext JSON, parse + dispatch
    * to the store. Surfaces parse / shape errors inline.
    */
-  const ingestPlaintext = (plaintext: string) => {
+  const ingestPlaintext = async (plaintext: string) => {
     try {
       const parsed = parseImport(plaintext);
-      importPayload({
-        household: parsed.household,
-        assumptions: parsed.assumptions,
-        scenarios: parsed.scenarios ?? [],
-        memberAssumptions: parsed.memberAssumptions,
-        preferredMemberId: parsed.preferredMemberId,
-        targetAllocation: parsed.targetAllocation,
-        glidePath: parsed.glidePath,
-        householdAnnualIncomeUSD: parsed.householdAnnualIncomeUSD,
-        goals: parsed.goals,
-        budgetItems: parsed.budgetItems,
-        incomeStreams: parsed.incomeStreams,
-        healthPlans: parsed.healthPlans,
-        healthImportanceWeights: parsed.healthImportanceWeights,
-      });
+      // Round-1 audit CRITICAL fix: applyImportedPayload mirrors
+      // the snapshot collection into IDB so a JSON-file restore
+      // brings BACK the user's snapshot history (and isn't silently
+      // a "restore everything except snapshots" half-job).
+      await applyImportedPayload(parsed, importPayload);
       setError(null);
       setPendingCiphertext(null);
       setDecryptInput("");
@@ -109,7 +104,7 @@ export function DataIO() {
     if (!looksEncrypted(text)) {
       // Plaintext import — common case for users without
       // encryption enabled, and for legacy exports.
-      ingestPlaintext(text);
+      await ingestPlaintext(text);
       return;
     }
     // Encrypted import. Try the currently-loaded passphrase
@@ -117,7 +112,7 @@ export function DataIO() {
     if (passphrase) {
       try {
         const plain = await unwrapBackup(text, passphrase);
-        ingestPlaintext(plain);
+        await ingestPlaintext(plain);
         return;
       } catch {
         // Loaded passphrase didn't work — fall through to the
@@ -140,7 +135,7 @@ export function DataIO() {
     }
     try {
       const plain = await unwrapBackup(pendingCiphertext, decryptInput);
-      ingestPlaintext(plain);
+      await ingestPlaintext(plain);
     } catch {
       // Decryption failed — almost certainly a wrong
       // passphrase, though a corrupted envelope would also
@@ -161,6 +156,12 @@ export function DataIO() {
   const onExport = async () => {
     setError(null);
     try {
+      // Round-1 audit CRITICAL fix: include snapshots in the
+      // JSON-file export. Previously the export was a "restore
+      // everything except snapshot history" half-job — moving to a
+      // new browser via Export+Import silently lost the user's
+      // entire snapshot collection.
+      const snapshots = await loadSnapshots();
       const plainJSON = exportData({
         household,
         assumptions,
@@ -175,6 +176,7 @@ export function DataIO() {
         incomeStreams,
         healthPlans,
         healthImportanceWeights,
+        snapshots,
       });
       // Seal with the loaded passphrase when present —
       // otherwise emit plaintext. The user opts into

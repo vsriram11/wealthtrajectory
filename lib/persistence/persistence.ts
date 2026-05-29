@@ -235,6 +235,39 @@ export async function loadSnapshots(): Promise<Snapshot[]> {
   }
 }
 
+/**
+ * Replace the entire snapshot collection with the supplied rows.
+ * Used by Drive-sync inbound (pullFromDrive) and JSON-file import to
+ * mirror the source-of-truth payload into local IDB. Round-1 audit
+ * CRITICAL fix: snapshots were never participating in sync, so a
+ * user wiping local data lost their entire snapshot history. This
+ * helper closes that gap.
+ *
+ * Atomicity: we clear and re-populate in a single transaction so a
+ * partial failure can't leave a half-merged state.
+ */
+export async function replaceAllSnapshots(rows: Snapshot[]): Promise<void> {
+  const handle = getDB();
+  if (!handle) return;
+  try {
+    await handle.transaction("rw", handle.snapshots, async () => {
+      await handle.snapshots.clear();
+      if (rows.length > 0) {
+        await handle.snapshots.bulkPut(
+          rows.map((r) => ({
+            t: r.t,
+            netWorthUSD: r.netWorthUSD,
+            ...(r.household ? { household: r.household } : {}),
+            ...(r.label ? { label: r.label } : {}),
+          })),
+        );
+      }
+    });
+  } catch (e) {
+    console.warn("WealthTrajectory: failed to replace snapshots", e);
+  }
+}
+
 export async function deleteSnapshot(t: number): Promise<void> {
   const handle = getDB();
   if (!handle) return;

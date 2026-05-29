@@ -1,5 +1,6 @@
 import type { Assumptions, Household, Scenario } from "@/lib/types";
 import type { TargetAllocation } from "@/lib/portfolio/targetAllocation";
+import type { Snapshot } from "@/lib/persistence/persistence";
 
 export type ExportPayload = {
   schema: 1;
@@ -7,6 +8,21 @@ export type ExportPayload = {
   household: Household;
   assumptions: Assumptions;
   scenarios: Scenario[];
+  /**
+   * Historical snapshots — point-in-time NW records that drive the
+   * History chart and YoY comparisons. Stored in IndexedDB on the
+   * user's device, NOT in the live Zustand state slice, so the
+   * sync/export layer must load them from IDB at export time and
+   * write them back to IDB at import time. Optional in the payload
+   * for back-compat: older exports (and the very first Drive sync
+   * before this field was added) simply have no snapshots field,
+   * and the importer leaves IDB rows untouched in that case
+   * (rather than wiping them).
+   * Round-1 audit CRITICAL fix: previously snapshots were NEVER
+   * synced, so any user who wiped local data / changed devices /
+   * cleared cookies lost their entire snapshot history.
+   */
+  snapshots?: Snapshot[];
   /**
    * Per-member assumption overrides. Optional in the payload so older
    * exports (pre-feature) still parse. Old payloads simply have no
@@ -56,6 +72,7 @@ export function exportData(args: {
     string,
     import("@/lib/health/healthPlans").HealthImportanceWeights
   >;
+  snapshots?: Snapshot[];
 }): string {
   const payload: ExportPayload = {
     schema: 1,
@@ -82,6 +99,7 @@ export function downloadExport(args: {
     string,
     import("@/lib/health/healthPlans").HealthImportanceWeights
   >;
+  snapshots?: Snapshot[];
 }): void {
   if (typeof window === "undefined") return;
   const blob = new Blob([exportData(args)], {
@@ -98,6 +116,69 @@ export function downloadExport(args: {
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
   }, 0);
+}
+
+/**
+ * Apply a parsed `ExportPayload` to the live store + IndexedDB.
+ *
+ * Round-1 audit CRITICAL fix: snapshots live in IDB (not in
+ * Zustand), so every import site must (a) call `importPayload(...)`
+ * to replace store-backed slices AND (b) call `replaceAllSnapshots`
+ * to mirror snapshot rows into IDB. Forgetting (b) silently leaves
+ * an inconsistent state where the user's old snapshots stick around
+ * after a "restore from backup". This helper bundles both steps so
+ * call sites can't accidentally do half the job.
+ *
+ * `importAction` is the store's `importPayload` setter; passed in
+ * (rather than imported) so dataIO has no runtime dep on the store
+ * (keeps it usable from the engine layer + tests). Back-compat:
+ * when `parsed.snapshots` is `undefined`, the IDB rows are left
+ * intact — old payloads pre-date this field, and silently wiping
+ * snapshot history on first restore from an old backup would be
+ * worse than letting old+new coexist for one sync cycle.
+ */
+export async function applyImportedPayload(
+  parsed: ExportPayload,
+  importAction: (payload: {
+    household: Household;
+    assumptions: Assumptions;
+    scenarios: Scenario[];
+    memberAssumptions?: Record<string, Partial<Assumptions>>;
+    preferredMemberId?: string | null;
+    targetAllocation?: TargetAllocation | null;
+    glidePath?: import("@/lib/portfolio/glidePath").GlidePath | null;
+    householdAnnualIncomeUSD?: number | null;
+    goals?: import("@/lib/insights/goals").Goal[];
+    budgetItems?: import("@/lib/budget/budget").BudgetItem[];
+    incomeStreams?: import("@/lib/budget/incomeStreams").IncomeStream[];
+    healthPlans?: import("@/lib/health/healthPlans").HealthPlan[];
+    healthImportanceWeights?: Record<
+      string,
+      import("@/lib/health/healthPlans").HealthImportanceWeights
+    >;
+  }) => void,
+): Promise<void> {
+  importAction({
+    household: parsed.household,
+    assumptions: parsed.assumptions,
+    scenarios: parsed.scenarios ?? [],
+    memberAssumptions: parsed.memberAssumptions,
+    preferredMemberId: parsed.preferredMemberId,
+    targetAllocation: parsed.targetAllocation,
+    glidePath: parsed.glidePath,
+    householdAnnualIncomeUSD: parsed.householdAnnualIncomeUSD,
+    goals: parsed.goals,
+    budgetItems: parsed.budgetItems,
+    incomeStreams: parsed.incomeStreams,
+    healthPlans: parsed.healthPlans,
+    healthImportanceWeights: parsed.healthImportanceWeights,
+  });
+  if (parsed.snapshots !== undefined) {
+    const { replaceAllSnapshots } = await import(
+      "@/lib/persistence/persistence"
+    );
+    await replaceAllSnapshots(parsed.snapshots);
+  }
 }
 
 export function parseImport(text: string): ExportPayload {
@@ -243,6 +324,26 @@ export function parseImport(text: string): ExportPayload {
       Array.isArray(coerced.healthImportanceWeights))
   ) {
     coerced.healthImportanceWeights = {};
+  }
+  // Snapshots — drop non-array or corrupt rows. Each row must have a
+  // finite `t` (primary key) and finite `netWorthUSD`; everything
+  // else is optional and tolerated. We do NOT drop zero/negative NW
+  // rows here (legitimately underwater state is real — see Round-1
+  // audit fix in persistence.loadSnapshots).
+  if (coerced.snapshots !== undefined && !Array.isArray(coerced.snapshots)) {
+    coerced.snapshots = [];
+  }
+  if (Array.isArray(coerced.snapshots)) {
+    coerced.snapshots = (coerced.snapshots as unknown[]).filter((s) => {
+      if (s == null || typeof s !== "object") return false;
+      const row = s as Record<string, unknown>;
+      return (
+        typeof row.t === "number" &&
+        Number.isFinite(row.t) &&
+        typeof row.netWorthUSD === "number" &&
+        Number.isFinite(row.netWorthUSD)
+      );
+    });
   }
   // Double cast through `unknown` is the standard TS pattern for
   // narrowing a permissive parsing intermediate into a specific

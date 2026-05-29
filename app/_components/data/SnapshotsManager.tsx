@@ -69,9 +69,21 @@ export function SnapshotsManager() {
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
-  // Add-snapshot form state
+  // Add-snapshot form state.
   const [draftDate, setDraftDate] = useState<string>(todayISO());
   const [draftLabel, setDraftLabel] = useState<string>("");
+  // Collision detection — used by both the inline amber warning
+  // AND the Save-vs-Replace button label so the action is honestly
+  // named at the click site. (`snapshots` is fetched async; on
+  // first render it's [] so no false-positive collision.)
+  const draftT = useMemo(() => parseISO(draftDate), [draftDate]);
+  const collidingSnapshot = useMemo(
+    () =>
+      Number.isFinite(draftT)
+        ? (snapshots.find((s) => s.t === draftT) ?? null)
+        : null,
+    [snapshots, draftT],
+  );
   // Per-row edit state (Audit R1 HIGH #5 + #6). When non-null,
   // the row whose `t` matches is in edit mode; the draft fields
   // are scoped to that row's edits. Explicit Save/Cancel
@@ -450,25 +462,29 @@ export function SnapshotsManager() {
                 before they lose their prior record. When filtered,
                 show the MEMBER-scoped NW from the colliding snapshot
                 so it matches every other figure the user is seeing. */}
-            {(() => {
-              const draftT = parseISO(draftDate);
-              const collision = Number.isFinite(draftT)
-                ? snapshots.find((s) => s.t === draftT)
-                : null;
-              if (!collision) return null;
-              const displayNW =
-                memberId != null && collision.household
-                  ? householdNetWorth(
-                      filterHousehold(collision.household, memberId),
-                    )
-                  : collision.netWorthUSD;
-              return (
-                <div className="rounded-md border border-amber-300/40 bg-amber-300/5 px-2 py-1.5 text-[10px] text-amber-300">
-                  A snapshot already exists for this date (NW{" "}
-                  {formatUSD(displayNW)}). Saving will replace it.
-                </div>
-              );
-            })()}
+            {collidingSnapshot &&
+              (() => {
+                const displayNW =
+                  memberId != null && collidingSnapshot.household
+                    ? householdNetWorth(
+                        filterHousehold(
+                          collidingSnapshot.household,
+                          memberId,
+                        ),
+                      )
+                    : collidingSnapshot.netWorthUSD;
+                return (
+                  <div
+                    className="rounded-md border border-amber-300/40 bg-amber-300/5 px-2 py-1.5 text-[10px] text-amber-300"
+                    role="status"
+                  >
+                    A snapshot already exists for this date (NW{" "}
+                    {formatUSD(displayNW)}). The Save button below has
+                    re-labeled to <strong>Replace</strong> — clicking
+                    it will overwrite the existing record.
+                  </div>
+                );
+              })()}
             {memberId != null && (
               <div
                 className="rounded-md border border-border bg-bg-elevated px-2 py-1.5 text-[10px] text-text-dim"
@@ -512,9 +528,24 @@ export function SnapshotsManager() {
                 type="button"
                 onClick={handleAdd}
                 disabled={busy}
-                className="rounded-md bg-accent px-3 py-1 text-[11px] font-semibold text-bg disabled:opacity-40 active:opacity-80"
+                aria-label={
+                  collidingSnapshot
+                    ? "Replace existing snapshot at this date"
+                    : "Save new snapshot"
+                }
+                className={`rounded-md px-3 py-1 text-[11px] font-semibold disabled:opacity-40 active:opacity-80 ${
+                  collidingSnapshot
+                    ? "bg-amber-300 text-bg"
+                    : "bg-accent text-bg"
+                }`}
               >
-                {busy ? "Saving…" : "Save snapshot"}
+                {busy
+                  ? collidingSnapshot
+                    ? "Replacing…"
+                    : "Saving…"
+                  : collidingSnapshot
+                    ? "Replace snapshot"
+                    : "Save snapshot"}
               </button>
             </div>
           </div>

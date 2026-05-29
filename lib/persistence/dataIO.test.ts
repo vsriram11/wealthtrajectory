@@ -480,3 +480,88 @@ describe("parseImport defensive coercion (Round-2 hardening)", () => {
     });
   });
 });
+
+describe("snapshots in export → parseImport (audit R1 CRITICAL — Drive sync gap)", () => {
+  it("round-trips snapshots: { t, netWorthUSD } shape preserved", () => {
+    const snapshots = [
+      { t: 1_700_000_000_000, netWorthUSD: 100_000 },
+      { t: 1_701_000_000_000, netWorthUSD: 110_000, label: "Q4 review" },
+    ];
+    const json = exportData({
+      household: DEMO_HOUSEHOLD,
+      assumptions: DEMO_ASSUMPTIONS,
+      scenarios: [],
+      snapshots,
+    });
+    const parsed = parseImport(json);
+    expect(parsed.snapshots).toEqual(snapshots);
+  });
+
+  it("absent snapshots field round-trips as undefined (NOT empty array — back-compat)", () => {
+    // Critical for back-compat: when an OLD payload (no snapshots
+    // field) is imported, we must NOT silently wipe local IDB
+    // snapshot rows. The pull-side helper distinguishes
+    // undefined → no-op vs [] → clear all.
+    const json = exportData({
+      household: DEMO_HOUSEHOLD,
+      assumptions: DEMO_ASSUMPTIONS,
+      scenarios: [],
+    });
+    const parsed = parseImport(json);
+    expect(parsed.snapshots).toBeUndefined();
+  });
+
+  it("explicit empty-array snapshots round-trips as [] (user truly has no snapshots)", () => {
+    const json = exportData({
+      household: DEMO_HOUSEHOLD,
+      assumptions: DEMO_ASSUMPTIONS,
+      scenarios: [],
+      snapshots: [],
+    });
+    const parsed = parseImport(json);
+    expect(parsed.snapshots).toEqual([]);
+  });
+
+  it("drops snapshot rows missing finite `t` or `netWorthUSD`", () => {
+    // Defensive parsing: a corrupted Drive payload with malformed
+    // snapshot rows must not crash downstream consumers.
+    const raw = {
+      schema: 1,
+      exportedAt: Date.now(),
+      household: { accounts: [], members: [], liabilities: [] },
+      assumptions: {},
+      scenarios: [],
+      snapshots: [
+        { t: 1_000_000, netWorthUSD: 50_000 },
+        { t: "bad", netWorthUSD: 50_000 },
+        { t: 2_000_000, netWorthUSD: "bad" },
+        { t: Number.NaN, netWorthUSD: 50_000 },
+        { t: Number.POSITIVE_INFINITY, netWorthUSD: 50_000 },
+        null,
+        "string",
+        { t: 3_000_000 }, // missing NW
+        { t: 4_000_000, netWorthUSD: 0 }, // zero IS allowed (underwater)
+        { t: 5_000_000, netWorthUSD: -1000 }, // negative IS allowed
+      ],
+    };
+    const parsed = parseImport(JSON.stringify(raw));
+    expect(parsed.snapshots).toEqual([
+      { t: 1_000_000, netWorthUSD: 50_000 },
+      { t: 4_000_000, netWorthUSD: 0 },
+      { t: 5_000_000, netWorthUSD: -1000 },
+    ]);
+  });
+
+  it("non-array snapshots field coerces to []", () => {
+    const raw = {
+      schema: 1,
+      exportedAt: Date.now(),
+      household: { accounts: [], members: [], liabilities: [] },
+      assumptions: {},
+      scenarios: [],
+      snapshots: { not: "an array" },
+    };
+    const parsed = parseImport(JSON.stringify(raw));
+    expect(parsed.snapshots).toEqual([]);
+  });
+});

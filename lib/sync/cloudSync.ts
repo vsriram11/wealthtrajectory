@@ -27,11 +27,16 @@ import {
   findBackupFile,
   uploadBackup,
 } from "@/lib/sync/googleDrive";
-import { exportData, parseImport } from "@/lib/persistence/dataIO";
+import {
+  applyImportedPayload,
+  exportData,
+  parseImport,
+} from "@/lib/persistence/dataIO";
 import {
   DriveUnreadableError,
   checkShrinkageAgainstDrive,
 } from "@/lib/sync/syncSafety";
+import { loadSnapshots } from "@/lib/persistence/persistence";
 
 export type PullResult =
   | "ok"
@@ -264,21 +269,10 @@ export async function pullFromDrive(
         return "shrinkage-blocked";
       }
     }
-    s.importPayload({
-      household: parsed.household,
-      assumptions: parsed.assumptions,
-      scenarios: parsed.scenarios ?? [],
-      memberAssumptions: parsed.memberAssumptions,
-      preferredMemberId: parsed.preferredMemberId,
-      targetAllocation: parsed.targetAllocation,
-      glidePath: parsed.glidePath,
-      householdAnnualIncomeUSD: parsed.householdAnnualIncomeUSD,
-      goals: parsed.goals,
-      budgetItems: parsed.budgetItems,
-      incomeStreams: parsed.incomeStreams,
-      healthPlans: parsed.healthPlans,
-      healthImportanceWeights: parsed.healthImportanceWeights,
-    });
+    // Round-1 audit CRITICAL fix: apply via the bundled helper so
+    // store-backed slices AND IDB-backed snapshots both move atomically
+    // (caller can't forget the snapshot mirror).
+    await applyImportedPayload(parsed, s.importPayload);
     s.setGoogleSyncState({
       googleSyncing: false,
       googleLastSyncAt: Date.now(),
@@ -434,6 +428,12 @@ export async function pushToDrive(
       }
     }
 
+    // Round-1 audit CRITICAL fix: snapshots live in IDB (not in the
+    // Zustand state slice), so we must pull them out at push time so
+    // the Drive backup is the source-of-truth for the user's full
+    // state. Without this, a user who wiped local data / changed
+    // devices lost ALL their snapshot history.
+    const snapshots = await loadSnapshots();
     const json = exportData({
       household: s.household,
       assumptions: s.assumptions,
@@ -448,6 +448,7 @@ export async function pushToDrive(
       incomeStreams: s.incomeStreams,
       healthPlans: s.healthPlans,
       healthImportanceWeights: s.healthImportanceWeights,
+      snapshots,
     });
     const payload = s.encryptionPassphrase
       ? await (
