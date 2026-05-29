@@ -464,15 +464,21 @@ export async function maybeRecordSnapshot(
   minIntervalMs = 12 * 60 * 60 * 1000,
   appState?: SnapshotAppState,
 ): Promise<boolean> {
-  // Never persist a zero / negative net-worth auto-snapshot. The
-  // most common cause: PersistenceHydrator's 3-second timer fires
-  // before household state has finished loading from IDB or Drive,
-  // so the "current" household is the empty boot default. Writing
-  // {t: now, netWorthUSD: 0} would then poison overlaySnapshots —
-  // every chart bucket at-or-after `now` snaps to $0 and the
-  // history chart looks broken until the user manually deletes
-  // the bad row.
-  if (!Number.isFinite(netWorthUSD) || netWorthUSD <= 0) return false;
+  // Never persist a NaN / Infinity net-worth (defense against
+  // pathological inputs).
+  if (!Number.isFinite(netWorthUSD)) return false;
+  // When household IS provided, trust accounts.length as the
+  // boot signal (zero accounts = data not yet loaded). When
+  // household is NOT provided, keep the strict <=0 guard —
+  // we have no way to distinguish a legitimately-underwater
+  // user from the boot-default case. Round-2 audit fix
+  // (underwater-user lockout): the prior unconditional <=0
+  // guard locked out users with real accounts but negative
+  // NW (high mortgage, early career) from any auto-history.
+  // loadSnapshots documents that legitimately-negative NW
+  // rows are kept on READ; skipping them on WRITE was
+  // inconsistent.
+  if (household == null && netWorthUSD <= 0) return false;
   if (household && household.accounts.length === 0) return false;
 
   const handle = getDB();
@@ -539,7 +545,9 @@ export async function maybeRecordMonthlySnapshot(
   maxAutoRows = 240,
   appState?: SnapshotAppState,
 ): Promise<boolean> {
-  if (!Number.isFinite(netWorthUSD) || netWorthUSD <= 0) return false;
+  // Same underwater-user-friendly gate as maybeRecordSnapshot.
+  if (!Number.isFinite(netWorthUSD)) return false;
+  if (household == null && netWorthUSD <= 0) return false;
   if (household && household.accounts.length === 0) return false;
   const handle = getDB();
   if (!handle) return false;

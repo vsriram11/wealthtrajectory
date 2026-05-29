@@ -245,6 +245,21 @@ describe("maybeRecordSnapshot — auto-snapshot guard", () => {
     expect(await loadSnapshots()).toHaveLength(0);
   });
 
+  it("DOES record an underwater user (negative NW with real accounts — audit fix)", async () => {
+    // Round-2 audit fix: the prior <=0 guard locked out
+    // legitimately-underwater users (high mortgage + early
+    // career = negative NW with non-empty accounts) from any
+    // auto-history. With household provided + accounts present,
+    // the guard now allows the write to proceed.
+    const { loadSnapshots, maybeRecordSnapshot } = await freshModule();
+    const hh = { ...EMPTY_HH, accounts: [{ id: "a1" }] as never };
+    const wrote = await maybeRecordSnapshot(-50_000, hh, 1_700_000_000_000);
+    expect(wrote).toBe(true);
+    const rows = await loadSnapshots();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].netWorthUSD).toBe(-50_000);
+  });
+
   it("debounces to once per minIntervalMs", async () => {
     const { loadSnapshots, maybeRecordSnapshot } = await freshModule();
     const hh = { ...EMPTY_HH, accounts: [{ id: "a1" }] as never };
@@ -356,11 +371,30 @@ describe("maybeRecordMonthlySnapshot — monthly auto-snapshot policy (R-monthly
 
   it("refuses to record on invalid NW / empty household / corrupt input", async () => {
     const { loadSnapshots, maybeRecordMonthlySnapshot } = await freshModule();
-    expect(await maybeRecordMonthlySnapshot(0, HH, MARCH_15_2024)).toBe(false);
-    expect(await maybeRecordMonthlySnapshot(-100, HH, MARCH_15_2024)).toBe(false);
+    // NaN is always rejected (defense against pathological input).
     expect(await maybeRecordMonthlySnapshot(Number.NaN, HH, MARCH_15_2024)).toBe(false);
+    // Empty household is always rejected (no accounts = data not loaded).
     expect(await maybeRecordMonthlySnapshot(100_000, EMPTY_HH, MARCH_15_2024)).toBe(false);
+    // No household provided + 0/negative NW → rejected (boot-default guard).
+    expect(await maybeRecordMonthlySnapshot(0, undefined, MARCH_15_2024)).toBe(false);
+    expect(await maybeRecordMonthlySnapshot(-100, undefined, MARCH_15_2024)).toBe(false);
     expect(await loadSnapshots()).toHaveLength(0);
+  });
+
+  it("DOES record an underwater user (negative NW with real accounts — audit fix)", async () => {
+    // Round-2 audit underwater-user fix: with a real household
+    // (accounts present), negative NW is legitimate (high
+    // mortgage + early career) and should be auto-captured.
+    const { loadSnapshots, maybeRecordMonthlySnapshot } = await freshModule();
+    const wrote = await maybeRecordMonthlySnapshot(
+      -50_000,
+      HH,
+      MARCH_15_2024,
+    );
+    expect(wrote).toBe(true);
+    const rows = await loadSnapshots();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].netWorthUSD).toBe(-50_000);
   });
 
   it("prunes oldest auto-snapshots when total exceeds maxAutoRows (240-row cap default)", async () => {

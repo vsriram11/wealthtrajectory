@@ -396,6 +396,22 @@ export function parseImport(text: string): ExportPayload {
       ) {
         delete row.source;
       }
+      // Strip ALL unknown fields. The persistence write layer
+      // (snapshotToRow) does the same, but rejecting at the
+      // import boundary too means downstream consumers never
+      // see foreign keys that could shadow type expectations.
+      // Audit round-2 LOW fix.
+      const KNOWN_FIELDS = new Set<string>([
+        "t",
+        "netWorthUSD",
+        "household",
+        "appState",
+        "label",
+        "source",
+      ]);
+      for (const k of Object.keys(row)) {
+        if (!KNOWN_FIELDS.has(k)) delete row[k];
+      }
       return [row];
     });
   }

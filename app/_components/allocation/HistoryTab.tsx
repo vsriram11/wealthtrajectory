@@ -97,21 +97,22 @@ export function HistoryTab() {
   }, [snapshotsRevision, mode]);
 
   // Apply the member filter to each snapshot's household before
-  // bucketing — rollup-cascade contract. With memberId=null this
-  // is a no-op pass-through; with a member id, holdings owned by
-  // other members drop out of the historical series.
-  const scopedSnapshots = useMemo(
-    () =>
-      snapshots.map((snap) => {
-        if (!snap.household) return snap;
-        const filtered: Household = filterHousehold(
-          snap.household,
-          selectedMemberId,
-        );
-        return { ...snap, household: filtered };
-      }),
-    [snapshots, selectedMemberId],
-  );
+  // bucketing — rollup-cascade contract. Performance: when
+  // memberId is null, filterHousehold is a no-op pass-through —
+  // skip the entire map + spread (audit fix: was allocating
+  // ~3K objects per render on a 240-snapshot history just to
+  // produce identical-shape snapshots).
+  const scopedSnapshots = useMemo(() => {
+    if (selectedMemberId == null) return snapshots;
+    return snapshots.map((snap) => {
+      if (!snap.household) return snap;
+      const filtered: Household = filterHousehold(
+        snap.household,
+        selectedMemberId,
+      );
+      return { ...snap, household: filtered };
+    });
+  }, [snapshots, selectedMemberId]);
   const buckets = useMemo(
     () => buildAssetClassSeries(scopedSnapshots),
     [scopedSnapshots],
