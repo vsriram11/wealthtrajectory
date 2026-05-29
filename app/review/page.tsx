@@ -33,6 +33,7 @@ import {
   weightedRealExcess,
 } from "@/lib/budget/budget";
 import { runHistoricalSequences } from "@/lib/projection/monteCarlo";
+import { memberFilteredSnapshots } from "@/lib/data/history";
 import { loadSnapshots, type Snapshot } from "@/lib/persistence/persistence";
 import { formatUSD, formatUSDCompact, formatPercent } from "@/lib/format";
 import { AllocBar, KV, LeverageBar, Section, TaxBar } from "./_components";
@@ -172,17 +173,24 @@ export default function ReviewPage() {
   // snapshot without changing what the user wanted to see.
   const [renderedAt] = useState<number>(() => Date.now());
   const yoy = useMemo(() => {
-    if (snapshots.length === 0) return null;
+    // Round-1 (snapshot audit) CRITICAL: pre-filter snapshots
+    // through the member chip so the YoY delta compares the same
+    // person's slice (or rollup) on both sides. Without this, a
+    // user filtered to "Alex" sees `nw` (Alex's slice) diffed
+    // against household-wide snapshot NW → fictional delta on a
+    // printable artifact users save + share.
+    const filteredSnaps = memberFilteredSnapshots(snapshots, memberId);
+    if (filteredSnaps.length === 0) return null;
     const target = renderedAt - 365 * 24 * 60 * 60 * 1000;
     let best: Snapshot | null = null;
-    for (const s of snapshots) {
+    for (const s of filteredSnaps) {
       if (s.t <= target && (!best || s.t > best.t)) best = s;
     }
     if (!best || best.netWorthUSD <= 0) return null;
     const delta = nw - best.netWorthUSD;
     const pct = delta / best.netWorthUSD;
     return { from: best.netWorthUSD, to: nw, delta, pct };
-  }, [snapshots, nw, renderedAt]);
+  }, [snapshots, nw, renderedAt, memberId]);
 
   // Independence math.
   const target = effective.targetNetWorthUSD;

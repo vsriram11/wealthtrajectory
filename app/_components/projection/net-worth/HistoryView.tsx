@@ -202,7 +202,12 @@ export function HistoryView({
         when I went all-in on stocks" / "this is when I bought the
         house" without having to dig into the snapshot manager.
       */}
-      {hovered && <CompositionAtPoint t={hovered.t} snapshots={snapshots} />}
+      {/* Round-1 (snapshot audit) HIGH: pass `filteredSnapshots`
+          (not raw `snapshots`) so the composition pie matches the
+          line above when a member chip is active. */}
+      {hovered && (
+        <CompositionAtPoint t={hovered.t} snapshots={filteredSnapshots} />
+      )}
 
       <div className="mt-2">
         <HistoryChart

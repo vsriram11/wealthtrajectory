@@ -508,3 +508,69 @@ describe("State helper — computeStateTax pure function", () => {
     expect(state.stateTaxUSD).toBeGreaterThan(0);
   });
 });
+
+describe("Round 3 audit regression — engine fixes", () => {
+  it("NIIT does NOT double-count qualified dividends (audit HIGH #3)", () => {
+    // Single filer, $250k wages + $20k LTCG + $20k ord divs (all
+    // qualified). NIIT applies to investment income above the
+    // $200k MAGI threshold. NII = interest($0) + ord divs($20k)
+    // + STCG($0) + LTCG($20k) = $40k. NOT 40 + 20 (qual divs
+    // are inside ord divs).
+    const r = computeFederalTax(
+      baseInputs({
+        income: {
+          ...EMPTY_INCOME,
+          wagesUSD: 250_000,
+          longTermCapGainsUSD: 20_000,
+          ordinaryDividendsUSD: 20_000,
+          qualifiedDividendsUSD: 20_000,
+        },
+      }),
+    );
+    // MAGI ≈ AGI = $250k wages + $40k investment income = $290k.
+    // Excess above $200k = $90k. NII = $40k. NIIT = 3.8% × min(40,
+    // 90) = 3.8% × 40 = $1,520. NOT $2,280 (which would be the
+    // double-count of qualDivs).
+    expect(r.niitUSD).toBeCloseTo(1_520, 0);
+  });
+
+  it("SE-SS cap composes with W-2 wages at the cap (audit HIGH #1)", () => {
+    // Filer with W-2 wages AT the SS cap ($176,100) + $50k SE
+    // income. SE-SS portion should be ZERO (cap already used by
+    // wages); only SE-Medicare (2.9%) applies to the SE side.
+    const r = computeFederalTax(
+      baseInputs({
+        income: {
+          ...EMPTY_INCOME,
+          wagesUSD: 176_100,
+          selfEmploymentUSD: 50_000,
+        },
+      }),
+    );
+    // SE-Medicare only: $50k × 0.9235 × 2.9% = $1,339.08
+    // (NOT including SE-SS portion which is fully shadowed by
+    // the wage-side SS already withheld).
+    expect(r.seTaxUSD).toBeCloseTo(1_339.08, 1);
+  });
+
+  it("retirement contribution cap includes SE net earnings (audit HIGH #4)", () => {
+    // Self-employed filer with $0 wages + $80k SE income +
+    // $10k retirement contribution. Previously the cap was
+    // wages-only → entire $10k was discarded. Now should
+    // allow up to ~$70k (SE net earnings post-FICA half-deduction).
+    const r = computeFederalTax(
+      baseInputs({
+        income: {
+          ...EMPTY_INCOME,
+          selfEmploymentUSD: 80_000,
+        },
+        retirementContribUSD: 10_000,
+      }),
+    );
+    // AGI should be reduced by $10k. Quick sanity: with $80k SE,
+    // SE tax ≈ $80k × 0.9235 × 15.3% = $11,304. Half deductible
+    // = $5,652. With $10k retire deducted too → AGI = $80k -
+    // $5,652 - $10,000 = $64,348.
+    expect(r.agiUSD).toBeCloseTo(64_348, 0);
+  });
+});

@@ -130,8 +130,20 @@ export function SnapshotsManager() {
     try {
       const snap: Snapshot = {
         t,
-        netWorthUSD: householdNetWorth(household),
-        ...(includeComposition ? { household } : {}),
+        // Round-1/2 audit fix: use the SAME NW the user saw in the
+        // preview (which honors member filter + rollup-cascade).
+        // Previously this read raw `householdNetWorth(household)`
+        // → preview showed Alex's slice, saved value was the full
+        // household.
+        netWorthUSD: currentDisplayNW,
+        // Round-1 audit fix: defensive clone so in-place store
+        // mutations after save don't retroactively alter the
+        // in-memory snapshot (until next refresh). Dexie serializes
+        // on `put` so persisted data was safe, but the React state
+        // here shares the reference until reload.
+        ...(includeComposition
+          ? { household: structuredClone(household) }
+          : {}),
         ...(draftLabel.trim() ? { label: draftLabel.trim() } : {}),
       };
       await recordSnapshot(snap);

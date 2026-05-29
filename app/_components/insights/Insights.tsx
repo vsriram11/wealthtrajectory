@@ -3,11 +3,12 @@
 import { useEffect, useMemo, useState } from "react";
 import { projectIndependence } from "@/lib/projection/independence";
 import { generateInsights, type Insight } from "@/lib/insights/insights";
+import { memberFilteredSnapshots } from "@/lib/data/history";
 import { loadSnapshots, type Snapshot } from "@/lib/persistence/persistence";
 import { useActiveProjection } from "@/lib/projection/useActiveProjection";
 
 export function Insights() {
-  const { household: filtered, assumptions } = useActiveProjection();
+  const { household: filtered, assumptions, memberId } = useActiveProjection();
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
 
   useEffect(() => {
@@ -23,8 +24,16 @@ export function Insights() {
   const insights = useMemo(() => {
     if (filtered.accounts.length === 0) return [];
     const projection = projectIndependence(filtered, assumptions);
-    return generateInsights(filtered, assumptions, projection, snapshots);
-  }, [filtered, assumptions, snapshots]);
+    // Round-1 (snapshot audit) CRITICAL: pre-filter snapshots
+    // through `memberFilteredSnapshots` so the engine's NW deltas
+    // (YoY, monthly gain, etc.) compare apples-to-apples against
+    // the member-scoped `filtered` household. Without this, a
+    // user filtered to "Alex" sees insights computed from
+    // household-wide snapshot NW vs Alex's slice → fictional
+    // "down $4M this month" diagnostics.
+    const filteredSnaps = memberFilteredSnapshots(snapshots, memberId);
+    return generateInsights(filtered, assumptions, projection, filteredSnaps);
+  }, [filtered, assumptions, snapshots, memberId]);
 
   if (insights.length === 0) return null;
   // Hide the carousel when there's only the "out of reach" warning and

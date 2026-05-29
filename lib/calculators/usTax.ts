@@ -339,18 +339,24 @@ function computeFICA(
   return { ss, medicare, addMedicare };
 }
 
-function computeSETax(seIncome: number): {
+function computeSETax(
+  seIncome: number,
+  wagesAlreadySubjectToSs: number = 0,
+): {
   seTax: number;
   deductible: number;
 } {
   if (seIncome <= 0) return { seTax: 0, deductible: 0 };
   const netSe = seIncome * SE_INCOME_FACTOR;
-  // SS portion is capped at the wage base too. Per Schedule SE, the
-  // SS portion is capped at SS_WAGE_BASE − wages already subject to
-  // SS. We don't have that linkage here at v1 — typical SE filers
-  // don't ALSO have wages near the cap. Approximation: cap SS portion
-  // independently. Documented limitation.
-  const ssPortion = Math.min(netSe, SS_WAGE_BASE_2025) * SE_SS_RATE;
+  // Per Schedule SE, the SS portion is capped at
+  // `SS_WAGE_BASE − wages already subject to SS` (form line 8a).
+  // Round-3 audit HIGH fix: pass wages so the cap composes
+  // correctly when filer has both W-2 + SE income. Previously
+  // this capped `netSe` against the full wage base
+  // independently of wages → up to ~$5.7k SE-SS overstatement
+  // for a filer at the W-2 cap + meaningful SE.
+  const ssRemainingBase = Math.max(0, SS_WAGE_BASE_2025 - wagesAlreadySubjectToSs);
+  const ssPortion = Math.min(netSe, ssRemainingBase) * SE_SS_RATE;
   const medicarePortion = netSe * SE_MEDICARE_RATE;
   const seTax = ssPortion + medicarePortion;
   return { seTax, deductible: seTax / 2 };
@@ -386,7 +392,9 @@ export function computeFederalTax(inputs: UsTaxInputs): FederalResult {
       : nonneg(inputs.itemizedDeductionUSD);
 
   // SE tax + half-deduction (above-the-line adjustment).
-  const { seTax, deductible: seDeductible } = computeSETax(seInc);
+  // Round-3 audit HIGH fix: pass `wages` so the SE-SS cap composes
+  // with W-2 SS already withheld (Schedule SE line 8a).
+  const { seTax, deductible: seDeductible } = computeSETax(seInc, wages);
 
   // Ordinary-bucket income (taxed at federal ordinary brackets):
   //   wages + interest + (ordinary divs − qualified divs) + STCG +
@@ -401,9 +409,17 @@ export function computeFederalTax(inputs: UsTaxInputs): FederalResult {
   const totalGrossIncome = ordinaryIncomeGross + ltcgIncome;
 
   // AGI = gross − above-the-line adjustments.
-  // Above-the-line: retirement contributions (capped at wages to
-  // avoid going negative — UI also validates), half of SE tax.
-  const retireAdj = Math.min(retire, wages);
+  // Above-the-line: retirement contributions, half of SE tax.
+  // Round-3 audit HIGH fix: retirement cap now spans wages +
+  // SE-net-earnings, not just wages. Previously self-employed
+  // filers funding a SEP-IRA or Solo 401(k) got ZERO deduction
+  // because the cap was wages-only. Real-world SEP / Solo
+  // contributions can be up to 20% of net SE earnings; an exact
+  // model would require the contribution-type input. For v1 we
+  // simply allow the cap to include SE net earnings (post-92.35%
+  // adjustment) so SE filers can claim a deduction at all.
+  const seNetEarnings = Math.max(0, seInc * SE_INCOME_FACTOR - seDeductible);
+  const retireAdj = Math.min(retire, wages + seNetEarnings);
   const preTaxAdjustments = retireAdj + seDeductible;
   const ordinaryAfterAdj = Math.max(0, ordinaryIncomeGross - preTaxAdjustments);
   const agi = ordinaryAfterAdj + ltcgIncome;
@@ -442,11 +458,17 @@ export function computeFederalTax(inputs: UsTaxInputs): FederalResult {
   const fica = computeFICA(wages, filingStatus);
 
   // NIIT.
-  // Net investment income (NII) = interest + ord divs + STCG + LTCG +
-  // qualified divs. (SE income is NOT investment income; rental can
-  // be, but we approximate by excluding `otherOrdinary`.)
-  const nii =
-    interest + ordDivs + stcg + ltcg + qualDivs;
+  // Net investment income (NII) = interest + ord divs + STCG + LTCG.
+  // (SE income is NOT investment income; rental can be, but we
+  // approximate by excluding `otherOrdinary`.)
+  //
+  // Round-3 audit HIGH fix: `ordDivs` already INCLUDES `qualDivs`
+  // (qualDivs is clamped to ordDivs at the boundary because the
+  // qualified portion is a subset of ordinary divs reported on
+  // Form 1099-DIV box 1a vs 1b). Adding both inflated NII by
+  // `qualDivs` → up to ~$760 NIIT overstatement on a $20k qual-
+  // div + above-threshold MAGI.
+  const nii = interest + ordDivs + stcg + ltcg;
   const niit = computeNIIT(nii, agi, filingStatus);
 
   const totalFederalTax =
