@@ -60,6 +60,8 @@ export function HistoryView({
   netWorth,
   memberId,
   empty,
+  scenarioName,
+  scenarioAdjustedNetWorth,
 }: {
   household: Household;
   netWorth: number;
@@ -68,6 +70,11 @@ export function HistoryView({
    *  headline stay member-consistent. */
   memberId: string | null;
   empty: boolean;
+  /** Active scenario name, or null when on the base. Surfaces the
+   *  mismatch between the dashboard headline (scenario-adjusted) and
+   *  the chart's today-pin (base — matches past snapshots). */
+  scenarioName?: string | null;
+  scenarioAdjustedNetWorth?: number;
 }) {
   const symbols = useMemo(() => uniqueSymbols(household), [household]);
   const [quotes, setQuotes] = useState<Record<string, Quote | null>>({});
@@ -171,8 +178,29 @@ export function HistoryView({
     );
   }
 
+  // Round-6 audit HIGH: when a scenario is active AND it materially
+  // shifts NW, the chart's today-pin (base) will disagree with the
+  // dashboard headline (scenario). Surface that so the user
+  // understands the chart shows actual recorded state, not the
+  // active scenario.
+  const showScenarioMismatchNotice =
+    scenarioName != null &&
+    typeof scenarioAdjustedNetWorth === "number" &&
+    Math.abs(scenarioAdjustedNetWorth - netWorth) >= 1;
+
   return (
     <>
+      {showScenarioMismatchNotice && (
+        <div
+          className="mt-3 rounded-md border border-amber-300/40 bg-amber-300/5 px-2 py-1.5 text-[10px] text-amber-300"
+          role="status"
+        >
+          History chart shows <em>actual</em> recorded state (today-pin{" "}
+          {formatUSD(netWorth)}). The headline NW above includes the
+          active scenario <em>{scenarioName}</em> projection (
+          {formatUSD(scenarioAdjustedNetWorth)}).
+        </div>
+      )}
       <div className="mt-3 flex items-center justify-between">
         <div className="num text-base font-semibold text-text">
           {formatUSD(hovered ? hovered.netWorthUSD : netWorth)}

@@ -16,6 +16,7 @@ import {
 } from "@/lib/types";
 import { memberFilteredSnapshots } from "@/lib/data/history";
 import { formatUSD } from "@/lib/format";
+import { useActiveProjection } from "@/lib/projection/useActiveProjection";
 
 /**
  * History snapshot manager.
@@ -40,6 +41,20 @@ import { formatUSD } from "@/lib/format";
 export function SnapshotsManager() {
   const household = useAppStore((s) => s.household);
   const mode = useAppStore((s) => s.mode);
+  // Round-6 audit HIGH fix: surface the active-scenario mismatch.
+  // The NetWorthCard (and every other projection-driven display)
+  // reads through `useActiveProjection`, which applies the active
+  // scenario's household + assumptions overrides. SnapshotsManager
+  // intentionally captures the BASE (un-scenarioed) household —
+  // because a snapshot is a historical record, not a hypothetical.
+  // But that means when a scenario is active, the "Current NW" the
+  // user sees here (and saves) will differ from the headline figure
+  // on the dashboard. We need to make that mismatch visible.
+  const { scenarioName, household: scenarioHousehold } = useActiveProjection();
+  const scenarioAdjustedNW = useMemo(
+    () => householdNetWorth(scenarioHousehold),
+    [scenarioHousehold],
+  );
   // Honor the global member filter chip: when the user has
   // scoped the app to a specific member, the snapshot list +
   // displayed NW + summary stats should reflect THAT member's
@@ -465,6 +480,27 @@ export function SnapshotsManager() {
                 Delete / retime applies to the entire snapshot.
               </div>
             )}
+            {/* Round-6 audit HIGH fix: if a scenario is active AND it
+                meaningfully changes NW, the user's dashboard shows the
+                scenario figure while we save the base figure. Surface
+                the mismatch so the user doesn't silently snapshot a
+                value that disagrees with what they're looking at. */}
+            {scenarioName != null &&
+              Math.abs(scenarioAdjustedNW - currentDisplayNW) >= 1 && (
+                <div
+                  className="rounded-md border border-amber-300/40 bg-amber-300/5 px-2 py-1.5 text-[10px] text-amber-300"
+                  role="status"
+                >
+                  Active scenario <em>{scenarioName}</em> is excluded
+                  from snapshots. Snapshots record your{" "}
+                  <em>actual</em> household state ({formatUSD(currentDisplayNW)}),
+                  not the scenario projection (
+                  {formatUSD(scenarioAdjustedNW)} shown elsewhere on
+                  the page). Switch back to the base scenario if you
+                  want the dashboard figure and the saved value to
+                  match.
+                </div>
+              )}
             <div className="flex items-center justify-between gap-3 text-[11px] text-text-dim">
               <span>
                 Current NW:{" "}

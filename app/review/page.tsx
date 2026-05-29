@@ -36,6 +36,7 @@ import { runHistoricalSequences } from "@/lib/projection/monteCarlo";
 import { memberFilteredSnapshots } from "@/lib/data/history";
 import { loadSnapshots, type Snapshot } from "@/lib/persistence/persistence";
 import { formatUSD, formatUSDCompact, formatPercent } from "@/lib/format";
+import { applyScenario } from "@/lib/insights/scenarios";
 import { AllocBar, KV, LeverageBar, Section, TaxBar } from "./_components";
 
 /**
@@ -68,7 +69,23 @@ export default function ReviewPage() {
     void loadSnapshots().then((s) => setSnapshots(s));
   }, []);
 
-  const effective = memberId
+  // Round-6 audit HIGH: Annual Review previously read base
+  // `assumptions` AND base household, ignoring the active scenario.
+  // A user with scenario "Aggressive savings" active would see the
+  // Scenarios section list it as "Active" while the headline figures
+  // (target, withdrawal rate, NW, MC success rate) reflected the
+  // BASE assumptions — internally inconsistent on a printable
+  // artifact people save + share. Resolve the active scenario here
+  // and feed its (household, assumptions) into every downstream
+  // computation. Surface the "Reflecting active scenario" note in
+  // the header so the reader knows the figures are NOT the base.
+  const scenarios = useAppStore((s) => s.scenarios);
+  const activeScenarioId = useAppStore((s) => s.activeScenarioId);
+  const activeScenario = activeScenarioId
+    ? scenarios.find((sc) => sc.id === activeScenarioId)
+    : null;
+
+  const baseEffective = memberId
     ? resolveAssumptionsForMember(assumptions, memberAssumptions, memberId)
     : effectiveHouseholdAssumptions(
         assumptions,
@@ -92,13 +109,29 @@ export default function ReviewPage() {
   // household's NW but only their own contributions — exactly
   // the kind of mismatch that erodes trust in a printable
   // artifact.)
-  const scopedHousehold = useMemo(() => {
+  const baseScopedHousehold = useMemo(() => {
     let h = memberId
       ? filterHousehold(household, memberId)
       : householdForRollups(household);
     if (liquidityView === "liquid") h = liquidHousehold(h);
     return h;
   }, [household, memberId, liquidityView]);
+
+  // Apply active scenario to BOTH household and assumptions, so every
+  // downstream value (NW, contributions, target, MC) reflects the
+  // same plan view the user is operating in. When no scenario is
+  // active, pass-through.
+  const { scopedHousehold, effective } = useMemo(() => {
+    if (!activeScenario) {
+      return { scopedHousehold: baseScopedHousehold, effective: baseEffective };
+    }
+    const applied = applyScenario(
+      baseScopedHousehold,
+      baseEffective,
+      activeScenario.overrides,
+    );
+    return { scopedHousehold: applied.household, effective: applied.assumptions };
+  }, [activeScenario, baseScopedHousehold, baseEffective]);
 
   const nw = householdNetWorth(scopedHousehold);
   const portfolio = computePortfolio(scopedHousehold);
@@ -157,15 +190,12 @@ export default function ReviewPage() {
     return flat.slice(0, 8);
   }, [scopedHousehold, nw]);
 
-  // Scenarios + goals — surface what the user has set up so the
+  // Goals + healthcare — surface what the user has set up so the
   // printable artifact captures their plan, not just the math.
-  const scenarios = useAppStore((s) => s.scenarios);
-  const activeScenarioId = useAppStore((s) => s.activeScenarioId);
+  // (Scenarios + activeScenario hoisted to the top so they can
+  // drive the household + assumptions resolution above.)
   const goals = useAppStore((s) => s.goals);
   const healthPlans = useAppStore((s) => s.healthPlans);
-  const activeScenario = activeScenarioId
-    ? scenarios.find((sc) => sc.id === activeScenarioId)
-    : null;
 
   // YoY change from snapshots. `renderedAt` anchors "one year ago"
   // at mount so the memo stays stable across re-renders — drifting
@@ -307,6 +337,7 @@ export default function ReviewPage() {
             day: "numeric",
           })}
           {memberName ? ` · ${memberName}` : " · Household view"}
+          {activeScenario && ` · Scenario: ${activeScenario.name}`}
         </div>
       </header>
 
