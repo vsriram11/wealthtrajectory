@@ -99,6 +99,17 @@ export type HistoryPoint = {
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
+/**
+ * IMPORTANT contract for callers: when the global member filter is
+ * active, `household` MUST be the member-filtered view AND `snapshots`
+ * MUST be pre-filtered via `memberFilteredSnapshots(snapshots, memberId)`.
+ * Round-2 audit (this branch) found that consumers passing raw
+ * snapshots alongside a member-filtered household silently produce
+ * a mid-chart discontinuity at the snapshot boundary (past windows
+ * show full household; present window shows member slice). This
+ * function trusts the caller; it has no way to detect the mismatch
+ * post-hoc. HistoryView and GrowthVelocityCard already comply.
+ */
 export function reconstructHistory(
   household: Household,
   quotes: Record<string, Quote | null>,
@@ -276,9 +287,12 @@ export function overlaySnapshots(
    */
   liveNetWorth?: number,
 ): HistoryPoint[] {
-  const usable = snapshots.filter(
-    (s) => Number.isFinite(s.netWorthUSD) && s.netWorthUSD > 0,
-  );
+  // Round-1 audit MED: don't drop legitimate zero/negative-NW
+  // snapshots here. A user underwater (high mortgage, low assets)
+  // has real negative NW worth charting. `loadSnapshots` already
+  // purges genuinely-corrupt NaN/Infinity at the IDB boundary;
+  // any finite value is user-intentional and renders.
+  const usable = snapshots.filter((s) => Number.isFinite(s.netWorthUSD));
   let out = series;
   if (usable.length > 0) {
     const sorted = [...usable].sort((a, b) => a.t - b.t);

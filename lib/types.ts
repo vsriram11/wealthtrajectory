@@ -1006,9 +1006,15 @@ export function holdingLeverage(h: Holding): number {
       return h.composition.reduce((s, l) => s + l.weight, 0);
     }
   }
-  if (h.kind === "equity" || h.kind === "bond") return h.leverage;
-  if (h.kind === "crypto") return h.leverage ?? 1;
-  if (h.kind === "real_estate" || h.kind === "private_stock") return h.leverage;
+  // Clamp scalar leverage at the boundary. Round-4 audit MED:
+  // a corrupt RE leverage of 0 or NaN poisons stress-test math
+  // (weightedRELeverage divides by zero / propagates NaN).
+  // Default to 1.0 for any non-finite / sub-1 value.
+  const clamp = (n: number | undefined): number =>
+    typeof n === "number" && Number.isFinite(n) && n >= 1 ? n : 1;
+  if (h.kind === "equity" || h.kind === "bond") return clamp(h.leverage);
+  if (h.kind === "crypto") return clamp(h.leverage);
+  if (h.kind === "real_estate" || h.kind === "private_stock") return clamp(h.leverage);
   // Cash, commodity (plain), and "other" carry no leverage concept.
   return 1;
 }

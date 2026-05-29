@@ -129,6 +129,7 @@ function realEstate(
     expectedRealCAGR?: number;
     leverage?: number;
     isPrimaryResidence?: boolean;
+    isIlliquid?: boolean;
   } = {},
 ): RealEstateHolding {
   return {
@@ -140,6 +141,7 @@ function realEstate(
     acquiredAt: null,
     leverage: opts.leverage ?? 1,
     isPrimaryResidence: opts.isPrimaryResidence,
+    isIlliquid: opts.isIlliquid,
   };
 }
 
@@ -317,6 +319,12 @@ const sharedAccounts: Account[] = [
       realEstate("Rental Duplex", 170_000, {
         leverage: 2.8,
         isPrimaryResidence: false,
+        // Audit R4 MED: realistic showcase narrative — a rental
+        // with tenants on a multi-year lease isn't liquid enough
+        // to fund retirement spend on demand. Marks the holding
+        // off the Liquid net-worth view and Independence
+        // projection (matches the `isLiquid` cascade).
+        isIlliquid: true,
         expectedRealCAGR: 0.015,
       }),
     ],
@@ -324,23 +332,18 @@ const sharedAccounts: Account[] = [
   }),
 ];
 
+// IMPORTANT convention (see `RealEstateHolding` doc at
+// lib/types.ts:481+): `real_estate.valueUSD` stores EQUITY (net of
+// mortgage), and the `leverage` field captures the gross-vs-equity
+// ratio for stress-test math. Mortgages are therefore NOT entered
+// as separate liabilities for properties already tracked as equity
+// holdings — doing so would double-count the debt against net
+// worth. Demo previously had `liab-mortgage` ($620k) and
+// `liab-rental-mortgage` ($310k) entries alongside their equity-
+// valued real-estate holdings, which understated demo NW by
+// $930k (R4 audit CRITICAL fix). Auto / student / credit card
+// liabilities remain — those are NOT netted into any holding.
 const liabilities: Liability[] = [
-  {
-    id: "liab-mortgage",
-    name: "Primary mortgage",
-    balanceUSD: 620_000,
-    annualInterestRate: 0.062,
-    monthlyPaymentUSD: 3_820,
-    ownerId: ALEX_ID,
-  },
-  {
-    id: "liab-rental-mortgage",
-    name: "Rental mortgage",
-    balanceUSD: 310_000,
-    annualInterestRate: 0.071,
-    monthlyPaymentUSD: 2_080,
-    ownerId: JORDAN_ID,
-  },
   {
     id: "liab-auto",
     name: "Auto loan",

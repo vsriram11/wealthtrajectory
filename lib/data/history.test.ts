@@ -270,29 +270,37 @@ describe("overlaySnapshots", () => {
     expect(out[3].netWorthUSD).toBe(9000); // t=400 ≥ 350
   });
 
-  it("ignores zero / negative-NW snapshots so a stale auto-recorded $0 doesn't flatline the chart", () => {
-    // Regression for the May-11-shows-$0 bug: a zero-NW snapshot
-    // recorded by an early auto-snapshot run (before household
-    // hydrated) used to poison every chart bucket at-or-after its
-    // timestamp.
+  it("renders zero / negative-NW snapshots (user-intentional underwater state)", () => {
+    // Audit R1 MED fix: previously the overlay silently dropped
+    // any NW <= 0 row, which incorrectly hid legitimate
+    // underwater snapshots. Now NW is gated only at the IDB
+    // boundary (loadSnapshots purges NaN/Infinity only); anything
+    // finite reaches the overlay. A user with high mortgage debt
+    // + low assets gets to chart their real negative NW.
     const snapshots: Snapshot[] = [
       { t: 200, netWorthUSD: 1500 },
-      { t: 380, netWorthUSD: 0 }, // bad row that shouldn't apply
+      { t: 380, netWorthUSD: 0 },
     ];
     const out = overlaySnapshots(base, snapshots);
     expect(out[0].netWorthUSD).toBe(1000);
     expect(out[1].netWorthUSD).toBe(1500);
     expect(out[2].netWorthUSD).toBe(1500);
-    // Bucket at t=400 must keep the good 1500 overlay, NOT swap in 0.
-    expect(out[3].netWorthUSD).toBe(1500);
+    // Bucket at t=400 now gets the $0 overlay (user-intentional).
+    expect(out[3].netWorthUSD).toBe(0);
   });
 
-  it("ignores negative-NW snapshots too (a household briefly underwater)", () => {
-    const out = overlaySnapshots(base, [
-      { t: 250, netWorthUSD: -50 },
-    ]);
-    // No usable snapshots → series unchanged.
-    expect(out).toEqual(base);
+  it("negative-NW snapshots overlay too (briefly underwater is a real state)", () => {
+    const out = overlaySnapshots(
+      [
+        { t: 100, netWorthUSD: 1000 },
+        { t: 300, netWorthUSD: 1200 },
+      ],
+      [{ t: 250, netWorthUSD: -50 }],
+    );
+    // Snapshot at t=250 applies to the t=300 bucket (the earliest
+    // bucket >= the snapshot's t).
+    expect(out[0].netWorthUSD).toBe(1000);
+    expect(out[1].netWorthUSD).toBe(-50);
   });
 
   it("pins today's last bucket to liveNetWorth when supplied", () => {
