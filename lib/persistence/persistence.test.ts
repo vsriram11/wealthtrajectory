@@ -522,6 +522,32 @@ describe("maybeRecordMonthlySnapshot — monthly auto-snapshot policy (R-monthly
     expect(rows[0].t).toBe(may10);
   });
 
+  it("moveSnapshot preserves the source field (round-3 audit WARN #7)", async () => {
+    // Round-3 audit gap: SnapshotsManager.handleSaveEdit
+    // explicitly upgrades source to "manual" on edit, but the
+    // underlying moveSnapshot just spreads the row — if a
+    // future caller bypasses handleSaveEdit and uses
+    // moveSnapshot directly on an auto-row, the row's source
+    // must stay intact so prune policy classification stays
+    // accurate.
+    const { loadSnapshots, moveSnapshot, recordSnapshot } =
+      await freshModule();
+    await recordSnapshot({
+      t: 100,
+      netWorthUSD: 1000,
+      source: "auto",
+    });
+    await moveSnapshot(100, 200);
+    const rows = await loadSnapshots();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].t).toBe(200);
+    expect(rows[0].source).toBe("auto");
+    // Also for manual rows.
+    await moveSnapshot(200, 300);
+    const moved = (await loadSnapshots())[0];
+    expect(moved.source).toBe("auto"); // unchanged
+  });
+
   it("replaceAllSnapshots is atomic — bulkPut failure rolls back the clear() (round-3 audit gap)", async () => {
     // Documented load-bearing atomicity guarantee in
     // replaceAllSnapshots. If bulkPut throws mid-transaction,

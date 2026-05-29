@@ -67,8 +67,26 @@ export function HistoryTab() {
   // lib/rollupContract.test.ts). Otherwise a single-member view
   // silently shows household totals here.
   const selectedMemberId = useAppStore((s) => s.selectedMemberId);
+  // Hydration + sync state for the "loading…" UX. Without these
+  // the History tab can render "Not enough history yet" while
+  // PersistenceHydrator is still loading IDB OR while a Drive
+  // pull is in flight — confusing on slow-disk / first-load /
+  // cross-device-resume paths. Round-3 audit WARN #5.
+  const hydrated = useAppStore((s) => s.hydrated);
+  const googleSyncing = useAppStore((s) => s.googleSyncing);
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
   const [loading, setLoading] = useState(true);
+  // Hoist the demo anchor into a useState initializer so it's
+  // captured ONCE per mount rather than re-read inside the
+  // effect. Round-3 audit NIT #9: this stabilizes the demo
+  // timeline across hot-reload, remount, and StrictMode
+  // double-invocation, and makes it deterministic for testing
+  // (with vi.setSystemTime before mount). The trade-off:
+  // re-mounting the tab re-anchors the timeline to a fresh
+  // moment — which is exactly the documented behavior
+  // (demo timeline is stable across the session, regenerated
+  // on entry into demo mode).
+  const [demoAnchor] = useState(() => Date.now());
 
   // Two independent effect branches per audit fix UI#6 — the
   // demo branch must NOT depend on snapshotsRevision (which only
@@ -83,9 +101,9 @@ export function HistoryTab() {
     // entry so the back-cast 5-year window doesn't shift if the
     // user sits on the tab past midnight.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setSnapshots(buildDemoSnapshots(Date.now()));
+    setSnapshots(buildDemoSnapshots(demoAnchor));
     setLoading(false);
-  }, [mode]);
+  }, [mode, demoAnchor]);
 
   useEffect(() => {
     if (mode === "demo") return;
@@ -136,6 +154,21 @@ export function HistoryTab() {
     return (
       <section className="px-5 pt-3 pb-6">
         <p className="text-[12px] text-text-muted">Loading history…</p>
+      </section>
+    );
+  }
+
+  // Don't show the "Not enough history yet" empty state while
+  // PersistenceHydrator hasn't finished loading IDB or while a
+  // Drive pull is in flight. Surfacing "no history" prematurely
+  // is misleading when the data is actually still being fetched.
+  // Round-3 audit WARN #5 fix.
+  if (mode === "real" && (!hydrated || googleSyncing) && snapshots.length === 0) {
+    return (
+      <section className="px-5 pt-3 pb-6">
+        <p className="text-[12px] text-text-muted">
+          {googleSyncing ? "Syncing snapshots from Drive…" : "Loading history…"}
+        </p>
       </section>
     );
   }
@@ -426,7 +459,9 @@ function ClassRow({
  * baseline at min and a faint area fill for visual weight.
  * Hides if the series is degenerate (< 2 points, or min == max).
  */
-function Sparkline({
+// Exported for unit tests (HistoryTab.spark.test.tsx). Not part
+// of the public component API.
+export function Sparkline({
   series,
   color,
   label,
