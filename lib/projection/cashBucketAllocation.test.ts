@@ -117,6 +117,29 @@ describe("applyCashBucketOverride", () => {
     expect(sumAllocation(result)).toBeCloseTo(1, 10);
   });
 
+  it("NaN-safety: NaN requested cash fraction degrades to no-op (engine contract)", () => {
+    const result = applyCashBucketOverride(ALLOC_60_30_5_5, Number.NaN);
+    expect(result).toEqual(ALLOC_60_30_5_5);
+  });
+
+  it("NaN-safety: NaN raw cashFraction degrades to no-op (engine contract)", () => {
+    const corrupted: RawAllocation = {
+      ...ALLOC_60_30_5_5,
+      cashFraction: Number.NaN,
+    };
+    const result = applyCashBucketOverride(corrupted, 0.3);
+    expect(result).toEqual(corrupted);
+  });
+
+  it("NaN-safety: Infinity requested degrades to no-op", () => {
+    expect(
+      applyCashBucketOverride(ALLOC_60_30_5_5, Number.POSITIVE_INFINITY),
+    ).toEqual(ALLOC_60_30_5_5);
+    expect(
+      applyCashBucketOverride(ALLOC_60_30_5_5, Number.NEGATIVE_INFINITY),
+    ).toEqual(ALLOC_60_30_5_5);
+  });
+
   it("regression: proportional steal preserves sum-to-1 with a TQQQ-heavy portfolio (the v0 bug)", () => {
     // Earlier v0 only shrank `stocksFraction` (regular 1x). With a
     // portfolio mostly in 2x equity + RE, the 1x slice was tiny —

@@ -1032,6 +1032,53 @@ describe("simulatePath — cashBucketPriority (orthogonal to rebalance policy)",
     );
   });
 
+  it("bucket activates regardless of prior-year stock return (wider gate than the legacy 'bucket' policy)", () => {
+    // The OLD `rebalance: "bucket"` policy only fired cash-first
+    // withdrawal in retirement years FOLLOWING a market drop. The
+    // NEW `cashBucketPriority` orthogonal flag fires in EVERY
+    // retirement year — the user wanted SORR shielding throughout
+    // the danger zone, not just after down years. Pin the wider
+    // gate: with prior year +20% (an up year), bucket arm still
+    // drains cash → composition differs from no-bucket arm.
+    const inputs: MonteCarloInputs = {
+      startingNetWorthUSD: 1_000_000,
+      allocation: { stocksFraction: 0.9, bondsFraction: 0, cashFraction: 0.1 },
+      annualSpendUSD: 60_000,
+      yearsUntilRetirement: 1,
+      retirementHorizonYears: 3,
+    };
+    // Prior year (y=0): +20% UP year. Then 3 retirement years.
+    const stocks = [0.2, 0.1, 0.05, 0.05];
+    const noBucket = simulatePath(
+      inputs,
+      stocks,
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+      "up-prior-no",
+      { rebalance: "none" },
+    );
+    const withBucket = simulatePath(
+      { ...inputs, spending: spendingWithBucket() },
+      stocks,
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+      [0, 0, 0, 0],
+      "up-prior-yes",
+      { rebalance: "none" },
+    );
+    // Composition propagation: divergence visible at trajectory[3]
+    // (end of y=2, second retirement year). If the gate had
+    // regressed to "only after down years," the bucket would not
+    // fire in y=1 (prior y=0 was +20% up) and trajectory[3] would
+    // be byte-identical.
+    expect(
+      Math.abs(withBucket.trajectory[3] - noBucket.trajectory[3]),
+    ).toBeGreaterThan(1);
+  });
+
   it("bucket flag on with retirement never reached (yearsUntilRetirement > totalYears) is byte-equal to no-bucket", () => {
     // If `yearsUntilRetirement` exceeds the simulated horizon, the
     // bucket gate (`y >= yearsPre`) never opens. The flag should be

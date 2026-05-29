@@ -12,6 +12,7 @@ import {
   runBootstrap,
   runHistoricalSequences,
   type MonteCarloResult,
+  type RebalancePolicy,
 } from "@/lib/projection/monteCarlo";
 import { applyCashBucketOverride } from "@/lib/projection/cashBucketAllocation";
 import { computePortfolio } from "@/lib/portfolio/portfolio";
@@ -191,7 +192,7 @@ export function HistoricalMonteCarloCard() {
   // create stale state across reloads ("why is my baseline acting
   // weird?"). The assumptions slice (retirement-tax-rate, etc.)
   // remains the long-lived source of plan-level truth.
-  const [rebalance, setRebalance] = useState<"annual" | "none">("annual");
+  const [rebalance, setRebalance] = useState<RebalancePolicy>("annual");
   const [cashBucketPriority, setCashBucketPriority] = useState(false);
   // Optional cash-bucket size override (in % of NW). Default
   // null = use the projected cash share at target unchanged.

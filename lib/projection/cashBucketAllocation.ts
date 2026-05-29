@@ -52,6 +52,12 @@ export function applyCashBucketOverride(
   requestedCashFraction: number | null,
 ): RawAllocation {
   if (requestedCashFraction == null) return rawAllocation;
+  // NaN-safety at the boundary (CLAUDE.md engine-purity contract).
+  // Bad input degrades to a no-op rather than poisoning every
+  // class with NaN. The card's vetted shares can't trigger this,
+  // but the helper is callable in isolation (test + future callers).
+  if (!Number.isFinite(requestedCashFraction)) return rawAllocation;
+  if (!Number.isFinite(rawAllocation.cashFraction)) return rawAllocation;
   const requested = Math.max(0, Math.min(1, requestedCashFraction));
   const cashToday = rawAllocation.cashFraction;
   const denominator = 1 - cashToday;
