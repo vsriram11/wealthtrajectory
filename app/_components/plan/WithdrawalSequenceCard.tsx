@@ -57,14 +57,21 @@ export function WithdrawalSequenceCard() {
   const portfolio = useMemo(() => computePortfolio(household), [household]);
   const householdCAGR = portfolio.weightedRealCAGR ?? 0.05;
 
-  // Start retirement at the oldest member's age, or 65 if no
-  // ages are configured. Honors actual member ages when set.
+  // Start retirement at the YOUNGEST member's age, or 65 if no
+  // ages configured. Round-5 audit fix: previously used the
+  // OLDEST member's age, which made RMDs fire immediately for any
+  // couple where one spouse was already 75+ — even if pre-tax
+  // accounts belonged to the younger spouse, who legally
+  // shouldn't have to take RMDs yet. Using the youngest age is
+  // CONSERVATIVE (RMDs fire later → more tax-deferred growth).
+  // True per-member RMD splitting is a future enhancement;
+  // documenting the simplification is the right v1 trade-off.
   const startingAge = useMemo(() => {
     const ages = household.members
       .map((m) => m.age)
       .filter((a): a is number => a != null && a > 0);
     if (ages.length === 0) return 65;
-    return Math.max(...ages);
+    return Math.min(...ages);
   }, [household.members]);
 
   const sequencer = useMemo(
@@ -80,6 +87,12 @@ export function WithdrawalSequenceCard() {
         },
         startingAge,
         retirementTaxRate: assumptions.retirementTaxRate ?? 0.2,
+        // LTCG rate for taxable-bucket withdrawals (brokerage =
+        // long-term capital gains, NOT ordinary income). Defaults
+        // to ordinaryRate × 0.5 — rough proxy because the user's
+        // single `retirementTaxRate` field captures ordinary
+        // (typically 22-32% federal) while LTCG is 0/15/20%
+        // federal. Round-5 audit fix.
         years: Math.max(1, assumptions.drawdownHorizonYears ?? 30),
       }),
     [

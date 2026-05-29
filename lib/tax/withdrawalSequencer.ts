@@ -59,13 +59,32 @@ export type WithdrawalSequencerInputs = {
   realCAGRByBucket: BucketBalances;
   /**
    * Retirement starting age (the year-0 age). RMDs start when
-   * age + year >= rmdStartAge.
+   * age + year >= rmdStartAge. For couples, prefer the YOUNGER
+   * member's age — it defers RMDs (more conservative tax
+   * estimate vs forcing immediate RMDs on a 75-yr-old when
+   * the 60-yr-old spouse owns the pre-tax accounts).
    */
   startingAge: number;
   /** RMD start age. SECURE 2.0: 73; 2033+: 75. Default 73. */
   rmdStartAge?: number;
-  /** Effective marginal tax rate on pre-tax + cap gains. 0–0.99. */
+  /**
+   * Ordinary-income marginal rate (applied to pre-tax bucket
+   * withdrawals incl. RMD). 0–0.99.
+   */
   retirementTaxRate: number;
+  /**
+   * Long-term cap-gains rate applied to TAXABLE bucket
+   * withdrawals (brokerage). Defaults to `retirementTaxRate / 2`
+   * — rough proxy because the user's "ordinary rate" is usually
+   * 22-32% federal while LTCG is 0/15/20% federal. Models the
+   * fact that taxable withdrawals are NOT ordinary income.
+   *
+   * Round-5 audit fix: prior behavior applied the full ordinary
+   * rate to taxable withdrawals, inflating the year's tax
+   * column by ~2× for taxable-heavy retirees. The displayed
+   * "Lifetime tax paid" headline was the most visible symptom.
+   */
+  longTermCapGainsRate?: number;
   /** How many years to simulate. */
   years: number;
   /**
@@ -176,7 +195,14 @@ function simulateYear(
   const cagr = inputs.realCAGRByBucket;
   const order = inputs.order ?? DEFAULT_ORDER;
   const rmdStartAge = inputs.rmdStartAge ?? 73;
-  const taxRate = Math.max(0, Math.min(0.99, inputs.retirementTaxRate));
+  const ordinaryRate = Math.max(0, Math.min(0.99, inputs.retirementTaxRate));
+  // LTCG rate defaults to half the ordinary rate (rough proxy:
+  // user's "ordinary marginal" is typically 22-32% federal while
+  // LTCG is 0/15/20% federal). Round-5 audit fix.
+  const ltcgRate =
+    inputs.longTermCapGainsRate != null
+      ? Math.max(0, Math.min(0.99, inputs.longTermCapGainsRate))
+      : ordinaryRate * 0.5;
 
   // 1. Grow all balances.
   const grown: BucketBalances = {
@@ -186,9 +212,13 @@ function simulateYear(
     hsa: Math.max(0, startBal.hsa * (1 + cagr.hsa)),
   };
 
-  // 2. RMD this year (if age ≥ start).
+  // 2. RMD this year (if age ≥ start). IRS Pub 590-B specifies
+  // RMD is computed on PRIOR-YEAR-END FMV (= start-of-year balance
+  // here), not on the grown balance. Round-5 audit fix: prior
+  // code used `grown.pretax / divisor`, which over-stated RMD by
+  // one year of growth.
   const rmd =
-    age >= rmdStartAge ? grown.pretax / rmdDivisor(age) : 0;
+    age >= rmdStartAge ? startBal.pretax / rmdDivisor(age) : 0;
 
   // 3. Target net spend, tracked as "net dollars still needed."
   // The prior implementation grossed up ALL spend at the start
@@ -201,32 +231,39 @@ function simulateYear(
   const targetNet = Math.max(0, inputs.annualRealSpendUSD);
 
   const withdrawals: BucketBalances = emptyBalances();
-  // Apply the RMD first — it's compulsory.
+  // Apply the RMD first — it's compulsory. RMD is ORDINARY-income
+  // taxed (Trad IRA/401k distribution).
   withdrawals.pretax += Math.min(grown.pretax, rmd);
   const balancesPost: BucketBalances = copyBalances(grown);
   balancesPost.pretax -= withdrawals.pretax;
   // RMD covers SOME of the net target: its post-tax contribution
-  // is `rmd * (1 - taxRate)`.
+  // is `rmd * (1 - ordinaryRate)`.
   let remainingNet = Math.max(
     0,
-    targetNet - withdrawals.pretax * (1 - taxRate),
+    targetNet - withdrawals.pretax * (1 - ordinaryRate),
   );
 
-  // 5. Walk the order to drain remaining net. For TAXED buckets
-  // (taxable / pretax), gross up `1/(1-t)`; for UNTAXED buckets
-  // (roth / hsa), draw literally. Net-contribution math at the
-  // bottom mirrors the tax block in §6 so the two stay aligned.
+  // 5. Walk the order to drain remaining net. Per-bucket rate:
+  // pretax = ordinary, taxable = LTCG, roth/hsa = 0. Net target
+  // is grossed up at the bucket's specific rate. Round-5 audit
+  // fix: prior code applied `taxRate` uniformly, over-taxing
+  // taxable bucket by ~2× and under-draining Roth.
   for (const bucket of order) {
     if (remainingNet <= 0) break;
     const available = balancesPost[bucket];
     if (available <= 0) continue;
-    const isTaxed = bucket === "pretax" || bucket === "taxable";
-    if (isTaxed) {
-      const grossNeeded = remainingNet / (1 - taxRate);
+    const bucketRate =
+      bucket === "pretax"
+        ? ordinaryRate
+        : bucket === "taxable"
+          ? ltcgRate
+          : 0;
+    if (bucketRate > 0) {
+      const grossNeeded = remainingNet / (1 - bucketRate);
       const draw = Math.min(available, grossNeeded);
       withdrawals[bucket] += draw;
       balancesPost[bucket] -= draw;
-      remainingNet -= draw * (1 - taxRate);
+      remainingNet -= draw * (1 - bucketRate);
     } else {
       const draw = Math.min(available, remainingNet);
       withdrawals[bucket] += draw;
@@ -235,13 +272,13 @@ function simulateYear(
     }
   }
 
-  // 6. Compute tax. Pretax + RMD are fully taxed; taxable is
-  // approximated at the same rate (it's actually cap gains, but
-  // we're using a single effective rate as documented). Roth +
-  // HSA contribute zero tax.
-  const taxableWithdrawal =
-    withdrawals.taxable + withdrawals.pretax; // includes RMD via pretax
-  const taxesPaid = taxableWithdrawal * taxRate;
+  // 6. Compute tax. Pretax (incl RMD via pretax bucket) at
+  // ordinary rate, taxable at LTCG, roth + HSA contribute 0.
+  // (HSA simplification: real-world non-medical HSA after 65 is
+  // ordinary income, but we model HSA as preserved for medical
+  // use only — same convention as DEFAULT_ORDER.)
+  const taxesPaid =
+    withdrawals.pretax * ordinaryRate + withdrawals.taxable * ltcgRate;
   const grossWithdrawal =
     withdrawals.taxable +
     withdrawals.pretax +
