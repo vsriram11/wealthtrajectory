@@ -43,6 +43,7 @@ Track accounts and holdings across every asset class, project your trajectory to
 
 - **Deterministic projection** — month-by-month forecast, custom glide path, account-weighted CAGR, Monte-Carlo stress overlay. Interactive NW chart with toggleable target / legacy / scenario overlays.
 - **Historical Monte Carlo** — replays your portfolio against every 1928–2025 sequence. Returns success rate, percentile band (p1–p95), and the *specific* worst-case starting year ("Worst: 1929"). Block-bootstrap mode for wider distributions. Honors glide paths + mid-year cash-flow timing.
+- **Cash-bucket SORR shield** — Pfau-depleting / Kitces-refilling 2D bucket policy (orthogonal to rebalance), configurable size override, modeled cap-gains tax on the equity-to-cash sale, per-holding opt-out for high-conviction positions. Short-duration bonds (≤ 1 yr) are counted as cash-equivalent.
 - **Scenario engine.** Save plans side-by-side; each overrides per-account contributions and per-holding CAGRs. Comparison chart shows time-to-target deltas.
 - **What-if + sensitivity strips.** "$X/mo extra saving" slider. ±2pt CAGR and 0.5×–2× savings-rate sensitivity in a glance.
 - **Coast / barista / lean / fat independence math** via a finite-horizon Gordon-growth variant — no perpetuity singularity when category real CAGR approaches SWR.
@@ -50,9 +51,13 @@ Track accounts and holdings across every asset class, project your trajectory to
 ### Tax-aware drawdown sequencing
 
 - **Multi-phase retirement** — stage drawdowns by life phase (pre-SS high-draw bridge → post-SS steady → late-life conservative) instead of one flat rate. Edit a phase, projection recomputes downstream.
-- **Bucket-order sequencer** (taxable → pre-tax → Roth → HSA) with RMD math and tax gross-up — the projection knows your *after-tax* spend.
+- **Bucket-order sequencer** (taxable → pre-tax → Roth → HSA) with RMD math (IRS prior-year-end FMV base), LTCG-vs-ordinary rate split per bucket, and 529/Trump-Account routed to an EDUCATION bucket excluded from retirement spend.
 - **Roth conversion ladder**
 - **Asset-location audit**
+
+### Calculators (standalone, portfolio-blind)
+
+- **Investment Growth calculator** — NerdWallet-style compound interest with monthly or annual contributions, optional annual contribution escalator (e.g. 3%/yr raise), optional per-year overrides for one-off injections (windfall, bonus, college pull). Ordinary-annuity convention. Doesn't read your portfolio — these are pure goal-planning what-ifs that complement the personalized projections.
 
 ### Budget that drives the projection
 
