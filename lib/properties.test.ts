@@ -51,8 +51,22 @@ import {
   activeMemberIds,
   householdForRollups,
   householdNetWorth,
+  TAX_TREATMENT_BY_CATEGORY,
+  type AccountCategory,
+  type Account,
+  type Holding,
   type Household,
 } from "@/lib/types";
+import {
+  planBucketFunding,
+  SALE_PRIORITY_ORDER,
+} from "@/lib/portfolio/bucketFunding";
+import { computeLeveragedEquityBuckets } from "@/lib/portfolio/leveragedEquity";
+import {
+  runWithdrawalSequence,
+  type BucketBalances,
+} from "@/lib/tax/withdrawalSequencer";
+import { withdrawalSequence } from "@/lib/tax/withdrawalSequence";
 
 /* ============================================================== */
 /* Arbitraries                                                     */
@@ -1112,6 +1126,677 @@ describe("householdForRollups invariants", () => {
         },
       ),
       { numRuns: 30 },
+    );
+  });
+});
+
+/* ============================================================== */
+/* Tax model: bucket funding + leveraged-equity + withdrawal      */
+/* sequencer composition invariants.                              */
+/*                                                                */
+/* Point tests cover specific scenarios in:                       */
+/*   - lib/portfolio/bucketFunding.test.ts                        */
+/*   - lib/portfolio/leveragedEquity.test.ts                      */
+/*   - lib/tax/withdrawalSequencer.test.ts                        */
+/*                                                                */
+/* The properties below pin universal claims (monotonicity,       */
+/* conservation, composition) so a future refactor of any of the  */
+/* three engines can't silently violate cross-engine contracts.   */
+/* ============================================================== */
+
+/* ---- Helpers / arbitraries for the tax model ---- */
+
+// Account-category restricted to the categories the bucket-funding
+// + sequencer engines care about. We exclude REAL_ESTATE / CRYPTO /
+// OTHER from the random sample to keep the arbitrary tightly focused
+// on the tax-treatment dimension we want to vary; point tests cover
+// the other categories.
+const accountCategoryArb: fc.Arbitrary<AccountCategory> = fc.constantFrom(
+  "BROKERAGE",
+  "SAVINGS",
+  "401K",
+  "TRAD_IRA",
+  "ROTH_IRA",
+  "ROTH_401K",
+  "HSA",
+  "FIVE_29",
+);
+
+// Random equity holding spec. `leverage` spans 1x..3x so the test
+// covers both the regularEquity AND leveragedEquity sale buckets.
+// `valueUSD` is non-zero so the holding contributes something to NW.
+type EquitySpec = {
+  id: string;
+  valueUSD: number;
+  leverage: number;
+  symbol: string;
+};
+const equitySpecArb: fc.Arbitrary<EquitySpec> = fc.record({
+  id: fc.string({ minLength: 1, maxLength: 8 }),
+  valueUSD: fc.double({
+    min: 100,
+    max: 500_000,
+    noNaN: true,
+    noDefaultInfinity: true,
+  }),
+  // Mix of 1x (regular), 2x (recognized 2x like SSO via "SSO"
+  // symbol), 3x (non-recognized like TQQQ via "TQQQ"), and a few
+  // generic 3x for the diversify branch.
+  leverage: fc.constantFrom(1, 2, 3),
+  symbol: fc.constantFrom("VOO", "VTI", "SSO", "QLD", "TQQQ", "SOXL", "UPRO"),
+});
+
+const cashSpecArb = fc.record({
+  id: fc.string({ minLength: 1, maxLength: 8 }),
+  valueUSD: fc.double({
+    min: 0,
+    max: 200_000,
+    noNaN: true,
+    noDefaultInfinity: true,
+  }),
+});
+
+// Build an equity Holding from a spec. Picks a sensible style box +
+// geography (the bucket-funding + leveragedEquity engines don't read
+// these, but the type system demands them).
+function makeEquity(spec: EquitySpec, idx: number): Holding {
+  return {
+    kind: "equity",
+    id: `eq-${idx}-${spec.id}`,
+    symbol: spec.symbol,
+    shares: 1,
+    lastPriceUSD: spec.valueUSD,
+    lastPricedAt: null,
+    isManualPrice: true,
+    enteredAsShares: false,
+    acquiredAt: null,
+    valueUSD: spec.valueUSD,
+    expectedRealCAGR: 0.05,
+    leverage: spec.leverage,
+    styleBox: {
+      LARGE_VALUE: 0,
+      LARGE_BLEND: 1,
+      LARGE_GROWTH: 0,
+      MID_VALUE: 0,
+      MID_BLEND: 0,
+      MID_GROWTH: 0,
+      SMALL_VALUE: 0,
+      SMALL_BLEND: 0,
+      SMALL_GROWTH: 0,
+    },
+    geography: { US: 1, DEVELOPED: 0, EMERGING: 0 },
+  };
+}
+
+function makeCash(spec: { id: string; valueUSD: number }, idx: number): Holding {
+  return {
+    kind: "cash",
+    id: `cash-${idx}-${spec.id}`,
+    valueUSD: spec.valueUSD,
+    expectedRealCAGR: 0,
+    geography: { US: 1, DEVELOPED: 0, EMERGING: 0 },
+  };
+}
+
+type AccountSpec = {
+  category: AccountCategory;
+  equities: EquitySpec[];
+  cash: { id: string; valueUSD: number }[];
+};
+
+const accountSpecArb: fc.Arbitrary<AccountSpec> = fc.record({
+  category: accountCategoryArb,
+  equities: fc.array(equitySpecArb, { minLength: 0, maxLength: 3 }),
+  cash: fc.array(cashSpecArb, { minLength: 0, maxLength: 2 }),
+});
+
+const householdArb: fc.Arbitrary<Household> = fc
+  .array(accountSpecArb, { minLength: 1, maxLength: 4 })
+  .map((accountSpecs): Household => {
+    const accounts: Account[] = accountSpecs.map((aSpec, ai) => {
+      const holdings: Holding[] = [
+        ...aSpec.equities.map((e, ei) => makeEquity(e, ai * 10 + ei)),
+        ...aSpec.cash.map((c, ci) => makeCash(c, ai * 10 + ci + 100)),
+      ];
+      return {
+        id: `acc-${ai}`,
+        category: aSpec.category,
+        displayName: `acc-${ai}`,
+        ownerId: "m1",
+        holdings,
+        monthlyContributionUSD: 0,
+      };
+    });
+    return {
+      id: "hh",
+      members: [{ id: "m1", displayName: "Tester" }],
+      accounts,
+      liabilities: [],
+    };
+  });
+
+/** Sum total face value across all holdings in the household. */
+function totalAssetUSD(h: Household): number {
+  let total = 0;
+  for (const a of h.accounts) {
+    for (const hh of a.holdings) {
+      total += hh.valueUSD;
+    }
+  }
+  return total;
+}
+
+/** Sum face value of equity holdings sitting in TAXABLE accounts. */
+function taxableEquityFaceUSD(h: Household): number {
+  let total = 0;
+  for (const a of h.accounts) {
+    if (TAX_TREATMENT_BY_CATEGORY[a.category] !== "TAXABLE") continue;
+    for (const hh of a.holdings) {
+      if (hh.kind === "equity") total += hh.valueUSD;
+    }
+  }
+  return total;
+}
+
+const taxRateArb = fc.double({
+  min: 0,
+  max: 0.5,
+  noNaN: true,
+  noDefaultInfinity: true,
+});
+
+const cashFractionArb = fc.double({
+  min: 0,
+  max: 1,
+  noNaN: true,
+  noDefaultInfinity: true,
+});
+
+describe("tax model — property-based invariants", () => {
+  /* ---------------------------------------------------------- */
+  /* 1. Bucket funding monotone in cash request                 */
+  /* ---------------------------------------------------------- */
+  // More cash requested → at least as much tax. Catches a refactor
+  // that accidentally caps the sale loop early, or skips taxable
+  // holdings under load.
+  it("planBucketFunding.totalTaxOwedUSD is monotonic non-decreasing in requested cash fraction", () => {
+    fc.assert(
+      fc.property(
+        householdArb,
+        cashFractionArb,
+        cashFractionArb,
+        taxRateArb,
+        (hh, r1, r2, rate) => {
+          const nw = totalAssetUSD(hh);
+          if (nw <= 0) return; // degenerate, skip
+          const [lo, hi] = r1 <= r2 ? [r1, r2] : [r2, r1];
+          const planLo = planBucketFunding(hh, nw, lo, rate);
+          const planHi = planBucketFunding(hh, nw, hi, rate);
+          // Tiny slack for float noise in the multiply-and-sum.
+          expect(planHi.totalTaxOwedUSD).toBeGreaterThanOrEqual(
+            planLo.totalTaxOwedUSD - 1e-6,
+          );
+        },
+      ),
+      { numRuns: 8 },
+    );
+  });
+
+  /* ---------------------------------------------------------- */
+  /* 2. Tax conservation: bounded by taxable equity × rate      */
+  /* ---------------------------------------------------------- */
+  // You can't owe more cap-gains tax than is theoretically
+  // computable as (taxable holding face × gainFraction × rate).
+  // gainFraction defaults to 1.0, so the bound simplifies to
+  // (taxableFace × rate). The bound is loose-ish because the plan
+  // can pull from non-equity TAXABLE holdings too (cash in taxable
+  // accounts — but cash is excluded from sales, so no tax), but
+  // never tighter than taxable equity face. We use the broader
+  // bound: total taxable asset value × rate.
+  it("planBucketFunding.totalTaxOwedUSD <= taxable assets × rate (conservation)", () => {
+    fc.assert(
+      fc.property(
+        householdArb,
+        cashFractionArb,
+        taxRateArb,
+        (hh, req, rate) => {
+          const nw = totalAssetUSD(hh);
+          if (nw <= 0) return;
+          const plan = planBucketFunding(hh, nw, req, rate);
+          // Upper bound on possible cap-gains tax: every TAXABLE-
+          // account holding sold at face, multiplied by gainFraction
+          // (default 1.0) × rate. Holding count in cash holdings is
+          // ignored at sale time but contributes 0 tax either way,
+          // so summing all TAXABLE-account face is a valid upper
+          // bound.
+          let taxableFace = 0;
+          for (const a of hh.accounts) {
+            if (TAX_TREATMENT_BY_CATEGORY[a.category] !== "TAXABLE") continue;
+            for (const hd of a.holdings) {
+              taxableFace += hd.valueUSD;
+            }
+          }
+          const bound = taxableFace * 1.0 * plan.effectiveTaxRate;
+          expect(plan.totalTaxOwedUSD).toBeLessThanOrEqual(bound + 1e-6);
+        },
+      ),
+      { numRuns: 8 },
+    );
+  });
+
+  /* ---------------------------------------------------------- */
+  /* 3. Sales sum equals amountRaisedUSD                        */
+  /* ---------------------------------------------------------- */
+  // The sum of per-sale face-value must equal the plan's headline
+  // amountRaisedUSD. If a refactor double-counted a holding, or
+  // missed one, this catches it.
+  it("Σ plan.sales[i].faceValueSoldUSD === plan.amountRaisedUSD", () => {
+    fc.assert(
+      fc.property(
+        householdArb,
+        cashFractionArb,
+        taxRateArb,
+        (hh, req, rate) => {
+          const nw = totalAssetUSD(hh);
+          if (nw <= 0) return;
+          const plan = planBucketFunding(hh, nw, req, rate);
+          const sumOfSales = plan.sales.reduce(
+            (acc, s) => acc + s.faceValueSoldUSD,
+            0,
+          );
+          // Allow tiny float slack — the sum is N floating-point
+          // adds on values up to ~$500k each.
+          const slack = Math.max(1e-6, Math.abs(plan.amountRaisedUSD) * 1e-9);
+          expect(Math.abs(sumOfSales - plan.amountRaisedUSD)).toBeLessThan(
+            slack,
+          );
+          // Same check at the per-bucket level: Σ perBucket.face
+          // also equals amountRaisedUSD.
+          const sumOfBuckets = plan.perBucket.reduce(
+            (acc, b) => acc + b.faceValueSoldUSD,
+            0,
+          );
+          expect(Math.abs(sumOfBuckets - plan.amountRaisedUSD)).toBeLessThan(
+            slack,
+          );
+          // perBucket count matches the priority order length —
+          // every bucket appears exactly once.
+          expect(plan.perBucket.length).toBe(SALE_PRIORITY_ORDER.length);
+        },
+      ),
+      { numRuns: 8 },
+    );
+  });
+
+  /* ---------------------------------------------------------- */
+  /* 4. effectiveCashEquivalentShare bounded [0, 1]             */
+  /* ---------------------------------------------------------- */
+  it("plan.effectiveCashEquivalentShare ∈ [0, 1]", () => {
+    fc.assert(
+      fc.property(
+        householdArb,
+        cashFractionArb,
+        taxRateArb,
+        (hh, req, rate) => {
+          const nw = totalAssetUSD(hh);
+          if (nw <= 0) return;
+          const plan = planBucketFunding(hh, nw, req, rate);
+          expect(plan.effectiveCashEquivalentShare).toBeGreaterThanOrEqual(0);
+          expect(plan.effectiveCashEquivalentShare).toBeLessThanOrEqual(
+            1 + 1e-9,
+          );
+        },
+      ),
+      { numRuns: 8 },
+    );
+  });
+
+  /* ---------------------------------------------------------- */
+  /* 5. effectiveCashFractionPostTax bounded [0, 1]             */
+  /* ---------------------------------------------------------- */
+  it("plan.effectiveCashFractionPostTax ∈ [0, 1]", () => {
+    fc.assert(
+      fc.property(
+        householdArb,
+        cashFractionArb,
+        taxRateArb,
+        (hh, req, rate) => {
+          const nw = totalAssetUSD(hh);
+          if (nw <= 0) return;
+          const plan = planBucketFunding(hh, nw, req, rate);
+          expect(plan.effectiveCashFractionPostTax).toBeGreaterThanOrEqual(0);
+          expect(plan.effectiveCashFractionPostTax).toBeLessThanOrEqual(
+            1 + 1e-9,
+          );
+        },
+      ),
+      { numRuns: 8 },
+    );
+  });
+
+  /* ---------------------------------------------------------- */
+  /* 6. Plan ↔ leveraging composition: total tax doesn't        */
+  /*    double-count when both engines see the same household.  */
+  /* ---------------------------------------------------------- */
+  // If both bucket-funding AND deleveraging want to sell the same
+  // TQQQ, the consumedByBucketFunding handoff means the deleveraging
+  // engine sees the REMAINING (post-bucket-sale) face, not the full
+  // face. Property: combining the two via the handoff must give a
+  // total tax ≤ computing them independently (which double-counts).
+  it("bucketFunding.tax + leveragedBuckets(consumed=plan.sales).tax ≤ planAlone.tax + leveragedAlone.tax (no double-count)", () => {
+    fc.assert(
+      fc.property(
+        householdArb,
+        cashFractionArb,
+        taxRateArb,
+        (hh, req, rate) => {
+          const nw = totalAssetUSD(hh);
+          if (nw <= 0) return;
+          // (a) Bucket funding alone.
+          const planAlone = planBucketFunding(hh, nw, req, rate);
+          // (b) Leveraged-equity restructure alone (sees full face).
+          const leveragedAlone = computeLeveragedEquityBuckets(
+            hh,
+            rate,
+            1.0,
+          );
+          // (c) Composition: leveraged sees the bucket-sale handoff.
+          const consumedMap = new Map<string, number>();
+          for (const sale of planAlone.sales) {
+            consumedMap.set(
+              sale.holdingId,
+              (consumedMap.get(sale.holdingId) ?? 0) + sale.faceValueSoldUSD,
+            );
+          }
+          const leveragedAfter = computeLeveragedEquityBuckets(
+            hh,
+            rate,
+            1.0,
+            consumedMap,
+          );
+          const composed =
+            planAlone.totalTaxOwedUSD + leveragedAfter.deleveragingTaxHitUSD;
+          const independent =
+            planAlone.totalTaxOwedUSD + leveragedAlone.deleveragingTaxHitUSD;
+          // Composed should never EXCEED independent (handoff can
+          // only REDUCE the leveraged engine's remaining face).
+          // Allow tiny float slack — both sums involve N multiplies.
+          expect(composed).toBeLessThanOrEqual(independent + 1e-6);
+        },
+      ),
+      { numRuns: 8 },
+    );
+  });
+
+  /* ---------------------------------------------------------- */
+  /* 7. Withdrawal sequence: monotone in tax rate               */
+  /* ---------------------------------------------------------- */
+  // Higher ordinary tax rate → at least as much lifetime tax paid
+  // (across the simulation window). The drawdown engine grosses up
+  // pretax withdrawals at `1/(1-rate)`; LTCG-bucket draws gross up
+  // at `1/(1-rate/2)`; both monotone in `rate`.
+  it("runWithdrawalSequence.totalTaxesPaidUSD is monotone non-decreasing in retirementTaxRate", () => {
+    const startingBalancesArb: fc.Arbitrary<BucketBalances> = fc.record({
+      taxable: fc.double({
+        min: 0,
+        max: 1_000_000,
+        noNaN: true,
+        noDefaultInfinity: true,
+      }),
+      pretax: fc.double({
+        min: 0,
+        max: 1_000_000,
+        noNaN: true,
+        noDefaultInfinity: true,
+      }),
+      roth: fc.double({
+        min: 0,
+        max: 500_000,
+        noNaN: true,
+        noDefaultInfinity: true,
+      }),
+      hsa: fc.double({
+        min: 0,
+        max: 200_000,
+        noNaN: true,
+        noDefaultInfinity: true,
+      }),
+    });
+    const cagrArb = fc.double({
+      min: 0,
+      max: 0.08,
+      noNaN: true,
+      noDefaultInfinity: true,
+    });
+    fc.assert(
+      fc.property(
+        startingBalancesArb,
+        cagrArb,
+        fc.double({
+          min: 10_000,
+          max: 150_000,
+          noNaN: true,
+          noDefaultInfinity: true,
+        }),
+        fc.integer({ min: 5, max: 25 }),
+        fc.double({
+          min: 0.0,
+          max: 0.40,
+          noNaN: true,
+          noDefaultInfinity: true,
+        }),
+        fc.double({
+          min: 0.0,
+          max: 0.40,
+          noNaN: true,
+          noDefaultInfinity: true,
+        }),
+        (startingBalances, cagr, spend, years, t1, t2) => {
+          // Ensure positive balance somewhere — otherwise both runs
+          // produce trivially-zero tax (no withdrawals possible) and
+          // the invariant holds vacuously.
+          const total =
+            startingBalances.taxable +
+            startingBalances.pretax +
+            startingBalances.roth +
+            startingBalances.hsa;
+          if (total <= 0) return;
+          const [lo, hi] = t1 <= t2 ? [t1, t2] : [t2, t1];
+          const cagrByBucket: BucketBalances = {
+            taxable: cagr,
+            pretax: cagr,
+            roth: cagr,
+            hsa: cagr,
+          };
+          const baseInputs = {
+            startingBalances,
+            annualRealSpendUSD: spend,
+            realCAGRByBucket: cagrByBucket,
+            startingAge: 60,
+            years,
+          };
+          const low = runWithdrawalSequence({
+            ...baseInputs,
+            retirementTaxRate: lo,
+          });
+          const high = runWithdrawalSequence({
+            ...baseInputs,
+            retirementTaxRate: hi,
+          });
+          // Float slack for the multi-year accumulator (years ×
+          // bucket-rate products).
+          expect(high.totalTaxesPaidUSD).toBeGreaterThanOrEqual(
+            low.totalTaxesPaidUSD - 1e-6,
+          );
+        },
+      ),
+      { numRuns: 8 },
+    );
+  });
+
+  /* ---------------------------------------------------------- */
+  /* 8. Education bucket excluded from withdrawal sequence      */
+  /* ---------------------------------------------------------- */
+  // A household with $X in a 529 / TRUMP_ACCOUNT must produce a
+  // `withdrawalSequence` whose `education` row carries the $X but
+  // when those bucket totals are forwarded into `runWithdrawalSequence`
+  // (which only accepts taxable/pretax/roth/hsa), the 529 dollars
+  // are NEITHER added to the spendable pool NOR generate tax.
+  //
+  // Concretely: take the same household twice — once with a 529,
+  // once without — and verify the sequencer output is identical
+  // (taxes paid, net spend, ending balance) because the 529 never
+  // reaches the engine.
+  it("EDUCATION (529/Trump) account is excluded from the drawdown engine — its $ neither funds spend nor incurs tax", () => {
+    fc.assert(
+      fc.property(
+        // 529 balance
+        fc.double({
+          min: 1_000,
+          max: 500_000,
+          noNaN: true,
+          noDefaultInfinity: true,
+        }),
+        // Some regular retirement balance
+        fc.double({
+          min: 100_000,
+          max: 2_000_000,
+          noNaN: true,
+          noDefaultInfinity: true,
+        }),
+        // Annual spend
+        fc.double({
+          min: 10_000,
+          max: 150_000,
+          noNaN: true,
+          noDefaultInfinity: true,
+        }),
+        // Years
+        fc.integer({ min: 5, max: 25 }),
+        // Tax rate
+        fc.double({
+          min: 0.0,
+          max: 0.40,
+          noNaN: true,
+          noDefaultInfinity: true,
+        }),
+        (edBalance, retireBalance, spend, years, rate) => {
+          // Build two households: one with a 529, one without.
+          // Both have an identical 401k with retireBalance.
+          const sharedEquityHolding = (
+            id: string,
+            valueUSD: number,
+          ): Holding => makeEquity(
+            { id, valueUSD, leverage: 1, symbol: "VOO" },
+            0,
+          );
+          const baseAccount: Account = {
+            id: "acc-401k",
+            category: "401K",
+            displayName: "401k",
+            ownerId: "m1",
+            holdings: [sharedEquityHolding("retire", retireBalance)],
+            monthlyContributionUSD: 0,
+          };
+          const eduAccount: Account = {
+            id: "acc-529",
+            category: "FIVE_29",
+            displayName: "529",
+            ownerId: "m1",
+            holdings: [sharedEquityHolding("edu", edBalance)],
+            monthlyContributionUSD: 0,
+          };
+          const hhWithout: Household = {
+            id: "hh-w",
+            members: [{ id: "m1", displayName: "Tester" }],
+            accounts: [baseAccount],
+            liabilities: [],
+          };
+          const hhWith: Household = {
+            id: "hh-e",
+            members: [{ id: "m1", displayName: "Tester" }],
+            accounts: [baseAccount, eduAccount],
+            liabilities: [],
+          };
+
+          // (a) withdrawalSequence: the 529 must appear in its own
+          // `education` row with the full $X — proving the bucket
+          // exists and is tracked separately.
+          const seqWith = withdrawalSequence(hhWith, spend);
+          const eduRow = seqWith.rows.find((r) => r.bucket === "education");
+          expect(eduRow).toBeDefined();
+          expect(eduRow!.totalUSD).toBeCloseTo(edBalance, 2);
+
+          // (b) Extract bucket totals exactly the way the UI does:
+          // map the 4 retirement buckets and DROP education.
+          function extractBuckets(seq: typeof seqWith): BucketBalances {
+            const out: BucketBalances = {
+              taxable: 0,
+              pretax: 0,
+              roth: 0,
+              hsa: 0,
+            };
+            for (const row of seq.rows) {
+              if (row.bucket === "taxable") out.taxable = row.totalUSD;
+              else if (row.bucket === "pre_tax") out.pretax = row.totalUSD;
+              else if (row.bucket === "roth") out.roth = row.totalUSD;
+              else if (row.bucket === "hsa") out.hsa = row.totalUSD;
+              // education explicitly NOT propagated
+            }
+            return out;
+          }
+
+          const bucketsWithout = extractBuckets(
+            withdrawalSequence(hhWithout, spend),
+          );
+          const bucketsWith = extractBuckets(seqWith);
+
+          // The 4-bucket totals must be IDENTICAL whether or not the
+          // 529 exists. If a refactor accidentally collapsed
+          // education into roth/taxable/etc, this check would fail.
+          expect(bucketsWith.taxable).toBeCloseTo(bucketsWithout.taxable, 2);
+          expect(bucketsWith.pretax).toBeCloseTo(bucketsWithout.pretax, 2);
+          expect(bucketsWith.roth).toBeCloseTo(bucketsWithout.roth, 2);
+          expect(bucketsWith.hsa).toBeCloseTo(bucketsWithout.hsa, 2);
+
+          // (c) Sequencer outputs must also be identical → 529 is
+          // structurally invisible to the drawdown engine.
+          const cagrZero: BucketBalances = {
+            taxable: 0,
+            pretax: 0,
+            roth: 0,
+            hsa: 0,
+          };
+          const seqInputs = {
+            annualRealSpendUSD: spend,
+            realCAGRByBucket: cagrZero,
+            startingAge: 60,
+            retirementTaxRate: rate,
+            years,
+          };
+          const runWithout = runWithdrawalSequence({
+            ...seqInputs,
+            startingBalances: bucketsWithout,
+          });
+          const runWith = runWithdrawalSequence({
+            ...seqInputs,
+            startingBalances: bucketsWith,
+          });
+          expect(runWith.totalTaxesPaidUSD).toBeCloseTo(
+            runWithout.totalTaxesPaidUSD,
+            2,
+          );
+          expect(runWith.totalNetSpendUSD).toBeCloseTo(
+            runWithout.totalNetSpendUSD,
+            2,
+          );
+          expect(runWith.endingTotalUSD).toBeCloseTo(
+            runWithout.endingTotalUSD,
+            2,
+          );
+        },
+      ),
+      { numRuns: 8 },
     );
   });
 });
