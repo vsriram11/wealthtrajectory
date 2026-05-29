@@ -1161,6 +1161,17 @@ export function HistoricalMonteCarloCard() {
               delta={delta}
               plan={bucketFundingPlan}
               scaledTaxUSD={bucketFundingTaxFraction * startingNW}
+              // Scale `amountRaisedUSD` by the same factor so the
+              // disclosure's "sold X / tax Y" pair is internally
+              // consistent under what-if startingNW overrides
+              // (Round-3 audit HIGH). Without scaling, tax/sold
+              // wouldn't equal the configured tax rate when the
+              // user's startingNW differs from portfolio NW.
+              startingNWScale={
+                portfolio.netWorthUSD > 0
+                  ? startingNW / portfolio.netWorthUSD
+                  : 1
+              }
             />
           );
         })()}
@@ -1434,25 +1445,68 @@ export function HistoricalMonteCarloCard() {
  *   - Pointer to the account editor for opting out specific holdings.
  *   - Cost-basis assumption (gainFraction = 1.0, conservative).
  */
+/**
+ * Display formatter for AccountCategory enum values. The raw enum is
+ * UPPER_SNAKE (BROKERAGE, TRAD_IRA, ROTH_IRA) which renders jarringly
+ * in prose. Mapped to short human-friendly labels.
+ */
+function formatAccountCategory(category: string): string {
+  switch (category) {
+    case "BROKERAGE":
+      return "brokerage";
+    case "SAVINGS":
+      return "savings";
+    case "CHECKING":
+      return "checking";
+    case "401K":
+      return "401(k)";
+    case "ROTH_401K":
+      return "Roth 401(k)";
+    case "TRAD_IRA":
+      return "Trad IRA";
+    case "ROTH_IRA":
+      return "Roth IRA";
+    case "HSA":
+      return "HSA";
+    case "FIVE_29":
+      return "529";
+    case "TRUMP_ACCOUNT":
+      return "Trump account";
+    case "CRYPTO":
+      return "crypto";
+    case "REAL_ESTATE":
+      return "real estate";
+    case "OTHER":
+      return "other";
+    default:
+      return category.toLowerCase();
+  }
+}
+
 function BucketFundingDisclosure({
   delta,
   plan,
   scaledTaxUSD,
+  startingNWScale,
 }: {
   delta: number;
   plan: ReturnType<typeof planBucketFunding>;
   scaledTaxUSD: number;
+  /**
+   * Scale factor = startingNW / portfolio.netWorthUSD. Applied to
+   * the plan's dollar amounts (which are computed in portfolio
+   * terms) so the displayed numbers are CONSISTENT with the
+   * already-scaled tax figure under what-if startingNW overrides
+   * (Round-3 audit HIGH).
+   */
+  startingNWScale: number;
 }) {
   if (delta < 0) {
-    // De-risking direction (cash → equity). No cap-gains sale here;
-    // the composition swap just moves cash into equity in the model.
-    // (Realized gains from re-deploying cash within an IRA/Roth: zero
-    // tax. Buying equity with after-tax cash: zero tax until later
-    // sale. So the SWAP itself is tax-free in v1.)
     return (
       <div
         className="mt-2 rounded-md border border-amber-300/40 bg-amber-300/5 px-2.5 py-1.5 text-[10px] leading-snug text-amber-200"
         role="status"
+        aria-live="polite"
       >
         You&apos;ve sized the bucket BELOW the projected cash share
         (de-risking out of cash into equity). The composition swap is
@@ -1463,15 +1517,25 @@ function BucketFundingDisclosure({
   }
 
   // Equity → cash sale. Show the modeled tax + sale breakdown.
+  // Scale plan dollars so "sold X / tax Y" pair is consistent.
+  const amountRaisedDisplay = plan.amountRaisedUSD * startingNWScale;
+  const amountToRaiseDisplay = plan.amountToRaiseUSD * startingNWScale;
+  const shortDurationBondDisplay =
+    plan.shortDurationBondUSD * startingNWScale;
+  const excludedPrimaryResidenceDisplay =
+    plan.excludedPrimaryResidenceUSD * startingNWScale;
+  const excludedUserOptOutDisplay =
+    plan.excludedUserOptOutUSD * startingNWScale;
   return (
     <div
       className="mt-2 rounded-md border border-amber-300/40 bg-amber-300/5 px-2.5 py-1.5 text-[10px] leading-snug text-amber-200"
       role="status"
+      aria-live="polite"
     >
       <div>
         Funding the larger bucket requires selling{" "}
         <span className="num text-amber-100">
-          {formatUSDCompact(plan.amountRaisedUSD)}
+          {formatUSDCompact(amountRaisedDisplay)}
         </span>{" "}
         of non-cash holdings. Modeled cap-gains tax (on the taxable-
         account portion) is{" "}
@@ -1484,7 +1548,7 @@ function BucketFundingDisclosure({
         <div className="mt-1 text-amber-300/80">
           Short-duration bonds (≤ 1 yr,{" "}
           <span className="num">
-            {formatUSDCompact(plan.shortDurationBondUSD)}
+            {formatUSDCompact(shortDurationBondDisplay)}
           </span>
           ) are counted as cash-equivalent and not sold — they&apos;re
           already part of the SORR buffer.
@@ -1493,17 +1557,20 @@ function BucketFundingDisclosure({
       {plan.shortfallUSD > 0 && (
         <div className="mt-1 text-red-300">
           Shortfall: only{" "}
-          <span className="num">{formatUSDCompact(plan.amountRaisedUSD)}</span>{" "}
+          <span className="num">{formatUSDCompact(amountRaisedDisplay)}</span>{" "}
           could be raised vs the{" "}
           <span className="num">
-            {formatUSDCompact(plan.amountToRaiseUSD)}
+            {formatUSDCompact(amountToRaiseDisplay)}
           </span>{" "}
           requested. Sellable non-cash holdings ran out — the simulator
           uses the actual cash share that resulted.
         </div>
       )}
       <details className="mt-1">
-        <summary className="cursor-pointer text-amber-300/90">
+        <summary
+          className="cursor-pointer text-amber-300/90"
+          aria-label="Show sale plan and tax assumptions"
+        >
           Sale plan + assumptions
         </summary>
         <div className="mt-1.5 space-y-1 text-amber-300/80">
@@ -1514,7 +1581,7 @@ function BucketFundingDisclosure({
                 preferred within tier to minimize the tax bill):
               </div>
               <ul className="mt-0.5 ml-3 list-disc">
-                {plan.sales.slice(0, 8).map((s) => (
+                {plan.sales.slice(0, 15).map((s) => (
                   <li key={s.holdingId}>
                     {s.label}
                     {s.leverage > 1 && (
@@ -1525,26 +1592,28 @@ function BucketFundingDisclosure({
                     )}{" "}
                     —{" "}
                     <span className="num">
-                      {formatUSDCompact(s.faceValueSoldUSD)}
+                      {formatUSDCompact(
+                        s.faceValueSoldUSD * startingNWScale,
+                      )}
                     </span>{" "}
-                    from {s.accountCategory}
+                    from {formatAccountCategory(s.accountCategory)}
                     {s.isTaxable ? (
                       <>
                         ,{" "}
                         <span className="num">
-                          {formatUSDCompact(s.taxOwedUSD)}
+                          {formatUSDCompact(s.taxOwedUSD * startingNWScale)}
                         </span>{" "}
                         tax
                       </>
                     ) : (
-                      ", tax-free (rebalance)"
+                      ", tax-free at sale"
                     )}
                   </li>
                 ))}
-                {plan.sales.length > 8 && (
+                {plan.sales.length > 15 && (
                   <li className="text-amber-300/70">
-                    …and {plan.sales.length - 8} more holding
-                    {plan.sales.length - 8 === 1 ? "" : "s"}
+                    …and {plan.sales.length - 15} more holding
+                    {plan.sales.length - 15 === 1 ? "" : "s"}
                   </li>
                 )}
               </ul>
@@ -1558,7 +1627,7 @@ function BucketFundingDisclosure({
                 <>
                   primary residence (
                   <span className="num">
-                    {formatUSDCompact(plan.excludedPrimaryResidenceUSD)}
+                    {formatUSDCompact(excludedPrimaryResidenceDisplay)}
                   </span>{" "}
                   — can&apos;t be sold without moving)
                 </>
@@ -1570,7 +1639,7 @@ function BucketFundingDisclosure({
                 <>
                   user-marked holdings (
                   <span className="num">
-                    {formatUSDCompact(plan.excludedUserOptOutUSD)}
+                    {formatUSDCompact(excludedUserOptOutDisplay)}
                   </span>
                   )
                 </>
@@ -1580,22 +1649,58 @@ function BucketFundingDisclosure({
           )}
           <div>
             To keep a specific holding (e.g. a long-held high-conviction
-            position), open the account editor and toggle{" "}
+            position you intend to hold-to-inheritance for step-up
+            basis), open the account editor and toggle{" "}
             <span className="text-amber-200">
               &ldquo;Don&apos;t sell for cash-bucket funding&rdquo;
             </span>{" "}
-            in that holding&apos;s advanced section.
+            on that holding.
           </div>
           <div>
-            <span className="font-medium text-amber-200">Assumption:</span>{" "}
+            <span className="font-medium text-amber-200">
+              Cost-basis assumption:
+            </span>{" "}
             this app doesn&apos;t track per-holding cost basis, so the
             model treats all current value as gain (conservative — the
             real-world tax is typically lower if you&apos;ve held less
-            than a full doubling). Tax rate{" "}
+            than a full doubling).
+          </div>
+          <div>
+            <span className="font-medium text-amber-200">Tax rate:</span>{" "}
             <span className="num">
               {(plan.effectiveTaxRate * 100).toFixed(0)}%
             </span>{" "}
-            (your configured retirement long-term cap-gains rate).
+            (your configured retirement rate). NOT modeled in v1: the
+            3.8% NIIT surtax above ~$200k AGI, state cap-gains (0–13.3%
+            depending on state), bracket-climb from a large sale
+            pushing 15% LTCG → 20%, and IRMAA premium adders. For a CA
+            user, real liability could be ~17 pts higher than shown;
+            set the rate slider to encompass federal + NIIT + state if
+            you want the disclosure to match reality.
+          </div>
+          <div>
+            <span className="font-medium text-amber-200">
+              Not modeled:
+            </span>{" "}
+            tax-loss-harvesting offsets (a holding with unrealized
+            losses would generate tax savings, not cost); wash-sale
+            disallowance (if the bucket sale of a ticker is
+            effectively re-bought by the simulator&apos;s allocation,
+            IRS disallows the loss); step-up basis at death (selling a
+            hold-to-inheritance position forfeits the heir&apos;s
+            basis reset — use the opt-out toggle).
+          </div>
+          <div>
+            <span className="font-medium text-amber-200">
+              Pre-tax (401k/Trad IRA) caveat:
+            </span>{" "}
+            sales from these accounts show as &ldquo;tax-free at sale&rdquo;
+            because rebalancing inside the account is tax-free. Those
+            dollars WILL be taxed as ordinary income on withdrawal
+            (already reflected in the simulator&apos;s drawdown
+            tax-bucket logic upstream). Roth + HSA-for-medical
+            withdrawals stay tax-free; HSA-non-medical post-65 is
+            ordinary income.
           </div>
         </div>
       </details>
