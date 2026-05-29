@@ -906,6 +906,27 @@ export type Assumptions = {
    */
   retirementTaxRate?: number;
   /**
+   * Fraction of a sold holding's current value treated as taxable
+   * capital gain when modeling the bucket-funding + deleveraging
+   * cap-gains tax in the historical Monte Carlo card. The app does
+   * not track per-holding cost basis, so the engines need a single
+   * portfolio-wide assumption to convert "I sold $X face value" into
+   * "I owe $X × gainFraction × retirementTaxRate" cap-gains tax.
+   *
+   * Examples:
+   *   1.0 — treat ALL current value as gain (conservative; correct
+   *         for very long-held positions that have already doubled+).
+   *   0.5 — treat half as gain (rough proxy for a position that has
+   *         doubled — basis is half the current value).
+   *   0.0 — no gain at all (e.g. just-purchased, basis ≈ value).
+   *
+   * Defaults to 1.0 (the conservative behavior the engine has shipped
+   * with). Clamped to [0, 1] at the math layer. Flows through to
+   * both `planBucketFunding` and `computeLeveragedEquityBuckets` so
+   * the two tax computations stay internally consistent.
+   */
+  assumedCapGainsFraction?: number;
+  /**
    * SORR mitigation — freeze withdrawals in NOMINAL terms for the
    * first N retirement years. In the engine's real-terms math this
    * translates to a geometric decay of the real withdrawal during

@@ -26,7 +26,8 @@ type Field = {
     | "expectedInflationRate"
     | "retirementVariableHaircut"
     | "retirementVariableShare"
-    | "retirementFixedNominalYears";
+    | "retirementFixedNominalYears"
+    | "assumedCapGainsFraction";
   label: string;
   prefix?: string;
   suffix?: string;
@@ -177,6 +178,33 @@ const fields: Field[] = [
     fromDisplay: (n) => Math.max(0, Math.min(1, n / 100)),
     helpFor: () =>
       "How much of your retirement spend is variable (the slice the haircut may reduce). Defaults to your budget mix when set, else 35% (BLS median for 65+ households). Drag to override.",
+  },
+  {
+    // Assumed cap-gains fraction — companion to the retirement
+    // tax rate. Without per-holding cost-basis tracking, the
+    // bucket-funding + deleveraging engines must assume SOME
+    // gain-to-value ratio when modeling cap-gains tax on the
+    // sale of equity to raise the requested cash bucket (or to
+    // restructure leveraged ETFs at retirement). Default 100%
+    // (treat all value as gain) is the conservative shipped
+    // behavior; a long-held position that has doubled would
+    // realistically be ~50%, and a just-purchased position
+    // would be ~0%. User can dial to match their portfolio's
+    // average cost-basis-to-value ratio.
+    //
+    // Threaded into both `planBucketFunding` and
+    // `computeLeveragedEquityBuckets` so the two tax models
+    // stay internally consistent.
+    key: "assumedCapGainsFraction",
+    label: "Assumed cap-gains fraction (sales)",
+    suffix: "%",
+    step: 5,
+    min: 0,
+    max: 100,
+    toDisplay: (n) => Math.round((n ?? 1) * 100),
+    fromDisplay: (n) => Math.max(0, Math.min(1, n / 100)),
+    helpFor: () =>
+      "Fraction of a sold holding's current value treated as taxable gain in the historical Monte Carlo's bucket-funding + deleveraging tax models. 100% (default) is conservative — treats all value as gain. A position that has doubled is ~50%. Just-purchased ≈ 0%. Lower values reduce the modeled tax bill on equity sales.",
   },
 ];
 

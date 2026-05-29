@@ -190,6 +190,18 @@ export function aggregateAssumptions(
     fixedNominalValues.length > 0
       ? Math.max(...fixedNominalValues)
       : undefined;
+  // Assumed cap-gains fraction aggregates as a simple mean across
+  // members who have set it explicitly. When fully-undefined,
+  // leave undefined so the consumption site falls back to the
+  // engine default (1.0 — conservative). Mirrors the variable-
+  // share aggregation pattern.
+  const capGainsValues = effective
+    .map((a) => a.assumedCapGainsFraction)
+    .filter((v): v is number => v != null && Number.isFinite(v));
+  const meanCapGainsFraction =
+    capGainsValues.length > 0
+      ? capGainsValues.reduce((s, v) => s + v, 0) / capGainsValues.length
+      : undefined;
 
   return {
     ...household,
@@ -203,6 +215,7 @@ export function aggregateAssumptions(
     retirementVariableShare: meanVariableShare,
     retirementTaxRate: meanTax,
     retirementFixedNominalYears: maxFixedNominalYears,
+    assumedCapGainsFraction: meanCapGainsFraction,
   };
 }
 

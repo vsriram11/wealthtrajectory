@@ -543,3 +543,140 @@ describe("HistoricalMonteCarloCard — cash-bucket toggle truth table", () => {
     expect(Math.abs(afterOffCashPct - baselineCashPct)).toBeLessThan(0.1);
   });
 });
+
+describe("HistoricalMonteCarloCard — assumedCapGainsFraction propagation", () => {
+  // Round-3 deferred HIGH: the `gainFraction = 1.0` assumption in the
+  // bucket-funding + deleveraging engines is conservative for long-
+  // held positions but overstated for recently-purchased ones. This
+  // suite pins that the per-portfolio `assumedCapGainsFraction`
+  // setting on the Assumptions slice actually threads through to both
+  // engine call sites in HistoricalMonteCarloCard — without it, the
+  // setting would be dead state and the user would see no effect.
+
+  it("scales the bucket-funding tax disclosure when the setting is lowered", () => {
+    // Single-member household, $1M brokerage (taxable) equity. Push
+    // the requested cash bucket above the projected cash share so the
+    // BucketFundingDisclosure fires and surfaces a tax dollar amount.
+    useAppStore.setState({
+      household: buildHousehold(),
+      assumptions: {
+        ...baseAssumptions(),
+        retirementTaxRate: 0.20,
+        // Default — full-gain, conservative. Should produce the
+        // larger tax bill of the two runs.
+        assumedCapGainsFraction: 1.0,
+      },
+      memberAssumptions: {},
+      selectedMemberId: null,
+      liquidityView: "total",
+      scenarios: [],
+      activeScenarioId: null,
+      budgetItems: [],
+      incomeStreams: [],
+      glidePath: null,
+    });
+    const { unmount } = render(<HistoricalMonteCarloCard />);
+
+    // Toggle priority ON so the cash-bucket SIZE input is rendered.
+    const priorityGroup = screen.getByRole("group", {
+      name: "Cash-bucket priority",
+    });
+    fireEvent.click(
+      priorityGroup.querySelector('[aria-pressed="false"]') as HTMLElement,
+    );
+    // Size = 30% > projected cash share → triggers the disclosure.
+    const sizeInput = (
+      screen.getAllByRole("spinbutton") as HTMLInputElement[]
+    )[3];
+    fireEvent.change(sizeInput, { target: { value: "30" } });
+
+    // Disclosure now visible. It surfaces "X% of each sold position's
+    // current value as taxable gain" — at gainFraction=1.0 this is
+    // "100%". The actual tax dollars are inside the same block.
+    const fullGainText = screen.getByText(
+      /of each sold position.s current value as taxable gain/i,
+    ).parentElement?.textContent ?? "";
+    expect(fullGainText).toMatch(/100%/);
+    unmount();
+
+    // Re-render with gainFraction = 0.5 — the engine should now
+    // compute HALF the cap-gains tax for the same sale. The
+    // disclosure's gain-assumption percent must reflect the new value.
+    useAppStore.setState({
+      household: buildHousehold(),
+      assumptions: {
+        ...baseAssumptions(),
+        retirementTaxRate: 0.20,
+        assumedCapGainsFraction: 0.5,
+      },
+      memberAssumptions: {},
+      selectedMemberId: null,
+      liquidityView: "total",
+      scenarios: [],
+      activeScenarioId: null,
+      budgetItems: [],
+      incomeStreams: [],
+      glidePath: null,
+    });
+    render(<HistoricalMonteCarloCard />);
+    const priorityGroup2 = screen.getByRole("group", {
+      name: "Cash-bucket priority",
+    });
+    fireEvent.click(
+      priorityGroup2.querySelector('[aria-pressed="false"]') as HTMLElement,
+    );
+    const sizeInput2 = (
+      screen.getAllByRole("spinbutton") as HTMLInputElement[]
+    )[3];
+    fireEvent.change(sizeInput2, { target: { value: "30" } });
+
+    const halfGainText = screen.getByText(
+      /of each sold position.s current value as taxable gain/i,
+    ).parentElement?.textContent ?? "";
+    expect(halfGainText).toMatch(/50%/);
+    // And the gain assumption MUST NOT still read 100% — pin the
+    // sense of the change so a regression that pinned the display
+    // at "100%" can't pass silently.
+    expect(halfGainText).not.toMatch(/100% of each sold/i);
+  });
+
+  it("undefined setting defaults to 1.0 (preserves existing behavior — no surprise on existing user state)", () => {
+    // Pristine assumptions object (no assumedCapGainsFraction). The
+    // engines + disclosure must behave identically to the explicit-
+    // 1.0 case. Protects against a future refactor that silently
+    // changes the default — that would shift the modeled tax bill
+    // for every existing user without warning.
+    useAppStore.setState({
+      household: buildHousehold(),
+      assumptions: {
+        ...baseAssumptions(),
+        retirementTaxRate: 0.20,
+        // assumedCapGainsFraction intentionally omitted.
+      },
+      memberAssumptions: {},
+      selectedMemberId: null,
+      liquidityView: "total",
+      scenarios: [],
+      activeScenarioId: null,
+      budgetItems: [],
+      incomeStreams: [],
+      glidePath: null,
+    });
+    render(<HistoricalMonteCarloCard />);
+    const priorityGroup = screen.getByRole("group", {
+      name: "Cash-bucket priority",
+    });
+    fireEvent.click(
+      priorityGroup.querySelector('[aria-pressed="false"]') as HTMLElement,
+    );
+    const sizeInput = (
+      screen.getAllByRole("spinbutton") as HTMLInputElement[]
+    )[3];
+    fireEvent.change(sizeInput, { target: { value: "30" } });
+
+    const text = screen.getByText(
+      /of each sold position.s current value as taxable gain/i,
+    ).parentElement?.textContent ?? "";
+    expect(text).toMatch(/100%/);
+  });
+});

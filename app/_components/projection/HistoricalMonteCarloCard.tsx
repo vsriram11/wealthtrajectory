@@ -379,6 +379,16 @@ export function HistoricalMonteCarloCard() {
   // Compute BEFORE leveragedBuckets so the deleveraging engine can
   // skip holdings already consumed for cash — preventing the
   // Round-1 audit's double-tax bug.
+  // Cap-gains fraction the engines should use to convert "$X face
+  // value sold" into "$X × gainFraction × taxRate" cap-gains tax.
+  // Default 1.0 (conservative — matches the engines' shipped default
+  // when the assumption is unset) so existing user state behaves
+  // identically. User can dial down via Plan → Assumptions to reflect
+  // a less-fully-appreciated portfolio.
+  const assumedCapGainsFraction = Math.max(
+    0,
+    Math.min(1, effective.assumedCapGainsFraction ?? 1),
+  );
   const bucketFundingPlan = useMemo(
     () =>
       planBucketFunding(
@@ -388,6 +398,8 @@ export function HistoricalMonteCarloCard() {
           ? requestedCashFraction
           : portfolio.classes.cashShare,
         effective.retirementTaxRate ?? 0,
+        undefined,
+        assumedCapGainsFraction,
       ),
     [
       projectedHousehold,
@@ -396,6 +408,7 @@ export function HistoricalMonteCarloCard() {
       cashBucketOverrideActive,
       requestedCashFraction,
       effective.retirementTaxRate,
+      assumedCapGainsFraction,
     ],
   );
   // Map<holdingId, USD-consumed-by-bucket-funding> for the
@@ -416,10 +429,15 @@ export function HistoricalMonteCarloCard() {
       computeLeveragedEquityBuckets(
         projectedHousehold,
         effective.retirementTaxRate,
-        undefined,
+        assumedCapGainsFraction,
         bucketFundingConsumed,
       ),
-    [projectedHousehold, effective.retirementTaxRate, bucketFundingConsumed],
+    [
+      projectedHousehold,
+      effective.retirementTaxRate,
+      assumedCapGainsFraction,
+      bucketFundingConsumed,
+    ],
   );
 
   // Decompose equity into face values to recompose post-tax.
@@ -853,9 +871,13 @@ export function HistoricalMonteCarloCard() {
               <span className="num">
                 {((effective.retirementTaxRate ?? 0.2) * 100).toFixed(0)}%
               </span>{" "}
-              retirement tax rate × 100% gain assumption × value in
-              taxable accounts). See the leveraged-allocation warning
-              on the Allocation page for the per-position breakdown.
+              retirement tax rate ×{" "}
+              <span className="num">
+                {Math.round(assumedCapGainsFraction * 100)}%
+              </span>{" "}
+              gain assumption × value in taxable accounts). See the
+              leveraged-allocation warning on the Allocation page for
+              the per-position breakdown.
             </div>
           )}
           {effectiveWR > 0.06 && (
@@ -1161,6 +1183,7 @@ export function HistoricalMonteCarloCard() {
               delta={delta}
               plan={bucketFundingPlan}
               scaledTaxUSD={bucketFundingTaxFraction * startingNW}
+              gainFraction={assumedCapGainsFraction}
               // Scale `amountRaisedUSD` by the same factor so the
               // disclosure's "sold X / tax Y" pair is internally
               // consistent under what-if startingNW overrides
@@ -1443,7 +1466,8 @@ export function HistoricalMonteCarloCard() {
  *   - Excluded items: primary residence + user opt-outs, named so
  *     the user knows why they weren't sold.
  *   - Pointer to the account editor for opting out specific holdings.
- *   - Cost-basis assumption (gainFraction = 1.0, conservative).
+ *   - Cost-basis assumption (gainFraction; the value the user
+ *     configured under Plan → Assumptions, default 1.0).
  */
 /**
  * Display formatter for AccountCategory enum values. The raw enum is
@@ -1488,6 +1512,7 @@ function BucketFundingDisclosure({
   plan,
   scaledTaxUSD,
   startingNWScale,
+  gainFraction,
 }: {
   delta: number;
   plan: ReturnType<typeof planBucketFunding>;
@@ -1500,6 +1525,13 @@ function BucketFundingDisclosure({
    * (Round-3 audit HIGH).
    */
   startingNWScale: number;
+  /**
+   * The user-configured fraction of sold value treated as taxable
+   * gain. Surfaced in the disclosure so the user can see WHICH
+   * value the engine is using (1.0 default → fully-appreciated,
+   * conservative; lower → less of the sale is taxable).
+   */
+  gainFraction: number;
 }) {
   if (delta < 0) {
     return (
@@ -1661,9 +1693,18 @@ function BucketFundingDisclosure({
               Cost-basis assumption:
             </span>{" "}
             this app doesn&apos;t track per-holding cost basis, so the
-            model treats all current value as gain (conservative — the
-            real-world tax is typically lower if you&apos;ve held less
-            than a full doubling).
+            model treats{" "}
+            <span className="num text-amber-100">
+              {Math.round(gainFraction * 100)}%
+            </span>{" "}
+            of each sold position&apos;s current value as taxable gain
+            (your configured assumed cap-gains fraction;{" "}
+            {gainFraction >= 0.999
+              ? "the default — conservative, correct for very long-held positions but overstated for recently-bought ones"
+              : gainFraction <= 0.001
+                ? "no gain — assumes basis ≈ current value (e.g. just-purchased positions)"
+                : "tune from Plan → Assumptions to match your portfolio's gain-to-value mix"}
+            ).
           </div>
           <div>
             <span className="font-medium text-amber-200">Tax rate:</span>{" "}
