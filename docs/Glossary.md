@@ -82,6 +82,54 @@ starting balance to an ending balance over N years.
 
 Real CAGR: `(end / start)^(1/N) − 1`, computed on inflation-adjusted balances.
 
+### Time-Weighted Return (TWR)
+The portfolio's return with the effect of YOUR cashflow timing removed —
+"how well did the assets perform, independent of when I added or withdrew
+money?" Computed as the chained product of period returns:
+`TWR = ∏ (1 + r_i) − 1`, where each `r_i` is the period return between
+consecutive cashflows. Useful for comparing your portfolio to a benchmark
+(an index has no cashflows, so its return is intrinsically time-weighted).
+
+**Honest note on what this app computes:** WealthTrajectory records VALUE
+at each snapshot but does NOT record explicit deposits/withdrawals between
+snapshots. Without flow data, the chained-return product telescopes to
+plain CAGR (`V_end / V_start − 1`, annualized), so the "TWR" we surface
+is identical to CAGR. The label is intentional — when flow tracking is
+added in a future version, the TWR figure will diverge from CAGR by the
+contribution effect.
+
+### Money-Weighted Return (MWR / IRR)
+The portfolio's return INCLUDING the effect of your cashflow timing —
+"what annualized rate makes the present value of all my deposits and
+withdrawals equal the current balance?" Formally the Internal Rate of
+Return: the discount rate that zeros the NPV of `{−deposits, +balance}`.
+MWR rewards adding money before a rally and penalizes adding before a
+downturn, even if the market performance was identical in both cases.
+
+**Honest note on what this app computes:** Same caveat as TWR — without
+recorded cashflows, MWR collapses to the same CAGR figure. The TWR vs.
+MWR distinction only becomes meaningful once per-flow data is captured;
+the current History view shows the CAGR they jointly collapse to,
+labeled as such.
+
+**Worked example of when they diverge** (for understanding the concept):
+Two investors each buy $10K of an index on day 1. Investor A holds.
+Investor B doubles down with another $10K just before a 20% rally, then
+sells the entire position 1 year after the original buy at the post-rally
+price. A's TWR and MWR are identical (no cashflows after day 1). B's TWR
+matches the index's TWR (the market did the same thing for both); but B's
+MWR is HIGHER than A's because the timing of the extra $10K caught the
+rally. The TWR-vs-MWR gap is the value (or cost) of your contribution
+timing.
+
+### Max drawdown
+The largest peak-to-trough loss in a value series, expressed as a
+percentage of the peak. `max((peak_value − trough_value) / peak_value)`
+across all (peak, later trough) pairs. A 30% max drawdown means the
+asset was once worth 30% less than its prior peak before recovering.
+Useful as a quick "how bad did it get?" risk measure that's independent
+of how the rest of the series looks.
+
 ### Inflation rate
 The user's assumed annual CPI rate, single source of truth for every
 nominal↔real conversion in the app. Default 3% if unset.
