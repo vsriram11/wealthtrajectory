@@ -1079,6 +1079,48 @@ describe("simulatePath — cashBucketPriority (orthogonal to rebalance policy)",
     ).toBeGreaterThan(1);
   });
 
+  it("annual + bucket with single-year horizon: clamp-asymmetry safe (no divergence from no-bucket)", () => {
+    // The bucket branch re-derives `nw` from per-class balances
+    // after clamping non-cash classes to ≥ 0. With horizon=1
+    // there's no composition-propagation buffer to absorb any
+    // clamp-induced drift, so a subtle off-by-clamp bug would
+    // show up as trajectory[1] disagreement at full precision.
+    // Pin the "year-end TOTAL must match in the firing year"
+    // invariant at the smallest exposed configuration.
+    const inputs: MonteCarloInputs = {
+      startingNetWorthUSD: 1_000_000,
+      allocation: {
+        stocksFraction: 0.85,
+        bondsFraction: 0,
+        cashFraction: 0.15,
+      },
+      annualSpendUSD: 60_000,
+      retirementHorizonYears: 1,
+    };
+    const stocks = [-0.2]; // realistic SORR-year shock
+    const noBucket = simulatePath(
+      inputs,
+      stocks,
+      [0],
+      [0],
+      [0],
+      [0],
+      "horizon1-no",
+      { rebalance: "annual" },
+    );
+    const withBucket = simulatePath(
+      { ...inputs, spending: spendingWithBucket() },
+      stocks,
+      [0],
+      [0],
+      [0],
+      [0],
+      "horizon1-yes",
+      { rebalance: "annual" },
+    );
+    expect(withBucket.trajectory[1]).toBeCloseTo(noBucket.trajectory[1], 2);
+  });
+
   it("unknown rebalance string (legacy 'bucket' or arbitrary) degrades to 'annual' — no silent fall-through", () => {
     // Defense-in-depth: TS pins the union at compile time, but a
     // dev-tools tamper / future legacy import could push an

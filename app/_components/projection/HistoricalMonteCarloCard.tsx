@@ -153,8 +153,16 @@ export function HistoricalMonteCarloCard() {
   // sync with `defaultStartingNW` as upstream inputs (member filter,
   // target, current NW) shift. Once they touch the input, freeze.
   const [startingNWTouched, setStartingNWTouched] = useState(false);
-  if (!startingNWTouched && startingNW !== Math.round(defaultStartingNW)) {
-    setStartingNW(Math.round(defaultStartingNW));
+  // NaN guard: if `defaultStartingNW` is NaN (corrupted persisted
+  // state, hostile cloud-sync payload), `Math.round(NaN) === NaN`
+  // and NaN never equals itself — so `startingNW !== NaN` would be
+  // true on every render, firing setState forever → infinite render
+  // loop. CLAUDE.md NaN-safety contract: bad input degrades to no-op.
+  const defaultStartingNWRounded = Number.isFinite(defaultStartingNW)
+    ? Math.round(defaultStartingNW)
+    : 0;
+  if (!startingNWTouched && startingNW !== defaultStartingNWRounded) {
+    setStartingNW(defaultStartingNWRounded);
   }
   const startingMode =
     targetNW > 0 && startingNW >= targetNW
@@ -979,7 +987,7 @@ export function HistoricalMonteCarloCard() {
         )}
         {/* Tax-implications warning: fires when the requested
             bucket size differs from the projected (aged) cash
-            share by more than the input's precision (step=0.1
+            share by MORE THAN the input's precision (step=0.1
             → 0.001 fractional). `delta` is computed ONCE here so
             the gate, the direction test, and the message all
             agree. Two-way: equity → cash sells equity at
@@ -988,13 +996,39 @@ export function HistoricalMonteCarloCard() {
         {(() => {
           if (!cashBucketOverrideActive || requestedCashFraction == null)
             return null;
+          // Special case: 100% cash portfolio. The helper short-
+          // circuits (no non-cash to redistribute from), so the
+          // user's override is silently ignored. Show that fact
+          // honestly instead of describing a composition swap that
+          // didn't happen.
+          if (projectedCashShare >= 1 - 0.001) {
+            const requestedDelta = Math.abs(
+              requestedCashFraction - projectedCashShare,
+            );
+            if (requestedDelta < 0.001) return null;
+            return (
+              <div
+                className="mt-2 rounded-md border border-amber-300/40 bg-amber-300/5 px-2.5 py-1.5 text-[10px] leading-snug text-amber-200"
+                role="status"
+              >
+                Your projected portfolio is essentially 100% cash, so
+                the bucket-size override has nothing to redistribute
+                from — the simulator runs at 100% cash. Add equity /
+                bond holdings to model a meaningful cash-bucket
+                sizing.
+              </div>
+            );
+          }
           // Compare against the clamped value the simulator actually
           // consumes (already inside [0, CASH_BUCKET_MAX_PCT/100]),
           // not the raw `cashBucketSizePct / 100`. Equivalent today
           // (UI gates the input) but robust against a future
           // programmatic setter pushing the raw value out of range.
           const delta = requestedCashFraction - projectedCashShare;
-          if (Math.abs(delta) <= 0.001) return null;
+          // `< 0.001` (strictly less) — the comment says "more than
+          // the input's precision," matching what users expect: typing
+          // ONE deliberate step from the default produces a warning.
+          if (Math.abs(delta) < 0.001) return null;
           return (
             <div
               className="mt-2 rounded-md border border-amber-300/40 bg-amber-300/5 px-2.5 py-1.5 text-[10px] leading-snug text-amber-200"

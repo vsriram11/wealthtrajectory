@@ -29,9 +29,21 @@ export function memberFilteredSnapshots(
   snapshots: Snapshot[],
   memberId: string | null,
 ): Snapshot[] {
-  if (!memberId) return snapshots;
+  // Boundary NaN/Infinity guard for `s.t`: cloud-sync / external
+  // imports can deliver a row with `t = NaN` (corrupted clock /
+  // hostile payload). NaN poisons Math.min in summary text and
+  // sort comparators (undefined ordering), so drop those rows
+  // here at the single canonical filter. Memberless calls also
+  // need the guard; can't pass-through-reference any more, but
+  // the cost is one filter pass on a tiny list (snapshots <100).
+  const finite = snapshots.filter((s) => Number.isFinite(s.t));
+  if (!memberId) {
+    // Pass-through identity when no NaN rows were filtered, so
+    // memoization downstream stays stable on clean data.
+    return finite.length === snapshots.length ? snapshots : finite;
+  }
   const out: Snapshot[] = [];
-  for (const s of snapshots) {
+  for (const s of finite) {
     if (!s.household) continue; // legacy NW-only — can't attribute
     const filteredHh = filterHousehold(s.household, memberId);
     out.push({

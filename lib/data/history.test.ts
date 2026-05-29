@@ -557,6 +557,27 @@ describe("memberFilteredSnapshots (Round-5 fix)", () => {
     expect(out[0].household?.accounts).toHaveLength(0);
   });
 
+  it("drops snapshots with NaN or Infinity `t` regardless of memberId (boundary guard)", () => {
+    // Cloud-sync corruption / hostile import can land a row with
+    // `t = NaN`. NaN poisons Math.min in summary text + sort
+    // comparators (undefined ordering). The single canonical filter
+    // drops them at the boundary so every downstream consumer is
+    // protected, matching the engine NaN-safety contract.
+    const snapshots: Snapshot[] = [
+      { t: 100, netWorthUSD: 1, household: fullHousehold },
+      { t: Number.NaN, netWorthUSD: 2, household: fullHousehold },
+      { t: Number.POSITIVE_INFINITY, netWorthUSD: 3, household: fullHousehold },
+      { t: 200, netWorthUSD: 4, household: fullHousehold },
+    ];
+    const noFilter = memberFilteredSnapshots(snapshots, null);
+    expect(noFilter).toHaveLength(2);
+    expect(noFilter.map((s) => s.t)).toEqual([100, 200]);
+
+    const filtered = memberFilteredSnapshots(snapshots, m1);
+    expect(filtered).toHaveLength(2);
+    expect(filtered.map((s) => s.t)).toEqual([100, 200]);
+  });
+
   it("keeps a rich snapshot whose stored household pre-dates the selected member (NW=0)", () => {
     // Edge case: user created member m3 AFTER capturing a 2022
     // snapshot. The snapshot's stored household has no m3 at all.

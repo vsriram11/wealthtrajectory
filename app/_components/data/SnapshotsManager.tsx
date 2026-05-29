@@ -9,7 +9,11 @@ import {
   recordSnapshot,
   type Snapshot,
 } from "@/lib/persistence/persistence";
-import { filterHousehold, householdNetWorth } from "@/lib/types";
+import {
+  filterHousehold,
+  householdForRollups,
+  householdNetWorth,
+} from "@/lib/types";
 import { memberFilteredSnapshots } from "@/lib/data/history";
 import { formatUSD } from "@/lib/format";
 
@@ -96,15 +100,23 @@ export function SnapshotsManager() {
     [filteredSnapshots],
   );
   // The live "Current NW" shown next to the Save button needs to
-  // match the user's mental model. When filtered to a member,
-  // showing household NW is misleading and contradicts every other
-  // figure on the page. The snapshot PAYLOAD is still captured
-  // whole (read-side filter handles the display), but what the
-  // user SEES while deciding to save must be member-scoped.
+  // match the user's mental model AND the figure every other card
+  // on the page shows. Two layers:
+  //   - When filtered to a member, scope to that member's slice.
+  //   - When NOT filtered, scope to ROLLUP-included members only
+  //     (matching the canonical householdForRollups pattern; other
+  //     cards route through useActiveProjection which already
+  //     applies this). A user who excluded a member would otherwise
+  //     see Current NW here disagree with every other display.
+  //
+  // The snapshot PAYLOAD captures the FULL household (rollup flag
+  // is a current view-level concept; snapshots preserve the
+  // historical record). The display is just an honest pre-save
+  // preview.
   const currentDisplayNW = useMemo(
     () =>
       memberId == null
-        ? householdNetWorth(household)
+        ? householdNetWorth(householdForRollups(household))
         : householdNetWorth(filterHousehold(household, memberId)),
     [household, memberId],
   );
@@ -441,7 +453,7 @@ export function summarize(
       return "None yet — capture one to anchor your history";
     }
     if (droppedLegacyCount > 0) {
-      return `No member-attributable snapshots (${droppedLegacyCount} legacy NW-only hidden — filterable only at household view)`;
+      return `No member-attributable snapshots (${droppedLegacyCount} legacy NW-only hidden — switch to household view to see them)`;
     }
     return "No snapshots for this member";
   }
