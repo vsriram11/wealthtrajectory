@@ -24,7 +24,7 @@
  */
 
 import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { useAppStore } from "@/lib/store";
 import { HistoricalMonteCarloCard } from "./HistoricalMonteCarloCard";
 import type { Account, Assumptions, Household } from "@/lib/types";
@@ -324,8 +324,8 @@ describe("HistoricalMonteCarloCard — projection-forward composition", () => {
     // them past today's parity), bonds < 50.
     const allocSummary = screen.getByText(/% stocks \/ /);
     const text = allocSummary.textContent ?? "";
-    const stocksMatch = text.match(/(\d+)% stocks/);
-    const bondsMatch = text.match(/(\d+)% bonds/);
+    const stocksMatch = text.match(/(\d+(?:\.\d+)?)% stocks/);
+    const bondsMatch = text.match(/(\d+(?:\.\d+)?)% bonds/);
     expect(stocksMatch).not.toBeNull();
     expect(bondsMatch).not.toBeNull();
     const stocksPct = Number(stocksMatch![1]);
@@ -459,3 +459,87 @@ function readStocksPctFromAllocation(): number {
   if (!match) throw new Error("stocks pct not found in allocation summary");
   return Number(match[1]);
 }
+
+function readCashPctFromAllocation(): number {
+  const allocSummary = screen.getByText(/% stocks \/ /);
+  const match = (allocSummary.textContent ?? "").match(
+    /(\d+(?:\.\d+)?)% cash/,
+  );
+  if (!match) throw new Error("cash pct not found in allocation summary");
+  return Number(match[1]);
+}
+
+describe("HistoricalMonteCarloCard — cash-bucket toggle truth table", () => {
+  // The 2×2 priority × size override × glide-path matrix has several
+  // ways to leak state across toggles. Round-4 audit surfaced one:
+  // `cashBucketSizePct` could persist across a priority-OFF flip and
+  // silently override allocation when re-enabled. The runtime gate
+  // (`cashBucketOverrideActive`) blocks this — these tests pin that
+  // behavior so a future refactor can't reintroduce the leak.
+
+  // "refilling reserve" / "depleting reserve" only appear in the
+  // methodology bullet (never in the toggle row), so it's a clean
+  // signal that the bullet is rendered.
+  const METHODOLOGY_BULLET = /(refilling|depleting) reserve/;
+
+  it("baseline (priority OFF) shows methodology without cash-bucket bullet", () => {
+    seed({ targetNetWorthUSD: 2_000_000, withdrawalRate: 0.04 });
+    const { container } = render(<HistoricalMonteCarloCard />);
+    const text = container.textContent ?? "";
+    expect(text).not.toMatch(METHODOLOGY_BULLET);
+  });
+
+  it("toggling priority ON renders the methodology bullet", () => {
+    seed({ targetNetWorthUSD: 2_000_000, withdrawalRate: 0.04 });
+    const { container } = render(<HistoricalMonteCarloCard />);
+    const priorityGroup = screen.getByRole("group", {
+      name: "Cash-bucket priority",
+    });
+    fireEvent.click(
+      priorityGroup.querySelector('[aria-pressed="false"]') as HTMLElement,
+    );
+    // textContent search: the bullet text spans multiple inline
+    // elements so a single getByText query can fragment it. Querying
+    // the methodology container's textContent is the robust approach.
+    const text = container.textContent ?? "";
+    expect(text).toMatch(METHODOLOGY_BULLET);
+  });
+
+  it("toggling priority OFF after setting a custom size does NOT leak the size into baseline allocation", () => {
+    // Round-3/4 state-leak regression. Prior bug: the size override
+    // survived priority-OFF and continued to drive the simulator's
+    // allocation, contradicting the UI's "off" mode chip.
+    seed({ targetNetWorthUSD: 2_000_000, withdrawalRate: 0.04 });
+    render(<HistoricalMonteCarloCard />);
+    const baselineCashPct = readCashPctFromAllocation();
+
+    // Toggle priority ON.
+    const priorityGroup = screen.getByRole("group", {
+      name: "Cash-bucket priority",
+    });
+    fireEvent.click(
+      priorityGroup.querySelector('[aria-pressed="false"]') as HTMLElement,
+    );
+
+    // Find the bucket size input — it's the 4th spinbutton (after
+    // Starting NW, Annual spend, Horizon).
+    const spinButtons = screen.getAllByRole(
+      "spinbutton",
+    ) as HTMLInputElement[];
+    const sizeInput = spinButtons[3];
+    fireEvent.change(sizeInput, { target: { value: "30" } });
+    // Cash% in allocation should now be ~30%.
+    expect(readCashPctFromAllocation()).toBeGreaterThan(25);
+
+    // Toggle priority OFF — click the chip that is CURRENTLY
+    // inactive (the "Off" chip with aria-pressed="false"). Clicking
+    // the active chip would re-fire setCashBucketPriority(true) with
+    // the same value, a no-op.
+    fireEvent.click(
+      priorityGroup.querySelector('[aria-pressed="false"]') as HTMLElement,
+    );
+    const afterOffCashPct = readCashPctFromAllocation();
+    // Allow ±0.1% slack for 2-decimal rounding noise.
+    expect(Math.abs(afterOffCashPct - baselineCashPct)).toBeLessThan(0.1);
+  });
+});

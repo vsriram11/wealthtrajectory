@@ -95,6 +95,7 @@ export function ModeChip({
     <button
       type="button"
       onClick={onClick}
+      aria-pressed={active}
       className={`rounded-full px-3 py-1 text-[11px] font-medium transition active:opacity-70 ${
         active ? "bg-accent text-bg" : "text-text-muted hover:text-text"
       }`}

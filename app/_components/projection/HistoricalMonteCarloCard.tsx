@@ -185,14 +185,21 @@ export function HistoricalMonteCarloCard() {
   //   - none + bucket-off:   set-and-forget drift
   //   - none + bucket-on:    DEPLETING cash reserve (Pfau), the
   //                           finite SORR shield for early years
+  // Per-card sim knobs are SESSION-SCOPED (useState, not Zustand).
+  // Intentional: this card is an exploration sandbox — the user is
+  // expected to flip toggles to see what happens. Persisting would
+  // create stale state across reloads ("why is my baseline acting
+  // weird?"). The assumptions slice (retirement-tax-rate, etc.)
+  // remains the long-lived source of plan-level truth.
   const [rebalance, setRebalance] = useState<"annual" | "none">("annual");
   const [cashBucketPriority, setCashBucketPriority] = useState(false);
   // Optional cash-bucket size override (in % of NW). Default
-  // null = use whatever cashFraction the allocation produces.
-  // When set, the simulator's allocation is rewritten at the
-  // call site: `stocksFraction` shrinks to make room for the
-  // larger cash slice. Defer the equity → cash swap tax hit
-  // to a later iteration (documented in methodology copy).
+  // null = use the projected cash share at target unchanged.
+  // When set, the simulator's allocation is rewritten via
+  // `applyCashBucketOverride` so the cash slice equals this value
+  // and every non-cash class is rescaled proportionally to sum
+  // to 1. Defer the equity → cash swap tax hit to a later
+  // iteration (documented in methodology copy).
   const [cashBucketSizePct, setCashBucketSizePct] = useState<number | null>(
     null,
   );
@@ -867,7 +874,11 @@ export function HistoricalMonteCarloCard() {
             <span className="text-text">Rebalance</span> between
             asset classes
           </div>
-          <div className="inline-flex shrink-0 gap-0.5 rounded-full border border-border bg-bg-surface p-0.5">
+          <div
+            className="inline-flex shrink-0 gap-0.5 rounded-full border border-border bg-bg-surface p-0.5"
+            role="group"
+            aria-label="Rebalance policy"
+          >
             <ModeChip
               label="Annual"
               active={rebalance === "annual"}
@@ -885,7 +896,11 @@ export function HistoricalMonteCarloCard() {
             <span className="text-text">Cash-bucket priority</span> in
             retirement (draw cash before equity)
           </div>
-          <div className="inline-flex shrink-0 gap-0.5 rounded-full border border-border bg-bg-surface p-0.5">
+          <div
+            className="inline-flex shrink-0 gap-0.5 rounded-full border border-border bg-bg-surface p-0.5"
+            role="group"
+            aria-label="Cash-bucket priority"
+          >
             <ModeChip
               label="Off"
               active={!cashBucketPriority}
@@ -911,15 +926,26 @@ export function HistoricalMonteCarloCard() {
             <span className="flex shrink-0 items-center gap-1 rounded-md border border-border-strong bg-bg-surface px-2 py-1">
               <NumberInput
                 label="%"
+                // Initialize displayed value to the projected
+                // float at the SAME precision the math uses. Two
+                // decimals + step=0.1 means the value the user
+                // sees and the value the simulator runs are the
+                // same number — no silent rounding when the user
+                // submits the displayed default. (Round-4 audit:
+                // previously step=1 + Math.round caused 5.13%
+                // float to display as "5", and typing "5" then
+                // flipped state from null to 5 → math used 5%
+                // exactly, a 0.13% NW shift with no warning.)
                 value={
-                  cashBucketSizePct ?? Math.round(projectedCashShare * 100)
+                  cashBucketSizePct ??
+                  Number((projectedCashShare * 100).toFixed(2))
                 }
                 onChange={(v) =>
                   setCashBucketSizePct(
                     Math.max(0, Math.min(CASH_BUCKET_MAX_PCT, v)),
                   )
                 }
-                step={1}
+                step={0.1}
                 min={0}
                 max={CASH_BUCKET_MAX_PCT}
                 compact
@@ -928,7 +954,10 @@ export function HistoricalMonteCarloCard() {
           </div>
         )}
         {cashBucketPriority && glidePathActive && (
-          <div className="mt-2 rounded-md border border-amber-300/40 bg-amber-300/5 px-2.5 py-1.5 text-[10px] leading-snug text-amber-200">
+          <div
+            className="mt-2 rounded-md border border-amber-300/40 bg-amber-300/5 px-2.5 py-1.5 text-[10px] leading-snug text-amber-200"
+            role="status"
+          >
             A glide path is configured — the simulator computes
             per-year allocation from age, so the cash bucket SIZE
             override is ignored (the priority flag still drives
@@ -937,30 +966,40 @@ export function HistoricalMonteCarloCard() {
           </div>
         )}
         {cashBucketPriority && cashFractionEffective < 0.005 && (
-          <div className="mt-2 rounded-md border border-amber-300/40 bg-amber-300/5 px-2.5 py-1.5 text-[10px] leading-snug text-amber-200">
+          <div
+            className="mt-2 rounded-md border border-amber-300/40 bg-amber-300/5 px-2.5 py-1.5 text-[10px] leading-snug text-amber-200"
+            role="status"
+          >
             Cash-bucket priority is on but your effective cash slice
             is essentially 0%. With no cash to drain, the policy
             no-ops — either set a Cash bucket size above or add
             cash to your real portfolio.
           </div>
         )}
-        {/* Tax-implications warning: fires whenever the requested
+        {/* Tax-implications warning: fires when the requested
             bucket size differs from the projected (aged) cash
-            share by more than the displayed precision (0.5%, since
-            the input is integer percent and the display uses 2
-            decimals). Two-way: equity → cash sells equity at
+            share by more than the input's precision (step=0.1
+            → 0.001 fractional). `delta` is computed ONCE here so
+            the gate, the direction test, and the message all
+            agree. Two-way: equity → cash sells equity at
             cap-gains; cash → equity has no direct tax hit, but
             we still flag the composition change explicitly. */}
-        {cashBucketOverrideActive &&
-          Math.abs(
-            (cashBucketSizePct ?? 0) / 100 - projectedCashShare,
-          ) > 0.005 && (
-            <div className="mt-2 rounded-md border border-amber-300/40 bg-amber-300/5 px-2.5 py-1.5 text-[10px] leading-snug text-amber-200">
-              {((cashBucketSizePct ?? 0) / 100) > projectedCashShare
+        {(() => {
+          if (!cashBucketOverrideActive) return null;
+          const requestedFrac = (cashBucketSizePct ?? 0) / 100;
+          const delta = requestedFrac - projectedCashShare;
+          if (Math.abs(delta) <= 0.001) return null;
+          return (
+            <div
+              className="mt-2 rounded-md border border-amber-300/40 bg-amber-300/5 px-2.5 py-1.5 text-[10px] leading-snug text-amber-200"
+              role="status"
+            >
+              {delta > 0
                 ? "You've sized the bucket ABOVE the projected cash share. In reality, funding the larger bucket means selling equity at retirement — capital-gains tax on that sale is NOT modeled in this v1. Treat the success rate as an upper bound; the real-world number is lower by roughly the tax cost on the equity-to-cash swap."
                 : "You've sized the bucket BELOW the projected cash share (de-risking out of cash into equity). The composition swap is modeled, but any cap-gains realized when re-deploying cash to equity is NOT. Treat this as a clean swap for v1."}
             </div>
-          )}
+          );
+        })()}
 
         <div className="mt-3 rounded-md border border-border bg-bg-elevated px-3 py-2 text-[10px] leading-snug text-text-dim">
           <div className="text-[10px] uppercase tracking-wider text-text-muted">
@@ -1000,28 +1039,34 @@ export function HistoricalMonteCarloCard() {
               {(allocation.stocksFraction * 100).toFixed(2)}% stocks /{" "}
               {(allocation.bondsFraction * 100).toFixed(2)}% bonds /{" "}
               {(allocation.cashFraction * 100).toFixed(2)}% cash
-              {stocks2xFraction > 0.00005 && (
+              {/* Show minor classes using the SCALED allocation
+                  (what the simulator actually runs), not raw
+                  portfolio shares. Threshold 0.0001 = 0.01% — the
+                  smallest value that displays as non-zero at
+                  2-decimal precision. Lower thresholds risk
+                  showing "0.00% X" lines that look like bugs. */}
+              {allocation.stocks2xFraction > 0.0001 && (
                 <>
-                  {" "}/ {(stocks2xFraction * 100).toFixed(2)}% 2x equity
-                  (RYTNX series — real 2001+, projected pre-2001)
+                  {" "}/ {(allocation.stocks2xFraction * 100).toFixed(2)}% 2x
+                  equity (RYTNX series — real 2001+, projected pre-2001)
                 </>
               )}
-              {commodityShare > 0.00005 && (
+              {allocation.commodityFraction > 0.0001 && (
                 <>
-                  {" "}/ {(commodityShare * 100).toFixed(2)}% commodity
-                  (gold series)
+                  {" "}/ {(allocation.commodityFraction * 100).toFixed(2)}%
+                  commodity (gold series)
                 </>
               )}
-              {realEstateShare > 0.00005 && (
+              {allocation.realEstateFraction > 0.0001 && (
                 <>
-                  {" "}/ {(realEstateShare * 100).toFixed(2)}% real estate
-                  (Damodaran RE price series)
+                  {" "}/ {(allocation.realEstateFraction * 100).toFixed(2)}%
+                  real estate (Damodaran RE price series)
                 </>
               )}
-              {otherAltsShare > 0.00005 && (
+              {allocation.otherFraction > 0.0001 && (
                 <>
-                  {" "}/ {(otherAltsShare * 100).toFixed(2)}% alts (
-                  {altsAs === "stocks" ? "as stocks" : "as cash"})
+                  {" "}/ {(allocation.otherFraction * 100).toFixed(2)}% alts
+                  ({altsAs === "stocks" ? "as stocks" : "as cash"})
                 </>
               )}
               .
