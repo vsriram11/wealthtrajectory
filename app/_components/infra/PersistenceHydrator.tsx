@@ -4,6 +4,7 @@ import { useEffect } from "react";
 import { useAppStore } from "@/lib/store";
 import {
   loadRealState,
+  maybeRecordMonthlySnapshot,
   maybeRecordSnapshot,
   saveRealState,
 } from "@/lib/persistence/persistence";
@@ -135,6 +136,18 @@ export function PersistenceHydrator() {
   // app opens still leave a trail of history behind. Captures the full
   // household composition so reconstruction can use real holdings at
   // each waypoint rather than back-projecting today's shares.
+  //
+  // TWO policies fire here:
+  //   1. The 12h-debounced `maybeRecordSnapshot` — captures
+  //      intraday-cadence detail when the user is actively using
+  //      the app. Rows are timestamped at full ms precision.
+  //   2. The calendar-month `maybeRecordMonthlySnapshot` — anchors
+  //      the primary key to the first-of-month at noon UTC so
+  //      successive opens within the same month are natural no-ops,
+  //      and we accumulate a clean monthly time series even for
+  //      passive users who only open the app sporadically. Capped
+  //      at 240 rows (20 years monthly) to keep Drive payload size
+  //      bounded.
   useEffect(() => {
     const t = setTimeout(() => {
       void (async () => {
@@ -145,15 +158,18 @@ export function PersistenceHydrator() {
         // session and the snapshot they want will be recorded
         // explicitly via the banner's Save button.
         if (s.timeTravelActive) return;
-        const wrote = await maybeRecordSnapshot(
-          householdNetWorth(s.household),
+        const nw = householdNetWorth(s.household);
+        const wrote12h = await maybeRecordSnapshot(nw, s.household);
+        // Run the monthly anchor alongside. Both helpers are
+        // independent (different timestamps, different no-op
+        // conditions), so a single load can land either, both, or
+        // neither — and we want a single bump if ANY row was
+        // written (CloudSyncer doesn't care which kind).
+        const wroteMonthly = await maybeRecordMonthlySnapshot(
+          nw,
           s.household,
         );
-        // R1-D7 audit CRITICAL fix: bump revision when the baseline
-        // open-the-app-and-leave snapshot actually lands, so the
-        // signed-in user's quarterly-check-in pattern reliably reaches
-        // Drive. Skip on min-interval guard (no-op IDB).
-        if (wrote) {
+        if (wrote12h || wroteMonthly) {
           useAppStore.getState().bumpSnapshotsRevision();
         }
       })();
