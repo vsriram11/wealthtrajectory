@@ -333,3 +333,47 @@ export function useActiveProjection(): ActiveProjectionInput {
     ],
   );
 }
+
+/**
+ * Scenario-neutral sibling of `useActiveProjection`. Honors member
+ * filter + liquidity view + per-member assumption overrides, but
+ * does NOT apply the active scenario's overrides — returns the
+ * "baseline" the user's current state would project to.
+ *
+ * Use for surfaces that ITERATE every scenario on their own (e.g.
+ * the Scenario Comparison Chart, which overlays all defined
+ * scenarios as separate curves on top of an explicit baseline).
+ * Using `useActiveProjection` for those surfaces would double-
+ * apply the active scenario's overrides to the chart's "active"
+ * curve AND mislabel the active scenario's data as "Baseline"
+ * (regression user reported on the Scenarios tab).
+ */
+export function useScenarioNeutralProjection(): ActiveProjectionInput {
+  const household = useAppStore((s) => s.household);
+  const memberId = useAppStore((s) => s.selectedMemberId);
+  const liquidityView = useAppStore((s) => s.liquidityView);
+  const assumptions = useAppStore((s) => s.assumptions);
+  const memberAssumptions = useAppStore((s) => s.memberAssumptions);
+  const scenarios = useAppStore((s) => s.scenarios);
+
+  return useMemo(
+    () =>
+      resolveActiveProjection({
+        household,
+        memberId,
+        liquidityView,
+        assumptions,
+        memberAssumptions,
+        scenarios,
+        activeId: null,
+      }),
+    [
+      household,
+      memberId,
+      liquidityView,
+      assumptions,
+      memberAssumptions,
+      scenarios,
+    ],
+  );
+}
