@@ -280,10 +280,23 @@ export function perAccountCAGR(
   accountId: string,
 ): number | null {
   const sorted = [...snapshots].sort((a, b) => a.t - b.t);
+  const composition = sorted.filter((s) => s.household);
+  if (composition.length < 2) return null;
+  // Same FIRST + LAST presence gate as perHoldingCAGR — the
+  // account must exist at both endpoints, otherwise CAGR over
+  // the partial window is misleading. (Audit engine#8: this
+  // helper previously diverged from perHoldingCAGR by allowing
+  // partial-window data through.)
+  const firstHas = composition[0].household!.accounts.some(
+    (a) => a.id === accountId,
+  );
+  const lastHas = composition[composition.length - 1].household!.accounts.some(
+    (a) => a.id === accountId,
+  );
+  if (!firstHas || !lastHas) return null;
   const series: ClassSeriesPoint[] = [];
-  for (const snap of sorted) {
-    if (!snap.household) continue;
-    const acct = snap.household.accounts.find((a) => a.id === accountId);
+  for (const snap of composition) {
+    const acct = snap.household!.accounts.find((a) => a.id === accountId);
     if (!acct) continue;
     const total = (acct.holdings ?? []).reduce(
       (sum, h) => sum + (Number.isFinite(h.valueUSD) ? h.valueUSD : 0),

@@ -19,7 +19,7 @@ const SUB_TABS: { id: AllocationSubTab; label: string }[] = [
 ];
 
 /**
- * Allocation page with 2 sub-tabs:
+ * Allocation page with 3 sub-tabs:
  *
  *   1. Summary    — how the portfolio is structured today and how
  *                   it evolves to Independence day. AllocationPanel
@@ -36,6 +36,17 @@ const SUB_TABS: { id: AllocationSubTab; label: string }[] = [
  *                   future-composition card it grew long, and
  *                   per-holding browsing is a different mental
  *                   mode (drill-into-detail vs portfolio-view).
+ *
+ *   3. History    — snapshot-derived per-asset-class returns
+ *                   (CAGR, total return, max drawdown) plus the
+ *                   target-allocation drift card. Reads snapshots
+ *                   from IDB in real mode; in demo mode uses the
+ *                   synthetic 5-year monthly history from
+ *                   lib/demoSnapshots so the tab has substantive
+ *                   content to render for demo-persona visitors.
+ *                   Respects the member filter via the same
+ *                   filterHousehold cascade every other rollup-
+ *                   aware surface uses.
  *
  * Tab pattern mirrors ProjectionsPage/PlanPage exactly. Local
  * tab state — refresh resets to Summary.

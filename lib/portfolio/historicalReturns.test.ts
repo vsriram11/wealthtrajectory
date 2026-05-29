@@ -300,6 +300,44 @@ describe("perHoldingCAGR / perAccountCAGR / perHoldingTotalReturn", () => {
     expect(perHoldingCAGR(snaps, "h_sold")).toBeNull();
   });
 
+  it("perAccountCAGR returns null when account missing from FIRST snapshot (audit-fix regression pin)", () => {
+    // Audit engine#8 consistency fix: perAccountCAGR previously
+    // diverged from perHoldingCAGR by allowing partial-window
+    // data through. Now matches the first-AND-last gate.
+    function accountSnap(t: number, accts: string[]): Snapshot {
+      return {
+        t,
+        netWorthUSD: 0,
+        household: {
+          id: "hh",
+          members: [{ id: "m1", displayName: "Tester" } as never],
+          accounts: accts.map((id) => ({
+            id,
+            ownerId: "m1",
+            nickname: id,
+            kind: "brokerage",
+            taxTreatment: "taxable",
+            institutionId: null,
+            holdings: [
+              { id: `h-${id}`, kind: "equity", valueUSD: 1000 } as never,
+            ],
+          })) as never,
+          liabilities: [],
+        },
+      };
+    }
+    const snaps = [
+      accountSnap(T0, ["a1"]),
+      accountSnap(T0 + YEAR, ["a1", "a2"]),
+      accountSnap(T0 + 5 * YEAR, ["a1", "a2"]),
+    ];
+    // a2 only appears at snapshots 1 and 2 — must be null.
+    expect(perAccountCAGR(snaps, "a2")).toBeNull();
+    // a1 exists across all snapshots — should compute (== 0 here
+    // since values are flat, but non-null).
+    expect(perAccountCAGR(snaps, "a1")).not.toBeNull();
+  });
+
   it("perAccountCAGR sums the account's holdings at each snapshot", () => {
     const snaps: Snapshot[] = [
       snap(T0, [

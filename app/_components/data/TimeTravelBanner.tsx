@@ -51,6 +51,25 @@ export function TimeTravelBanner() {
     return () => window.clearTimeout(id);
   }, [savedFlash]);
 
+  // Warn on tab close / nav-away while in an active session —
+  // mid-session edits live only in memory, so a refresh or
+  // accidental link-click silently nukes the session with no
+  // recovery. The browser's generic "unsaved changes" prompt
+  // is the best we can do (custom messages are blocked by
+  // every modern browser); the warning STILL appears as a
+  // dialog, which is the actual UX win.
+  useEffect(() => {
+    if (!active) return;
+    const handler = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      // Modern browsers ignore the returnValue string but
+      // need it set non-empty to actually show the prompt.
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [active]);
+
   // Two render branches:
   //   1. savedFlash takes precedence over the inactive early-return
   //      so the post-save success message actually renders. (Before

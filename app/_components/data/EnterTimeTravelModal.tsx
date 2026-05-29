@@ -23,13 +23,22 @@ export function EnterTimeTravelModal({
   const enterTimeTravel = useAppStore((s) => s.enterTimeTravel);
   const [date, setDate] = useState<string>(todayISO());
   const firstFocusRef = useRef<HTMLInputElement | null>(null);
+  const lastFocusRef = useRef<HTMLButtonElement | null>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
 
-  // Auto-focus the date input when the modal opens — same pattern
-  // as the inline edit form in SnapshotsManager.
+  // Auto-focus the date input when the modal opens AND remember
+  // what had focus before so we can restore on close. WCAG 2.4.3
+  // + ARIA Authoring Practices dialog pattern.
   useEffect(() => {
-    if (open && firstFocusRef.current) {
-      firstFocusRef.current.focus();
-    }
+    if (!open) return;
+    previousFocusRef.current = document.activeElement as HTMLElement | null;
+    if (firstFocusRef.current) firstFocusRef.current.focus();
+    return () => {
+      // Restore focus to whatever opened the modal — without
+      // this, focus drops to <body> on close, which breaks
+      // keyboard navigation flow.
+      previousFocusRef.current?.focus?.();
+    };
   }, [open]);
 
   if (!open) return null;
@@ -50,6 +59,23 @@ export function EnterTimeTravelModal({
         if (e.key === "Escape") {
           e.preventDefault();
           onClose();
+          return;
+        }
+        // Focus trap: cycle Tab between firstFocusRef (the date
+        // input) and lastFocusRef (the Confirm button). Shift+Tab
+        // from first wraps to last; Tab from last wraps to first.
+        // Cancel button is between them in natural source order
+        // so the cycle goes Date → Cancel → Confirm → Date.
+        if (e.key !== "Tab") return;
+        const first = firstFocusRef.current;
+        const last = lastFocusRef.current;
+        if (!first || !last) return;
+        if (e.shiftKey && document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        } else if (!e.shiftKey && document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
         }
       }}
     >
@@ -97,6 +123,7 @@ export function EnterTimeTravelModal({
             Cancel
           </button>
           <button
+            ref={lastFocusRef}
             type="button"
             onClick={handleConfirm}
             disabled={!isValidISO(date)}
