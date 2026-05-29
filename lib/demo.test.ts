@@ -63,4 +63,33 @@ describe("DEMO_HOUSEHOLD — no liability double-counts real-estate equity", () 
     expect(DEMO_ASSUMPTIONS.withdrawalRate).toBeGreaterThan(0);
     expect(DEMO_ASSUMPTIONS.withdrawalRate).toBeLessThanOrEqual(1);
   });
+
+  it("HSA monthly contribution reflects the 2025 family HDHP limit (~$712.50/mo)", () => {
+    // R5 demo audit pin: previously $350/mo (self-only-ish) silently
+    // halved the demo's HSA-as-stealth-IRA story. Family HDHP HSA
+    // limit for 2025 is $8,550/yr → $712.50/mo. We allow some range
+    // so a future indexing tick (~$8,750 in 2026, etc.) doesn't
+    // force test churn, but enforce that we're not back at the
+    // pre-fix $350.
+    const hsa = DEMO_HOUSEHOLD.accounts.find((a) => a.category === "HSA");
+    expect(hsa).toBeDefined();
+    expect(hsa!.monthlyContributionUSD).toBeGreaterThanOrEqual(700);
+    expect(hsa!.monthlyContributionUSD).toBeLessThanOrEqual(800);
+  });
+
+  it("at least one demo holding sets excludeFromCashBucketSale (feature showcase)", () => {
+    // R5 demo audit pin: the opt-out flag was previously not
+    // exercised anywhere in the demo, so a new user touring the
+    // showcase never saw the "user opt-out" bucket in the tax-impact
+    // panel. Pin that at least one holding opts out so a future demo
+    // edit that strips the flag is caught.
+    const optedOut = DEMO_HOUSEHOLD.accounts
+      .flatMap((a) => a.holdings)
+      .filter(
+        (h) =>
+          "excludeFromCashBucketSale" in h &&
+          h.excludeFromCashBucketSale === true,
+      );
+    expect(optedOut.length).toBeGreaterThan(0);
+  });
 });

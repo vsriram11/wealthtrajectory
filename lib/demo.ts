@@ -91,7 +91,11 @@ function commodity(symbol: string, valueUSD: number): CommodityHolding {
   };
 }
 
-function crypto(symbol: string, valueUSD: number): CryptoHolding {
+function crypto(
+  symbol: string,
+  valueUSD: number,
+  opts: { excludeFromCashBucketSale?: boolean } = {},
+): CryptoHolding {
   const p = getPreset(symbol);
   if (!p || p.assetClass !== "crypto") {
     throw new Error(`No crypto preset for ${symbol}`);
@@ -109,6 +113,9 @@ function crypto(symbol: string, valueUSD: number): CryptoHolding {
     acquiredAt: null,
     valueUSD,
     expectedRealCAGR: p.expectedRealCAGR,
+    ...(opts.excludeFromCashBucketSale
+      ? { excludeFromCashBucketSale: true }
+      : {}),
   };
 }
 
@@ -207,7 +214,14 @@ const alexAccounts: Account[] = [
     displayName: "Alex HSA",
     ownerId: ALEX_ID,
     holdings: [equity("VTI", 28_000)],
-    monthlyContributionUSD: 350,
+    // 2025 family HDHP HSA limit is $8,550/yr ($712.50/mo). Couples
+    // on a family HDHP typically max one combined HSA between them
+    // — this is the canonical "triple-tax-advantaged HSA-as-stealth-
+    // IRA" showcase, so the demo contribution must reflect the
+    // family-limit contribution to make the asset-location +
+    // tax-bucket cards land properly. R5 demo audit fix: previously
+    // $350/mo was self-only-ish and understated the HSA story.
+    monthlyContributionUSD: 712.5,
   }),
   // Levered ETF sleeve in a Roth — captures the "leveraged ETF in
   // a tax-advantaged account" scenario that the leverage + tax
@@ -222,7 +236,12 @@ const alexAccounts: Account[] = [
       equity("NTSX", 35_000), // 1.5× leveraged stocks+bonds composition
       equity("TQQQ", 18_000), // 3× leveraged Nasdaq
       commodity("GLD", 22_000),
-      crypto("BTC", 12_000),
+      // R5 demo audit: opt-out flag demonstrates the
+      // `excludeFromCashBucketSale` feature — common high-conviction
+      // BTC stance ("I refuse to sell my Bitcoin to fund retirement").
+      // Surfaces in bucketFunding.test.ts and the Plan → Tax
+      // sale-plan UI as a separate "user opt-out" bucket.
+      crypto("BTC", 12_000, { excludeFromCashBucketSale: true }),
     ],
     monthlyContributionUSD: 2_400,
   }),
@@ -483,6 +502,23 @@ const SUBSCRIPTION_START = Date.UTC(DEMO_BASE_YEAR - 2, 0, 15);
 
 export const DEMO_BUDGET: BudgetItem[] = [
   // ── Housing ──────────────────────────────────────────────────────────
+  //
+  // Mortgage P&I lives in the BUDGET (cash outflow), and the
+  // mortgage debt itself is netted into the Primary Residence
+  // RealEstateHolding's equity-value + leverage fields (NOT a
+  // separate Liability — see the convention comment above
+  // `liabilities` for why). The two views aren't double-counting:
+  //   - Budget side: tracks the monthly cash leaving the household
+  //     (interest + principal). `endsAtRetirement: true` zeros it
+  //     out at Independence Day (the demo assumes the mortgage is
+  //     paid off by then; if not, the user would untoggle the flag).
+  //   - Balance-sheet side: the RE holding stores EQUITY (net of
+  //     mortgage), and `leverage` = gross/equity captures the debt
+  //     for stress-test math. NW = equity directly.
+  // What we don't model: the principal portion of each payment
+  // should grow equity. In this approximation that "extra"
+  // principal-paydown growth is absorbed into the household's
+  // explicit savings contributions and the RE expectedRealCAGR.
   {
     id: "demo-budget-mortgage",
     name: "Mortgage P&I",
