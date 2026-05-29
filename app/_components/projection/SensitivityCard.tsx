@@ -5,7 +5,7 @@ import {
   cagrSensitivity,
   savingsRateSensitivity,
 } from "@/lib/projection/sensitivity";
-import { useActiveProjection } from "@/lib/projection/useActiveProjection";
+import { useScenarioNeutralProjection } from "@/lib/projection/useActiveProjection";
 import { formatYearsMonths } from "@/lib/format";
 
 /**
@@ -19,10 +19,19 @@ import { formatYearsMonths } from "@/lib/format";
  *   • Real CAGR (cagrDelta applied via applyScenario for parity)
  *   • Savings rate (contributionMultiplier applied via applyScenario)
  *
+ * Reads through `useScenarioNeutralProjection` so the `delta=0` /
+ * `multiplier=1` row IS actually baseline. Round-6 audit found this
+ * card had the same double-apply bug as ScenarioComparisonChart:
+ * using `useActiveProjection` meant the input was already merged
+ * with the active scenario, and `cagrSensitivity` /
+ * `savingsRateSensitivity` then re-applied PARTIAL overrides on top —
+ * so the "Baseline" row label was actually the active scenario,
+ * and the table's other rows were the active scenario + deltas.
+ *
  * Hidden when household empty or baseline doesn't Independence.
  */
 export function SensitivityCard() {
-  const { household, assumptions } = useActiveProjection();
+  const { household, assumptions } = useScenarioNeutralProjection();
   const cagr = useMemo(
     () => cagrSensitivity(household, assumptions),
     [household, assumptions],
