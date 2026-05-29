@@ -32,10 +32,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // around reset between tests in this codebase). vi.hoisted is
 // required because vi.mock is hoisted to the top of the module
 // and ordinary `const` declarations aren't available yet.
-const { recordSnapshotMock } = vi.hoisted(() => ({
+const { recordSnapshotMock, loadSnapshotsMock } = vi.hoisted(() => ({
   // Typed to the real recordSnapshot signature so .mock.calls[0][0]
   // has the right shape for assertions below.
   recordSnapshotMock: vi.fn(async (_: unknown) => {}),
+  // loadSnapshots is now called from handleSave for collision
+  // detection — mock it so tests don't depend on fake-indexeddb
+  // state, and so we can drive the collision branch explicitly.
+  loadSnapshotsMock: vi.fn(async () => [] as Array<unknown>),
 }));
 // Partial mock — keep everything else (clearRealState, loadRealState,
 // etc) intact since lib/store imports from this module.
@@ -46,6 +50,7 @@ vi.mock("@/lib/persistence/persistence", async (importOriginal) => {
   return {
     ...actual,
     recordSnapshot: recordSnapshotMock,
+    loadSnapshots: loadSnapshotsMock,
   };
 });
 
@@ -65,6 +70,8 @@ function resetStore() {
 
 beforeEach(() => {
   recordSnapshotMock.mockClear();
+  loadSnapshotsMock.mockClear();
+  loadSnapshotsMock.mockResolvedValue([]);
   resetStore();
   vi.useFakeTimers();
 });
@@ -106,9 +113,11 @@ describe("TimeTravelBanner", () => {
     });
     await act(async () => {
       fireEvent.click(saveBtn);
-      // Let the promise microtasks settle (handleSave is async).
-      await Promise.resolve();
-      await Promise.resolve();
+      // handleSave is async with an awaited loadSnapshots() call —
+      // need to flush enough microtasks for both the load and the
+      // recordSnapshot call to settle. waitFor would be cleaner
+      // but works against the fake-timers we installed at the top.
+      for (let i = 0; i < 8; i++) await Promise.resolve();
     });
     expect(recordSnapshotMock).toHaveBeenCalledTimes(1);
     const callArg = recordSnapshotMock.mock.calls[0][0] as {
@@ -191,6 +200,86 @@ describe("TimeTravelBanner", () => {
     removeSpy.mockRestore();
   });
 
+  it("Collision: detects existing snapshot at t and shows overwrite prompt (audit fix #3)", async () => {
+    // When the user backdates to a date that already has a
+    // snapshot (auto OR manual), the banner must NOT silently
+    // overwrite — it shows an inline confirmation prompt with
+    // the existing row's metadata.
+    loadSnapshotsMock.mockResolvedValue([
+      {
+        t: Date.UTC(2023, 5, 15, 12),
+        netWorthUSD: 100_000,
+        source: "auto",
+      },
+    ] as never);
+    act(() => {
+      useAppStore.getState().enterTimeTravel("2023-06-15");
+    });
+    render(<TimeTravelBanner />);
+    const saveBtn = screen.getByRole("button", {
+      name: /Save the current state/i,
+    });
+    await act(async () => {
+      fireEvent.click(saveBtn);
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+    });
+    // No write yet — overwrite prompt instead.
+    expect(recordSnapshotMock).not.toHaveBeenCalled();
+    // Prompt visible with "monthly auto" classification + Overwrite + Keep buttons.
+    expect(screen.getByText(/monthly auto/i)).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: /Confirm overwrite/i }),
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: /Cancel overwrite/i }),
+    ).toBeTruthy();
+    // Click "Overwrite" to confirm.
+    const overwriteBtn = screen.getByRole("button", {
+      name: /Confirm overwrite/i,
+    });
+    await act(async () => {
+      fireEvent.click(overwriteBtn);
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+    });
+    expect(recordSnapshotMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("Collision: 'Keep existing' cancels without writing and stays in session", async () => {
+    loadSnapshotsMock.mockResolvedValue([
+      {
+        t: Date.UTC(2023, 5, 15, 12),
+        netWorthUSD: 100_000,
+        source: "manual",
+        label: "Pre-promotion",
+      },
+    ] as never);
+    act(() => {
+      useAppStore.getState().enterTimeTravel("2023-06-15");
+    });
+    render(<TimeTravelBanner />);
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Save the current state/i }),
+      );
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+    });
+    // Existing-snapshot label surfaced in the prompt copy.
+    expect(screen.getByText(/Pre-promotion/i)).toBeTruthy();
+    // Click "Keep existing".
+    act(() => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Cancel overwrite/i }),
+      );
+    });
+    expect(recordSnapshotMock).not.toHaveBeenCalled();
+    // Session still active so the user can pick a different date.
+    expect(useAppStore.getState().timeTravelActive).toBe(true);
+    // Save button visible again.
+    expect(
+      screen.getByRole("button", { name: /Save the current state/i }),
+    ).toBeTruthy();
+  });
+
   it("Save flow: malformed parseISO is a no-op (defense against URL/DevTools manipulation)", async () => {
     // Force a malformed date directly into the slice (skipping the
     // modal's validation) to verify the banner's own parseISO
@@ -209,7 +298,7 @@ describe("TimeTravelBanner", () => {
     });
     await act(async () => {
       fireEvent.click(saveBtn);
-      await Promise.resolve();
+      for (let i = 0; i < 8; i++) await Promise.resolve();
     });
     expect(recordSnapshotMock).not.toHaveBeenCalled();
     // Session still active (no exit on malformed parse).

@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useAppStore } from "@/lib/store";
 import {
+  loadSnapshots,
   recordSnapshot,
   type Snapshot,
 } from "@/lib/persistence/persistence";
@@ -35,6 +36,16 @@ export function TimeTravelBanner() {
 
   const [busy, setBusy] = useState(false);
   const [savedFlash, setSavedFlash] = useState(false);
+  // Collision confirmation state (audit fix #3): when handleSave
+  // detects an existing snapshot at the chosen `t`, surface a
+  // "overwrite?" prompt instead of silently `put`-ing. Persistence's
+  // `recordSnapshot` uses Dexie `put` which is unconditional, so
+  // without this guard a backdated session would silently destroy
+  // the existing row (auto-snapshot OR manual) at the same anchor.
+  const [pendingOverwrite, setPendingOverwrite] = useState<{
+    existingLabel: string | null;
+    existingSource: "auto" | "manual" | "legacy";
+  } | null>(null);
   const mountedRef = useRef(true);
   useEffect(() => {
     return () => {
@@ -93,11 +104,35 @@ export function TimeTravelBanner() {
 
   if (!active || !date) return null;
 
-  const handleSave = async () => {
+  const handleSave = async (overwrite = false) => {
     const t = parseISO(date);
     if (!Number.isFinite(t)) return;
     setBusy(true);
     try {
+      // Collision check: refuse to silently overwrite an
+      // existing snapshot at the chosen `t`. The user is
+      // backdating to (say) 2024-05-01 noon UTC — if the
+      // monthly auto-snapshotter ALREADY wrote at that exact
+      // anchor, or the user previously saved a manual row
+      // there, we'd silently destroy it via Dexie `put`. Show
+      // a confirmation prompt instead.
+      if (!overwrite) {
+        const rows = await loadSnapshots();
+        const existing = rows.find((r) => r.t === t);
+        if (existing) {
+          setPendingOverwrite({
+            existingLabel: existing.label ?? null,
+            existingSource:
+              existing.source === "auto"
+                ? "auto"
+                : existing.source === "manual"
+                  ? "manual"
+                  : "legacy",
+          });
+          setBusy(false);
+          return;
+        }
+      }
       // Defensive deep clone — the household reference is shared
       // with the live store; structuredClone guarantees the
       // snapshot payload is decoupled from whatever happens to
@@ -117,6 +152,8 @@ export function TimeTravelBanner() {
         // SnapshotsManager.
         source: "manual",
       };
+      // Clear any pending overwrite state now that we're committing.
+      setPendingOverwrite(null);
       await recordSnapshot(snap);
       // Bump the snapshot revision so CloudSyncer sees the
       // change (snapshots live in IDB, slice diff is blind to
@@ -162,24 +199,69 @@ export function TimeTravelBanner() {
           — live data is not being saved.
         </div>
         <div className="flex items-center gap-1.5">
-          <button
-            type="button"
-            onClick={() => void handleSave()}
-            disabled={busy}
-            className="rounded-md bg-bg px-3 py-1 text-[11px] font-semibold text-accent disabled:opacity-40 active:opacity-80"
-            aria-label="Save the current state as a backdated snapshot and exit time-travel mode"
-          >
-            {busy ? "Saving…" : "Save snapshot"}
-          </button>
-          <button
-            type="button"
-            onClick={handleExit}
-            disabled={busy}
-            className="rounded-md border border-bg/40 bg-amber-300/60 px-3 py-1 text-[11px] font-semibold text-bg disabled:opacity-40 active:opacity-80"
-            aria-label="Discard all time-travel edits and exit"
-          >
-            Exit
-          </button>
+          {pendingOverwrite ? (
+            // Overwrite confirmation row (audit fix #3). Shown
+            // inline next to the regular controls so the user
+            // doesn't lose context. Existing-snapshot metadata
+            // is surfaced so the user can decide intelligently.
+            <>
+              <span
+                role="status"
+                aria-live="assertive"
+                className="text-[11px] font-semibold text-bg"
+              >
+                A {pendingOverwrite.existingSource === "auto"
+                  ? "monthly auto"
+                  : pendingOverwrite.existingSource === "manual"
+                    ? "user"
+                    : "legacy"}{" "}
+                snapshot already exists for {date}
+                {pendingOverwrite.existingLabel
+                  ? ` ("${pendingOverwrite.existingLabel}")`
+                  : ""}
+                . Overwrite?
+              </span>
+              <button
+                type="button"
+                onClick={() => void handleSave(true)}
+                disabled={busy}
+                className="rounded-md bg-negative/20 px-3 py-1 text-[11px] font-semibold text-bg ring-1 ring-negative/60 disabled:opacity-40 active:opacity-80"
+                aria-label="Confirm overwrite of the existing snapshot"
+              >
+                {busy ? "Saving…" : "Overwrite"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setPendingOverwrite(null)}
+                disabled={busy}
+                className="rounded-md border border-bg/40 bg-amber-300/60 px-3 py-1 text-[11px] font-semibold text-bg disabled:opacity-40 active:opacity-80"
+                aria-label="Cancel overwrite and keep the existing snapshot"
+              >
+                Keep existing
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={() => void handleSave()}
+                disabled={busy}
+                className="rounded-md bg-bg px-3 py-1 text-[11px] font-semibold text-accent disabled:opacity-40 active:opacity-80"
+                aria-label="Save the current state as a backdated snapshot and exit time-travel mode"
+              >
+                {busy ? "Saving…" : "Save snapshot"}
+              </button>
+              <button
+                type="button"
+                onClick={handleExit}
+                disabled={busy}
+                className="rounded-md border border-bg/40 bg-amber-300/60 px-3 py-1 text-[11px] font-semibold text-bg disabled:opacity-40 active:opacity-80"
+                aria-label="Discard all time-travel edits and exit"
+              >
+                Exit
+              </button>
+            </>
+          )}
         </div>
       </div>
     </div>

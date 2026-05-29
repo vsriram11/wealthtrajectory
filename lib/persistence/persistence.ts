@@ -556,17 +556,50 @@ export async function maybeRecordMonthlySnapshot(
     0,
     0,
   );
+  // Bound the "current month" window — any t in this range
+  // counts as "already auto-captured this month" so we don't
+  // backfill phantom data when the user edits / moves the
+  // existing monthAnchor row mid-month. Round-2 audit fix #4:
+  // the prior `get(monthAnchor)` check only saw the EXACT
+  // anchor; if a user moved their manual row to e.g. May 10,
+  // the May-1 slot was empty and the next auto fire wrote
+  // today's holdings tagged as May 1.
+  const monthStart = Date.UTC(
+    nowDate.getUTCFullYear(),
+    nowDate.getUTCMonth(),
+    1,
+    0,
+    0,
+    0,
+    0,
+  );
+  const monthEnd = Date.UTC(
+    nowDate.getUTCFullYear(),
+    nowDate.getUTCMonth() + 1,
+    1,
+    0,
+    0,
+    0,
+    0,
+  );
   try {
     // Wrap read-check-write in a transaction (same rationale as
     // maybeRecordSnapshot — concurrent mounts must not
     // double-write at this anchor). Round-2 audit fix #7.
     let wrote = false;
     await handle.transaction("rw", handle.snapshots, async () => {
-      // Same-month idempotency: if a row already exists at this
-      // monthAnchor (auto OR manual), refuse to overwrite. This
-      // is the "first-call wins" semantic per the policy.
-      const existing = await handle.snapshots.get(monthAnchor);
-      if (existing) return;
+      // Same-month idempotency: refuse to write if ANY snapshot
+      // (auto, manual, or legacy-no-source) already exists
+      // within the current calendar month. This generalizes the
+      // prior "exact-anchor exists" check so a user-moved
+      // monthAnchor row (now sitting elsewhere in the same
+      // month) still prevents a phantom auto-write at the
+      // vacated slot.
+      const existingInMonth = await handle.snapshots
+        .where("t")
+        .between(monthStart, monthEnd, true, false)
+        .first();
+      if (existingInMonth) return;
       const row: SnapshotRow = {
         t: monthAnchor,
         netWorthUSD,

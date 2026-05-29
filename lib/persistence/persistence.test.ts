@@ -460,6 +460,34 @@ describe("maybeRecordMonthlySnapshot — monthly auto-snapshot policy (R-monthly
     expect(rows.some((r) => r.t === Date.UTC(2020, 0, 1, 12, 0, 0, 0))).toBe(true);
   });
 
+  it("does NOT auto-backfill the monthAnchor slot after the user moves a row elsewhere in the same month (audit fix #4 — phantom row)", async () => {
+    // Audit BLOCK: user has a manual snapshot at e.g. May 1.
+    // They edit it via SnapshotsManager and move to May 10
+    // (different t). May 1 slot is now empty. Auto-snapshotter
+    // fires later in May. Old code: sees the May 1 slot empty,
+    // writes today's holdings tagged as May 1 → phantom row.
+    // Fix: check for ANY row within the current calendar month,
+    // not just at the exact anchor.
+    const { loadSnapshots, maybeRecordMonthlySnapshot, recordSnapshot } =
+      await freshModule();
+    // User manually saves at May 10 (after editing the May 1 anchor away).
+    const may10 = Date.UTC(2024, 4, 10, 12, 0, 0, 0);
+    await recordSnapshot({
+      t: may10,
+      netWorthUSD: 200_000,
+      source: "manual",
+      label: "Pre-promotion",
+    });
+    // Auto-snapshotter fires later in May. Should see the May 10
+    // row and skip — NO phantom row at May 1.
+    const may20 = Date.UTC(2024, 4, 20, 14, 0, 0, 0);
+    const wrote = await maybeRecordMonthlySnapshot(250_000, HH, may20);
+    expect(wrote).toBe(false);
+    const rows = await loadSnapshots();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].t).toBe(may10);
+  });
+
   it("concurrent maybeRecordSnapshot calls don't double-write (audit fix #7 — transactionality)", async () => {
     // Audit finding: two concurrent invocations both passed the
     // min-interval check before either wrote, then both wrote
