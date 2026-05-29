@@ -435,7 +435,7 @@ export const GLOSSARY: GlossarySection[] = [
       {
         term: "Investment growth calculator",
         definition:
-          "A portfolio-blind, NerdWallet-style compound-interest tool on the Calculators page. Inputs: starting balance, recurring contribution (monthly or annual), expected annual rate of return, compound frequency (annually / monthly / daily), horizon in years. Optional annual contribution escalator (e.g. 3%/yr 'raise') and per-year overrides for one-off injections (windfall, bonus, college pull). Uses the ordinary-annuity convention — contributions earn no interest in their deposit month. Does NOT use your actual portfolio, scenarios, or member rollups; for personalized projections see the Projections and Plan pages.",
+          "A portfolio-blind, NerdWallet-style compound-interest tool on the Static Calculators page. Inputs: starting balance, recurring contribution (monthly or annual), expected annual rate of return, compound frequency (annually / monthly / daily), horizon in years. Optional annual contribution escalator (e.g. 3%/yr 'raise') and per-year overrides for one-off injections (windfall, bonus, college pull). Uses the ordinary-annuity convention — contributions earn no interest in their deposit month. Does NOT use your actual portfolio, scenarios, or member rollups; for personalized projections see the Projections and Plan pages.",
         aliases: [
           "compound interest",
           "savings calculator",

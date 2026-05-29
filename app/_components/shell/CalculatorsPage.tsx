@@ -37,7 +37,7 @@ export function CalculatorsPage() {
       <section className="px-5 pt-3">
         <div
           role="tablist"
-          aria-label="Calculators sub-navigation"
+          aria-label="Static Calculators sub-navigation"
           className="no-scrollbar flex gap-1 overflow-x-auto rounded-full border border-border bg-bg-surface p-1"
         >
           {SUB_TABS.map((t) => (
