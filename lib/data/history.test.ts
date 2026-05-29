@@ -525,4 +525,51 @@ describe("memberFilteredSnapshots (Round-5 fix)", () => {
     expect(out).toHaveLength(1);
     expect(out[0].t).toBe(200);
   });
+
+  it("returns the SAME array reference when memberId is null (pass-through identity)", () => {
+    // Reference-stable pass-through matters for memoization
+    // downstream: a fresh array every render would invalidate every
+    // React.memo'd consumer. Pin the identity contract so a future
+    // "clean up" that spreads the array doesn't silently regress it.
+    const snapshots: Snapshot[] = [
+      { t: 100, netWorthUSD: 400_000, household: fullHousehold },
+    ];
+    expect(memberFilteredSnapshots(snapshots, null)).toBe(snapshots);
+  });
+
+  it("keeps a rich snapshot for a member with zero owned accounts (NW becomes 0)", () => {
+    // The user added a third member (`m3`) but they own nothing. A
+    // snapshot recorded after their creation has them in the
+    // member list but no accounts → filtered NW = 0. Keep the row
+    // so the user sees "snapshot exists, m3 had $0 here" rather
+    // than "snapshot mysteriously vanished from the panel."
+    const m3 = "mem-3";
+    const householdWithEmptyMember = {
+      ...fullHousehold,
+      members: [...fullHousehold.members, { id: m3, displayName: "Kid" }],
+    };
+    const snapshots: Snapshot[] = [
+      { t: 100, netWorthUSD: 400_000, household: householdWithEmptyMember },
+    ];
+    const out = memberFilteredSnapshots(snapshots, m3);
+    expect(out).toHaveLength(1);
+    expect(out[0].netWorthUSD).toBe(0);
+    expect(out[0].household?.accounts).toHaveLength(0);
+  });
+
+  it("keeps a rich snapshot whose stored household pre-dates the selected member (NW=0)", () => {
+    // Edge case: user created member m3 AFTER capturing a 2022
+    // snapshot. The snapshot's stored household has no m3 at all.
+    // `filterHousehold` returns an empty slice (no member entry,
+    // no accounts) → NW = 0. We keep the row for parity with the
+    // empty-owned-accounts case; the consuming UI surface decides
+    // whether to filter out zero-NW rows.
+    const m3 = "mem-3";
+    const snapshots: Snapshot[] = [
+      { t: 100, netWorthUSD: 400_000, household: fullHousehold }, // no m3
+    ];
+    const out = memberFilteredSnapshots(snapshots, m3);
+    expect(out).toHaveLength(1);
+    expect(out[0].netWorthUSD).toBe(0);
+  });
 });

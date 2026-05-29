@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useAppStore } from "@/lib/store";
 import {
   deleteSnapshot,
@@ -9,7 +9,7 @@ import {
   recordSnapshot,
   type Snapshot,
 } from "@/lib/persistence/persistence";
-import { householdNetWorth } from "@/lib/types";
+import { filterHousehold, householdNetWorth } from "@/lib/types";
 import { memberFilteredSnapshots } from "@/lib/data/history";
 import { formatUSD } from "@/lib/format";
 
@@ -74,6 +74,41 @@ export function SnapshotsManager() {
   }, [open]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
+  // Apply the global member filter. `memberFilteredSnapshots`
+  // recomputes each rich snapshot's NW from the member-filtered
+  // household and drops legacy NW-only entries that can't be
+  // attributed. When a member is selected, count the dropped
+  // legacy snapshots so the summary text can surface "M legacy
+  // hidden" — otherwise the user thinks the records vanished.
+  // Memoized to match GrowthVelocityCard / HistoryView patterns
+  // (and avoid identity-churning React.memo'd children downstream).
+  // Hooks MUST come before any early return — the `if (mode !==
+  // "real")` below depends on them not changing call order across
+  // renders, so we always compute even when the panel is hidden.
+  const filteredSnapshots = useMemo(
+    () => memberFilteredSnapshots(snapshots, memberId),
+    [snapshots, memberId],
+  );
+  const droppedLegacyCount =
+    memberId == null ? 0 : snapshots.length - filteredSnapshots.length;
+  const sorted = useMemo(
+    () => [...filteredSnapshots].sort((a, b) => b.t - a.t),
+    [filteredSnapshots],
+  );
+  // The live "Current NW" shown next to the Save button needs to
+  // match the user's mental model. When filtered to a member,
+  // showing household NW is misleading and contradicts every other
+  // figure on the page. The snapshot PAYLOAD is still captured
+  // whole (read-side filter handles the display), but what the
+  // user SEES while deciding to save must be member-scoped.
+  const currentDisplayNW = useMemo(
+    () =>
+      memberId == null
+        ? householdNetWorth(household)
+        : householdNetWorth(filterHousehold(household, memberId)),
+    [household, memberId],
+  );
+
   if (mode !== "real") return null;
 
   const handleAdd = async () => {
@@ -117,18 +152,14 @@ export function SnapshotsManager() {
     }
   };
 
-  // Apply the global member filter. `memberFilteredSnapshots`
-  // recomputes each rich snapshot's NW from the member-filtered
-  // household and drops legacy NW-only entries that can't be
-  // attributed. When a member is selected, count the dropped
-  // legacy snapshots so the summary text can surface "M legacy
-  // hidden" — otherwise the user thinks the records vanished.
-  const filteredSnapshots = memberFilteredSnapshots(snapshots, memberId);
-  const droppedLegacyCount =
-    memberId == null
-      ? 0
-      : snapshots.length - filteredSnapshots.length;
-  const sorted = [...filteredSnapshots].sort((a, b) => b.t - a.t);
+  // Five-branch summary text — split out so the truth table is
+  // explicit and the nested ternary doesn't grow another branch
+  // when a future filter dimension is added.
+  const summaryText = summarize(
+    filteredSnapshots,
+    memberId,
+    droppedLegacyCount,
+  );
 
   return (
     <div className="mt-4 rounded-xl border border-border bg-bg-elevated">
@@ -137,21 +168,22 @@ export function SnapshotsManager() {
         onClick={() => setOpen((v) => !v)}
         className="flex w-full items-center justify-between gap-2 px-3 py-2.5 text-left"
         aria-expanded={open}
+        aria-label="Toggle snapshots panel"
       >
         <div>
           <div className="text-[11px] font-medium uppercase tracking-wider text-text-muted">
             Snapshots
           </div>
-          <div className="mt-0.5 text-[10px] text-text-dim">
-            {filteredSnapshots.length === 0
-              ? memberId
-                ? droppedLegacyCount > 0
-                  ? `No member-attributable snapshots (${droppedLegacyCount} legacy NW-only hidden — filterable only at household view)`
-                  : "No snapshots for this member"
-                : "None yet — capture one to anchor your history"
-              : `${filteredSnapshots.length} recorded · oldest ${formatDate(
-                  Math.min(...filteredSnapshots.map((s) => s.t)),
-                )}${memberId ? ` (filtered to selected member${droppedLegacyCount > 0 ? `, ${droppedLegacyCount} legacy NW-only hidden` : ""})` : ""}`}
+          {/* Summary lives OUTSIDE the button's accessible name (via
+              aria-label above) and is announced separately as a
+              status region so screen-reader users hear filter
+              changes without re-reading the toggle. */}
+          <div
+            className="mt-0.5 text-[10px] text-text-dim"
+            role="status"
+            aria-live="polite"
+          >
+            {summaryText}
           </div>
         </div>
         <span
@@ -215,24 +247,45 @@ export function SnapshotsManager() {
                 (midnight UTC of the chosen date), so saving a second
                 snapshot for the same date silently overwrites the
                 first. Flagging it upfront lets the user decide
-                before they lose their prior record. */}
+                before they lose their prior record. When filtered,
+                show the MEMBER-scoped NW from the colliding snapshot
+                so it matches every other figure the user is seeing. */}
             {(() => {
               const draftT = parseISO(draftDate);
               const collision = Number.isFinite(draftT)
                 ? snapshots.find((s) => s.t === draftT)
                 : null;
               if (!collision) return null;
+              const displayNW =
+                memberId != null && collision.household
+                  ? householdNetWorth(
+                      filterHousehold(collision.household, memberId),
+                    )
+                  : collision.netWorthUSD;
               return (
                 <div className="rounded-md border border-amber-300/40 bg-amber-300/5 px-2 py-1.5 text-[10px] text-amber-300">
                   A snapshot already exists for this date (NW{" "}
-                  {formatUSD(collision.netWorthUSD)}). Saving will
-                  replace it.
+                  {formatUSD(displayNW)}). Saving will replace it.
                 </div>
               );
             })()}
+            {memberId != null && (
+              <div
+                className="rounded-md border border-border bg-bg-elevated px-2 py-1.5 text-[10px] text-text-dim"
+                role="status"
+              >
+                Snapshots are inherently household-wide records — the
+                payload captures every member, and the figures shown
+                above are filtered to the selected member only.
+                Delete / retime applies to the entire snapshot.
+              </div>
+            )}
             <div className="flex items-center justify-between gap-3 text-[11px] text-text-dim">
               <span>
-                Current NW: <span className="num text-text">{formatUSD(householdNetWorth(household))}</span>
+                Current NW:{" "}
+                <span className="num text-text">
+                  {formatUSD(currentDisplayNW)}
+                </span>
               </span>
               <button
                 type="button"
@@ -369,4 +422,37 @@ function parseISO(s: string): number {
 
 function formatDate(t: number): string {
   return new Date(t).toLocaleDateString();
+}
+
+/**
+ * Summary line for the snapshot-panel header. Five mutually-
+ * exclusive branches keyed on (filtered list empty?, member chip
+ * active?, legacy snapshots dropped from the view?). Exported so
+ * the test can pin the full truth table — small enough to keep
+ * verifiable, big enough that a nested ternary is hostile to read.
+ */
+export function summarize(
+  filteredSnapshots: Snapshot[],
+  memberId: string | null,
+  droppedLegacyCount: number,
+): string {
+  if (filteredSnapshots.length === 0) {
+    if (memberId == null) {
+      return "None yet — capture one to anchor your history";
+    }
+    if (droppedLegacyCount > 0) {
+      return `No member-attributable snapshots (${droppedLegacyCount} legacy NW-only hidden — filterable only at household view)`;
+    }
+    return "No snapshots for this member";
+  }
+  const oldestText = formatDate(
+    Math.min(...filteredSnapshots.map((s) => s.t)),
+  );
+  if (memberId == null) {
+    return `${filteredSnapshots.length} recorded · oldest ${oldestText}`;
+  }
+  if (droppedLegacyCount > 0) {
+    return `${filteredSnapshots.length} recorded · oldest ${oldestText} (filtered to selected member, ${droppedLegacyCount} legacy NW-only hidden)`;
+  }
+  return `${filteredSnapshots.length} recorded · oldest ${oldestText} (filtered to selected member)`;
 }
