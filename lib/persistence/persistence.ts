@@ -352,3 +352,81 @@ export async function maybeRecordSnapshot(
     return false;
   }
 }
+
+/**
+ * Monthly auto-snapshot policy — sister of maybeRecordSnapshot, but
+ * anchors the primary key (`t`) to the FIRST day of the calendar
+ * month so successive same-month calls are a natural primary-key
+ * no-op (idempotent re-runs within the month don't write multiple
+ * rows). User-set quarterly check-in cadence pattern.
+ *
+ * Pruning: if the post-write total exceeds `maxAutoRows`, prune
+ * OLDEST auto-snapshots (rows without a `label` — labeled rows are
+ * user-saved and untouchable). Default cap of 240 = 20 years of
+ * monthly snapshots, which keeps Drive payload size manageable
+ * without losing meaningful long-term history.
+ *
+ * Returns `true` iff a write happened (so callers can bump the
+ * sync-revision counter only when something changed).
+ *
+ * Engine purity: pure I/O — no Date.now() default would violate the
+ * "no time as a hidden input" rule, so `now` is a required param at
+ * use sites. We default it to Date.now() here because the function
+ * IS I/O-bound (it's an auto-snapshotter), but tests always supply
+ * a deterministic `now` for reproducibility.
+ */
+export async function maybeRecordMonthlySnapshot(
+  netWorthUSD: number,
+  household?: Household,
+  now = Date.now(),
+  maxAutoRows = 240,
+): Promise<boolean> {
+  if (!Number.isFinite(netWorthUSD) || netWorthUSD <= 0) return false;
+  if (household && household.accounts.length === 0) return false;
+  const handle = getDB();
+  if (!handle) return false;
+  // Anchor the primary key to (UTC year, month, day=1, noon). Noon
+  // chosen so TZ-skew (up to 12h either way) can't push the row
+  // into the neighbouring month.
+  const nowDate = new Date(now);
+  const monthAnchor = Date.UTC(
+    nowDate.getUTCFullYear(),
+    nowDate.getUTCMonth(),
+    1,
+    12,
+    0,
+    0,
+    0,
+  );
+  try {
+    // Same-month idempotency: if a row already exists at this
+    // monthAnchor, refuse to overwrite (don't clobber a user's
+    // mid-month manual snapshot OR another auto-snapshot from
+    // earlier this month with potentially-different state). This
+    // is the "first-call wins" semantic per the policy.
+    const existing = await handle.snapshots.get(monthAnchor);
+    if (existing) return false;
+    const row: SnapshotRow = household
+      ? { t: monthAnchor, netWorthUSD, household }
+      : { t: monthAnchor, netWorthUSD };
+    await handle.snapshots.put(row);
+    // Prune oldest auto-snapshots (unlabeled) past the cap.
+    if (maxAutoRows > 0) {
+      const all = await handle.snapshots.orderBy("t").toArray();
+      // Identify auto-snapshots: lack of `label` is the marker.
+      const autoRows = all.filter((r) => r.label == null);
+      if (autoRows.length > maxAutoRows) {
+        const overflow = autoRows.length - maxAutoRows;
+        // Oldest first — autoRows is already sorted by t ascending.
+        const toDelete = autoRows.slice(0, overflow).map((r) => r.t);
+        await Promise.all(
+          toDelete.map((t) => handle.snapshots.delete(t)),
+        );
+      }
+    }
+    return true;
+  } catch (e) {
+    console.warn("WealthTrajectory: failed to maybe-record-monthly", e);
+    return false;
+  }
+}

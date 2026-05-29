@@ -309,3 +309,101 @@ describe("maybeRecordSnapshot — auto-snapshot guard", () => {
     ).toBe(true);
   });
 });
+
+describe("maybeRecordMonthlySnapshot — monthly auto-snapshot policy (R-monthly)", () => {
+  const HH = { ...EMPTY_HH, accounts: [{ id: "a1" }] as never };
+  // Pick a non-DST boundary in 2024 so calendar-month math is stable.
+  const MARCH_15_2024 = Date.UTC(2024, 2, 15, 10, 0, 0, 0);
+  const APRIL_2_2024 = Date.UTC(2024, 3, 2, 14, 0, 0, 0);
+  const APRIL_20_2024 = Date.UTC(2024, 3, 20, 8, 0, 0, 0);
+
+  it("writes a row anchored to first-of-month at noon UTC", async () => {
+    const { loadSnapshots, maybeRecordMonthlySnapshot } = await freshModule();
+    const wrote = await maybeRecordMonthlySnapshot(100_000, HH, MARCH_15_2024);
+    expect(wrote).toBe(true);
+    const rows = await loadSnapshots();
+    expect(rows).toHaveLength(1);
+    // Anchor is March 1 2024 at noon UTC, NOT the call time.
+    expect(rows[0].t).toBe(Date.UTC(2024, 2, 1, 12, 0, 0, 0));
+    expect(rows[0].netWorthUSD).toBe(100_000);
+  });
+
+  it("same-month idempotency: second call within the same calendar month is a no-op", async () => {
+    const { loadSnapshots, maybeRecordMonthlySnapshot } = await freshModule();
+    expect(
+      await maybeRecordMonthlySnapshot(100_000, HH, MARCH_15_2024),
+    ).toBe(true);
+    expect(
+      await maybeRecordMonthlySnapshot(110_000, HH, MARCH_15_2024 + 10 * 24 * 60 * 60 * 1000), // March 25
+    ).toBe(false);
+    const rows = await loadSnapshots();
+    expect(rows).toHaveLength(1);
+    // First call won — the value from the second call did NOT overwrite.
+    expect(rows[0].netWorthUSD).toBe(100_000);
+  });
+
+  it("new calendar month → new row (April writes alongside the March row)", async () => {
+    const { loadSnapshots, maybeRecordMonthlySnapshot } = await freshModule();
+    await maybeRecordMonthlySnapshot(100_000, HH, MARCH_15_2024);
+    await maybeRecordMonthlySnapshot(125_000, HH, APRIL_2_2024);
+    // Another April call still no-ops (April 2 already won this month).
+    expect(
+      await maybeRecordMonthlySnapshot(135_000, HH, APRIL_20_2024),
+    ).toBe(false);
+    const rows = await loadSnapshots();
+    expect(rows.map((r) => r.netWorthUSD)).toEqual([100_000, 125_000]);
+  });
+
+  it("refuses to record on invalid NW / empty household / corrupt input", async () => {
+    const { loadSnapshots, maybeRecordMonthlySnapshot } = await freshModule();
+    expect(await maybeRecordMonthlySnapshot(0, HH, MARCH_15_2024)).toBe(false);
+    expect(await maybeRecordMonthlySnapshot(-100, HH, MARCH_15_2024)).toBe(false);
+    expect(await maybeRecordMonthlySnapshot(Number.NaN, HH, MARCH_15_2024)).toBe(false);
+    expect(await maybeRecordMonthlySnapshot(100_000, EMPTY_HH, MARCH_15_2024)).toBe(false);
+    expect(await loadSnapshots()).toHaveLength(0);
+  });
+
+  it("prunes oldest auto-snapshots when total exceeds maxAutoRows (240-row cap default)", async () => {
+    const { loadSnapshots, maybeRecordMonthlySnapshot } = await freshModule();
+    // Write 5 monthly rows with a small cap (3) so we can verify
+    // the oldest get pruned. Use maxAutoRows=3 so months 1+2 get
+    // removed after month 5 is written.
+    for (let m = 0; m < 5; m++) {
+      const t = Date.UTC(2024, m, 15, 12, 0, 0, 0);
+      await maybeRecordMonthlySnapshot(100_000 + m * 1_000, HH, t, 3);
+    }
+    const rows = await loadSnapshots();
+    expect(rows).toHaveLength(3);
+    // Newest 3 months remain (Mar/Apr/May = months 2, 3, 4).
+    expect(rows.map((r) => r.netWorthUSD)).toEqual([
+      102_000, // March
+      103_000, // April
+      104_000, // May
+    ]);
+  });
+
+  it("does NOT prune user-labeled snapshots when applying the cap", async () => {
+    const { loadSnapshots, maybeRecordMonthlySnapshot, recordSnapshot } =
+      await freshModule();
+    // Insert a user-labeled snapshot from JANUARY (very old).
+    await recordSnapshot({
+      t: Date.UTC(2020, 0, 1, 12, 0, 0, 0),
+      netWorthUSD: 50_000,
+      label: "Pre-promotion baseline",
+    });
+    // Then write 4 monthly auto-snapshots with cap=2. After the
+    // dust settles, the user-labeled row should still be there
+    // AND the newest 2 auto-snapshots.
+    for (let m = 0; m < 4; m++) {
+      const t = Date.UTC(2024, m, 15, 12, 0, 0, 0);
+      await maybeRecordMonthlySnapshot(100_000 + m * 1_000, HH, t, 2);
+    }
+    const rows = await loadSnapshots();
+    // 1 labeled + 2 newest auto = 3 total.
+    expect(rows).toHaveLength(3);
+    expect(rows.some((r) => r.label === "Pre-promotion baseline")).toBe(true);
+    // Auto-rows present: months 2 and 3 (Mar + Apr).
+    const autos = rows.filter((r) => r.label == null);
+    expect(autos.map((r) => r.netWorthUSD).sort()).toEqual([102_000, 103_000]);
+  });
+});
