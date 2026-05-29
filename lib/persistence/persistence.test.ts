@@ -151,19 +151,20 @@ describe("snapshots — record / load / delete / move", () => {
     expect(out[0]).toEqual(snap);
   });
 
-  it("loadSnapshots prunes zero / negative NW rows (legacy poison)", async () => {
+  it("loadSnapshots prunes NaN/Infinity ONLY — keeps zero and negative NW (legitimate underwater state)", async () => {
+    // Audit R1 MED: a user with high mortgage debt and low assets
+    // (early-career, post-divorce, etc.) legitimately has negative
+    // NW and must be able to record snapshots of that state. Only
+    // genuinely-corrupt NaN/Infinity rows are purged.
     const { loadSnapshots, recordSnapshot } = await freshModule();
     await recordSnapshot({ t: 1, netWorthUSD: 100_000 });
-    await recordSnapshot({ t: 2, netWorthUSD: 0 });          // poisoned
-    await recordSnapshot({ t: 3, netWorthUSD: -500 });        // poisoned
-    await recordSnapshot({ t: 4, netWorthUSD: Number.NaN });  // poisoned
+    await recordSnapshot({ t: 2, netWorthUSD: 0 });           // legitimate zero
+    await recordSnapshot({ t: 3, netWorthUSD: -500 });        // legitimate negative
+    await recordSnapshot({ t: 4, netWorthUSD: Number.NaN });  // corrupt
     await recordSnapshot({ t: 5, netWorthUSD: 200_000 });
     const out = await loadSnapshots();
-    // Only the positive-NW rows survive the load filter, AND
-    // the bad rows have been deleted from IDB (the one-shot
-    // migration cleanup). Re-load confirms persistence of the
-    // cleanup, not just a runtime filter.
-    expect(out.map((s) => s.netWorthUSD)).toEqual([100_000, 200_000]);
+    // Zero + negative are kept; only NaN is purged from IDB.
+    expect(out.map((s) => s.netWorthUSD)).toEqual([100_000, 0, -500, 200_000]);
     const reloaded = await loadSnapshots();
     expect(reloaded).toEqual(out);
   });

@@ -208,27 +208,27 @@ export async function loadSnapshots(): Promise<Snapshot[]> {
   if (!handle) return [];
   try {
     const all = await handle.snapshots.orderBy("t").toArray();
-    // One-shot migration: prune any zero / negative-NW rows that
-    // accumulated from the pre-fix auto-recorder. Done at load time
-    // so users don't have to think about it. Safe — these rows can't
-    // be the user's real state; the manager UI requires a positive
-    // current NW to even surface the "Save snapshot" button.
-    const bad = all.filter(
-      (s) => !Number.isFinite(s.netWorthUSD) || s.netWorthUSD <= 0,
-    );
-    if (bad.length > 0) {
+    // Drop NaN/Infinity defensively (these can ONLY come from
+    // genuine data corruption — never a legitimate user state).
+    // Round-1 audit MED fix: previously this ALSO deleted any
+    // NW <= 0 row from IndexedDB silently. That's wrong — a
+    // legitimately-underwater user (high mortgage, low assets,
+    // early-career) has a real negative NW and should not have
+    // their snapshot deleted. We now KEEP negative NW rows
+    // (return them to the UI which shows them with the negative
+    // sign) and only purge NaN/Infinity at load.
+    const corrupt = all.filter((s) => !Number.isFinite(s.netWorthUSD));
+    if (corrupt.length > 0) {
       try {
         await Promise.all(
-          bad.map((s) => handle.snapshots.delete(s.t)),
+          corrupt.map((s) => handle.snapshots.delete(s.t)),
         );
       } catch {
         /* best-effort cleanup; the runtime overlay filter is the
            authoritative guard regardless */
       }
     }
-    return all.filter(
-      (s) => Number.isFinite(s.netWorthUSD) && s.netWorthUSD > 0,
-    );
+    return all.filter((s) => Number.isFinite(s.netWorthUSD));
   } catch (e) {
     console.warn("WealthTrajectory: failed to load snapshots", e);
     return [];

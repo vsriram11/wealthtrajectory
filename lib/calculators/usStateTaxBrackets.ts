@@ -275,7 +275,10 @@ export const STATE_BRACKETS_2025: Record<USState, StateData> = {
         { rate: 0.103, threshold: 721_318 },
         { rate: 0.113, threshold: 865_574 },
         { rate: 0.123, threshold: 1_442_628 },
-        { rate: 0.133, threshold: 2_000_000 },
+        // California's 1.1% MHST surcharge is per-RETURN at $1M
+        // (NOT $2M for MFJ — the joint return is one return, the
+        // MHST threshold doesn't double). Round-3 audit MED fix.
+        { rate: 0.133, threshold: 1_000_000 },
       ],
       hoh: [
         { rate: 0.01, threshold: 0 },

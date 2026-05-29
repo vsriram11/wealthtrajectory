@@ -57,6 +57,15 @@ export function SnapshotsManager() {
   // Add-snapshot form state
   const [draftDate, setDraftDate] = useState<string>(todayISO());
   const [draftLabel, setDraftLabel] = useState<string>("");
+  // Per-row edit state (Audit R1 HIGH #5 + #6). When non-null,
+  // the row whose `t` matches is in edit mode; the draft fields
+  // are scoped to that row's edits. Explicit Save/Cancel
+  // replaces the unsafe onBlur-driven retime (which fired on
+  // accidental focus loss, silently mutating data).
+  const [editingT, setEditingT] = useState<number | null>(null);
+  const [editDate, setEditDate] = useState<string>("");
+  const [editNW, setEditNW] = useState<string>("");
+  const [editLabel, setEditLabel] = useState<string>("");
   const [includeComposition, setIncludeComposition] = useState(true);
 
   const refresh = async () => {
@@ -164,13 +173,69 @@ export function SnapshotsManager() {
     }
   };
 
-  const handleRetime = async (oldT: number, newISO: string) => {
-    const newT = parseISO(newISO);
-    if (!Number.isFinite(newT) || newT === oldT) return;
+  /**
+   * Open the edit form for a snapshot row. Pre-fills with current
+   * values. Round-1 audit HIGH #5: previously the date was the
+   * ONLY editable field (via onBlur — unsafe), and NW + label
+   * were read-only. Users who mistyped had to delete + recreate.
+   */
+  const handleStartEdit = (s: Snapshot) => {
+    setEditingT(s.t);
+    setEditDate(toISO(s.t));
+    setEditNW(String(s.netWorthUSD));
+    setEditLabel(s.label ?? "");
+  };
+
+  const handleCancelEdit = () => {
+    setEditingT(null);
+    setEditDate("");
+    setEditNW("");
+    setEditLabel("");
+  };
+
+  /**
+   * Persist edits. Composes: (a) if date changed → `moveSnapshot`
+   * to update the primary key, (b) write the snapshot with the new
+   * NW + label fields via `recordSnapshot` (which `put`s at the
+   * final `t`, replacing the previous row).
+   */
+  const handleSaveEdit = async (originalT: number) => {
+    if (editingT !== originalT) return;
+    const newT = parseISO(editDate);
+    if (!Number.isFinite(newT)) return;
+    const newNW = Number(editNW);
+    if (!Number.isFinite(newNW)) return;
     setBusy(true);
     try {
-      await moveSnapshot(oldT, newT);
+      // Find the original snapshot to preserve household + other
+      // fields that aren't user-editable here.
+      const original = snapshots.find((s) => s.t === originalT);
+      if (!original) return;
+      // If the date changed, move the row first so we don't end up
+      // with two rows (one old, one new) at different t values.
+      if (newT !== originalT) {
+        await moveSnapshot(originalT, newT);
+      }
+      // Now `put` at the final t with updated scalar fields.
+      // structuredClone the household for the same defensive-clone
+      // reason as handleAdd.
+      const updated: Snapshot = {
+        ...original,
+        t: newT,
+        netWorthUSD: newNW,
+        ...(editLabel.trim() ? { label: editLabel.trim() } : {}),
+        ...(original.household
+          ? { household: structuredClone(original.household) }
+          : {}),
+      };
+      // If editLabel was cleared but original had a label, drop the
+      // field (since the spread above only includes it conditionally).
+      if (!editLabel.trim() && "label" in updated) {
+        delete (updated as { label?: string }).label;
+      }
+      await recordSnapshot(updated);
       await refresh();
+      handleCancelEdit();
     } finally {
       setBusy(false);
     }
@@ -364,60 +429,127 @@ export function SnapshotsManager() {
 
           {sorted.length > 0 && (
             <ul className="mt-3 space-y-1.5">
-              {sorted.map((s) => (
-                <li
-                  key={s.t}
-                  className="rounded-md border border-border bg-bg-surface px-3 py-2"
-                >
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-1.5">
-                        <input
-                          type="date"
-                          defaultValue={toISO(s.t)}
-                          onBlur={(e) =>
-                            void handleRetime(s.t, e.target.value)
-                          }
-                          className="rounded border border-border-strong bg-bg-elevated px-1.5 py-0.5 text-[11px] text-text outline-none focus:border-accent"
-                          title="Edit the date this snapshot represents"
-                        />
-                        {s.household ? (
-                          <span
-                            className="rounded border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-accent"
-                            title="Includes holdings composition"
+              {sorted.map((s) => {
+                const isEditing = editingT === s.t;
+                return (
+                  <li
+                    key={s.t}
+                    className="rounded-md border border-border bg-bg-surface px-3 py-2"
+                  >
+                    {isEditing ? (
+                      // EDIT MODE — explicit Save / Cancel buttons,
+                      // no onBlur autosave. Round-1 audit HIGH fix:
+                      // user can edit date, NW value, and label
+                      // all in one safe form.
+                      <div className="space-y-2">
+                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                          <label className="block text-[10px] text-text-muted">
+                            Date
+                            <input
+                              type="date"
+                              value={editDate}
+                              onChange={(e) => setEditDate(e.target.value)}
+                              className="mt-0.5 w-full rounded border border-border-strong bg-bg-elevated px-2 py-1 text-[11px] text-text outline-none focus:border-accent"
+                            />
+                          </label>
+                          <label className="block text-[10px] text-text-muted">
+                            Net worth (USD)
+                            <input
+                              type="number"
+                              inputMode="decimal"
+                              value={editNW}
+                              onChange={(e) => setEditNW(e.target.value)}
+                              className="num mt-0.5 w-full rounded border border-border-strong bg-bg-elevated px-2 py-1 text-[11px] text-text outline-none focus:border-accent"
+                            />
+                          </label>
+                          <label className="block text-[10px] text-text-muted">
+                            Label
+                            <input
+                              type="text"
+                              placeholder="optional"
+                              value={editLabel}
+                              onChange={(e) => setEditLabel(e.target.value)}
+                              className="mt-0.5 w-full rounded border border-border-strong bg-bg-elevated px-2 py-1 text-[11px] text-text outline-none placeholder:text-text-dim focus:border-accent"
+                            />
+                          </label>
+                        </div>
+                        <div className="flex items-center justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={handleCancelEdit}
+                            disabled={busy}
+                            className="rounded border border-border-strong bg-bg-elevated px-2 py-1 text-[10px] text-text-muted disabled:opacity-40 active:opacity-70"
                           >
-                            full
-                          </span>
-                        ) : (
-                          <span
-                            className="rounded border border-border-strong bg-bg-elevated px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-text-dim"
-                            title="Net-worth-only snapshot"
+                            Cancel
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void handleSaveEdit(s.t)}
+                            disabled={busy}
+                            className="rounded bg-accent px-2.5 py-1 text-[10px] font-medium text-bg disabled:opacity-40 active:opacity-80"
                           >
-                            nw only
-                          </span>
-                        )}
-                        {s.label && (
-                          <span className="truncate text-[10px] text-text-muted">
-                            {s.label}
-                          </span>
-                        )}
+                            {busy ? "Saving…" : "Save"}
+                          </button>
+                        </div>
                       </div>
-                      <div className="mt-0.5 num text-[11px] text-text-muted">
-                        {formatUSD(s.netWorthUSD)}
+                    ) : (
+                      // READ MODE — Edit + Delete buttons.
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5">
+                            <span className="text-[11px] text-text">
+                              {formatDate(s.t)}
+                            </span>
+                            {s.household ? (
+                              <span
+                                className="rounded border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-accent"
+                                title="Includes holdings composition"
+                              >
+                                full
+                              </span>
+                            ) : (
+                              <span
+                                className="rounded border border-border-strong bg-bg-elevated px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wider text-text-dim"
+                                title="Net-worth-only snapshot"
+                              >
+                                nw only
+                              </span>
+                            )}
+                            {s.label && (
+                              <span className="truncate text-[10px] text-text-muted">
+                                {s.label}
+                              </span>
+                            )}
+                          </div>
+                          <div className="mt-0.5 num text-[11px] text-text-muted">
+                            {formatUSD(s.netWorthUSD)}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => handleStartEdit(s)}
+                            disabled={busy}
+                            className="rounded border border-border-strong bg-bg-elevated px-2 py-1 text-[10px] text-text-muted disabled:opacity-40 active:opacity-70 hover:text-text"
+                            aria-label="Edit snapshot"
+                          >
+                            Edit
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDelete(s.t)}
+                            disabled={busy}
+                            className="rounded border border-negative/40 bg-bg-surface px-2 py-1 text-[10px] font-medium text-negative disabled:opacity-40 active:opacity-70"
+                            aria-label="Delete snapshot"
+                          >
+                            Delete
+                          </button>
+                        </div>
                       </div>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => handleDelete(s.t)}
-                      disabled={busy}
-                      className="rounded border border-negative/40 bg-bg-surface px-2 py-1 text-[10px] font-medium text-negative disabled:opacity-40 active:opacity-70"
-                      aria-label="Delete snapshot"
-                    >
-                      Delete
-                    </button>
-                  </div>
-                </li>
-              ))}
+                    )}
+                  </li>
+                );
+              })}
             </ul>
           )}
         </div>
