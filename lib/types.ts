@@ -336,6 +336,17 @@ export type EquityHolding = {
   /** User override: treat this holding as illiquid (see isLiquid). */
   isIlliquid?: boolean;
   /**
+   * User override: keep this holding when the MC stress-test bucket
+   * policy needs to sell assets to fund a larger cash bucket. Default
+   * = false (auto-priority is allowed to sell it). Composes with
+   * `isIlliquid` — an illiquid holding is already excluded from
+   * bucket sales; this flag is for LIQUID holdings the user wants
+   * to preserve (e.g. high-conviction long-held positions, tax-
+   * loss carryforward setups, employer-share concentration plays).
+   * Consumed by `lib/portfolio/bucketFunding.ts`.
+   */
+  excludeFromCashBucketSale?: boolean;
+  /**
    * Optional intrinsic composition for multi-asset ETFs (NTSX, GDE, etc.).
    * When present, the holding's effective leverage equals the sum of
    * leg weights (overriding the scalar `leverage` field), and the class
@@ -381,6 +392,17 @@ export type BondHolding = {
   /** User override: treat this holding as illiquid (see isLiquid). */
   isIlliquid?: boolean;
   /**
+   * User override: keep this holding when the MC stress-test bucket
+   * policy needs to sell assets to fund a larger cash bucket. Default
+   * = false (auto-priority is allowed to sell it). Composes with
+   * `isIlliquid` — an illiquid holding is already excluded from
+   * bucket sales; this flag is for LIQUID holdings the user wants
+   * to preserve (e.g. high-conviction long-held positions, tax-
+   * loss carryforward setups, employer-share concentration plays).
+   * Consumed by `lib/portfolio/bucketFunding.ts`.
+   */
+  excludeFromCashBucketSale?: boolean;
+  /**
    * Optional intrinsic composition for multi-asset bond wrappers
    * (e.g. a TIPS-anchored fund that also overlays gold/crypto).
    * When present, the holding's effective leverage equals the sum
@@ -399,6 +421,17 @@ export type CashHolding = {
   geography: GeographyAllocation;
   /** User override: treat this holding as illiquid (see isLiquid). */
   isIlliquid?: boolean;
+  /**
+   * User override: keep this holding when the MC stress-test bucket
+   * policy needs to sell assets to fund a larger cash bucket. Default
+   * = false (auto-priority is allowed to sell it). Composes with
+   * `isIlliquid` — an illiquid holding is already excluded from
+   * bucket sales; this flag is for LIQUID holdings the user wants
+   * to preserve (e.g. high-conviction long-held positions, tax-
+   * loss carryforward setups, employer-share concentration plays).
+   * Consumed by `lib/portfolio/bucketFunding.ts`.
+   */
+  excludeFromCashBucketSale?: boolean;
 };
 
 export type CryptoHolding = {
@@ -422,6 +455,17 @@ export type CryptoHolding = {
   leverage?: number;
   /** User override: treat this holding as illiquid (see isLiquid). */
   isIlliquid?: boolean;
+  /**
+   * User override: keep this holding when the MC stress-test bucket
+   * policy needs to sell assets to fund a larger cash bucket. Default
+   * = false (auto-priority is allowed to sell it). Composes with
+   * `isIlliquid` — an illiquid holding is already excluded from
+   * bucket sales; this flag is for LIQUID holdings the user wants
+   * to preserve (e.g. high-conviction long-held positions, tax-
+   * loss carryforward setups, employer-share concentration plays).
+   * Consumed by `lib/portfolio/bucketFunding.ts`.
+   */
+  excludeFromCashBucketSale?: boolean;
   /**
    * Optional intrinsic composition. Useful for a hypothetical crypto-
    * dominant multi-asset wrapper (e.g. a BTC-allocated treasury
@@ -463,6 +507,13 @@ export type CommodityHolding = {
   expectedRealCAGR: number;
   /** User override: treat this holding as illiquid (e.g. physical jewelry). */
   isIlliquid?: boolean;
+  /**
+   * User override: keep this holding when the MC stress-test bucket
+   * policy needs to sell assets to fund a larger cash bucket. Default
+   * = false (auto-priority allowed). Same semantic as on equity / bond /
+   * etc. — see those types' docs.
+   */
+  excludeFromCashBucketSale?: boolean;
   /**
    * Optional intrinsic composition. Useful for commodity-dominant
    * multi-asset wrappers (e.g. a gold fund that overlays bond income).
@@ -511,6 +562,14 @@ export type RealEstateHolding = {
    * equity / bond / cash / crypto / commodity / other.
    */
   isIlliquid?: boolean;
+  /**
+   * User override: keep this property when the MC stress-test bucket
+   * policy needs to sell assets to fund a larger cash bucket. Default
+   * = false (auto-priority allowed). Primary residences are ALREADY
+   * excluded structurally; this flag is for sellable RE (rentals,
+   * land) the user explicitly wants preserved.
+   */
+  excludeFromCashBucketSale?: boolean;
 };
 
 /**
@@ -572,6 +631,17 @@ export type OtherHolding = {
   acquiredAt: number | null;
   /** User override: treat this holding as illiquid (see isLiquid). */
   isIlliquid?: boolean;
+  /**
+   * User override: keep this holding when the MC stress-test bucket
+   * policy needs to sell assets to fund a larger cash bucket. Default
+   * = false (auto-priority is allowed to sell it). Composes with
+   * `isIlliquid` — an illiquid holding is already excluded from
+   * bucket sales; this flag is for LIQUID holdings the user wants
+   * to preserve (e.g. high-conviction long-held positions, tax-
+   * loss carryforward setups, employer-share concentration plays).
+   * Consumed by `lib/portfolio/bucketFunding.ts`.
+   */
+  excludeFromCashBucketSale?: boolean;
 };
 
 export type Holding =
@@ -1177,6 +1247,22 @@ export function isLiquid(h: Holding): boolean {
   if (h.kind === "real_estate" && h.isPrimaryResidence === true) return false;
   if ("isIlliquid" in h && h.isIlliquid === true) return false;
   return true;
+}
+
+/**
+ * True when the user has explicitly opted this holding OUT of the
+ * MC stress-test's cash-bucket auto-sale pathway. Distinct from
+ * `isLiquid` — an illiquid holding is already structurally excluded
+ * from sales; this flag is for LIQUID holdings the user wants to
+ * preserve (high-conviction picks, employer-share concentration,
+ * tax-loss carryforward setups). Single source of truth so callers
+ * don't sprinkle the membership check.
+ */
+export function isExcludedFromCashBucketSale(h: Holding): boolean {
+  if ("excludeFromCashBucketSale" in h && h.excludeFromCashBucketSale === true) {
+    return true;
+  }
+  return false;
 }
 
 /**

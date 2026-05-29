@@ -15,6 +15,7 @@ import {
   type RebalancePolicy,
 } from "@/lib/projection/monteCarlo";
 import { applyCashBucketOverride } from "@/lib/projection/cashBucketAllocation";
+import { planBucketFunding } from "@/lib/portfolio/bucketFunding";
 import { computePortfolio } from "@/lib/portfolio/portfolio";
 import { computeLeveragedEquityBuckets } from "@/lib/portfolio/leveragedEquity";
 import { ageHousehold } from "@/lib/portfolio/futureAllocation";
@@ -467,16 +468,56 @@ export function HistoricalMonteCarloCard() {
   // just the projected (aged) cash share.
   const cashFractionEffective = allocation.cashFraction;
 
-  // Post-tax starting NW. When the user has leveraged ETFs that
-  // the stress test models as deleveraged-at-retirement, the
-  // capital-gains tax on that restructure comes out of starting NW.
-  // When there are no leveraged positions to deleverage (or all
-  // such positions are in tax-advantaged accounts),
-  // `taxHitFraction` is 0 and this reduces to the original
-  // `Math.max(0, startingNW)`.
+  // Bucket-funding tax model. When the user requests a larger cash
+  // bucket than the projected cash share + short-bond buffer, we
+  // model the cost of raising it: sell highest-leverage equity
+  // first (preferring tax-advantaged accounts within the same
+  // leverage tier to minimize the bill), apply cap-gains on
+  // taxable-account portions, reduce starting NW by the tax.
+  // Primary residence + private stock + isIlliquid + user opt-outs
+  // (excludeFromCashBucketSale) are excluded.
+  const bucketFundingPlan = useMemo(
+    () =>
+      planBucketFunding(
+        projectedHousehold,
+        portfolio.netWorthUSD,
+        portfolio.classes.cashShare,
+        cashBucketOverrideActive && requestedCashFraction != null
+          ? requestedCashFraction
+          : portfolio.classes.cashShare,
+        effective.retirementTaxRate ?? 0,
+      ),
+    [
+      projectedHousehold,
+      portfolio.netWorthUSD,
+      portfolio.classes.cashShare,
+      cashBucketOverrideActive,
+      requestedCashFraction,
+      effective.retirementTaxRate,
+    ],
+  );
+
+  // Scale the bucket-funding tax to the user's overridden starting
+  // NW (matches the deleverage-tax scaling pattern at line ~399).
+  // This way "what if I had $X starting" scenarios get a
+  // proportional tax drag rather than a fixed dollar amount.
+  const bucketFundingTaxFraction =
+    portfolio.netWorthUSD > 0
+      ? bucketFundingPlan.totalTaxOwedUSD / portfolio.netWorthUSD
+      : 0;
+
+  // Post-tax starting NW. TWO taxes compose:
+  //   1. Deleveraging tax (existing) — capital gains on the at-
+  //      retirement 3x → 2x ETF restructure that the stress test
+  //      assumes the user performs anyway.
+  //   2. Bucket-funding tax (new) — capital gains on the sale of
+  //      equity (or bonds, etc.) to raise the requested cash bucket.
+  // Both are taxable-account-only (tax-advantaged rebalancing is
+  // tax-free); both default to gainFraction=1.0 (conservative —
+  // no cost-basis tracking, so assume all current value is gain).
   const effectiveStartingNW = Math.max(
     0,
-    startingNW * (1 - taxHitFraction),
+    startingNW * (1 - taxHitFraction - bucketFundingTaxFraction),
   );
   const effectiveWR =
     effectiveStartingNW > 0 ? annualSpend / effectiveStartingNW : 0;
@@ -997,10 +1038,7 @@ export function HistoricalMonteCarloCard() {
           if (!cashBucketOverrideActive || requestedCashFraction == null)
             return null;
           // Special case: 100% cash portfolio. The helper short-
-          // circuits (no non-cash to redistribute from), so the
-          // user's override is silently ignored. Show that fact
-          // honestly instead of describing a composition swap that
-          // didn't happen.
+          // circuits (no non-cash to redistribute from).
           if (projectedCashShare >= 1 - 0.001) {
             const requestedDelta = Math.abs(
               requestedCashFraction - projectedCashShare,
@@ -1019,25 +1057,16 @@ export function HistoricalMonteCarloCard() {
               </div>
             );
           }
-          // Compare against the clamped value the simulator actually
-          // consumes (already inside [0, CASH_BUCKET_MAX_PCT/100]),
-          // not the raw `cashBucketSizePct / 100`. Equivalent today
-          // (UI gates the input) but robust against a future
-          // programmatic setter pushing the raw value out of range.
           const delta = requestedCashFraction - projectedCashShare;
-          // `< 0.001` (strictly less) — the comment says "more than
-          // the input's precision," matching what users expect: typing
-          // ONE deliberate step from the default produces a warning.
           if (Math.abs(delta) < 0.001) return null;
+          // Bucket-funding tax is now MODELED. Disclose the actual
+          // tax cost + the sale plan + the assumptions.
           return (
-            <div
-              className="mt-2 rounded-md border border-amber-300/40 bg-amber-300/5 px-2.5 py-1.5 text-[10px] leading-snug text-amber-200"
-              role="status"
-            >
-              {delta > 0
-                ? "You've sized the bucket ABOVE the projected cash share. In reality, funding the larger bucket means selling equity at retirement — capital-gains tax on that sale is NOT modeled in this v1. Treat the success rate as an upper bound; the real-world number is lower by roughly the tax cost on the equity-to-cash swap."
-                : "You've sized the bucket BELOW the projected cash share (de-risking out of cash into equity). The composition swap is modeled, but any cap-gains realized when re-deploying cash to equity is NOT. Treat this as a clean swap for v1."}
-            </div>
+            <BucketFundingDisclosure
+              delta={delta}
+              plan={bucketFundingPlan}
+              scaledTaxUSD={bucketFundingTaxFraction * startingNW}
+            />
           );
         })()}
 
@@ -1293,6 +1322,189 @@ export function HistoricalMonteCarloCard() {
         onClose={() => setHistoricalTableOpen(false)}
       />
     </section>
+  );
+}
+
+/**
+ * Bucket-funding tax disclosure block. Shows when the user has
+ * sized the cash bucket above the projected cash share (which
+ * means equity / bonds must be sold to fund it). Surfaces:
+ *
+ *   - The MODELED tax cost (replacing the prior "NOT modeled" copy).
+ *   - Short-bond cash-equivalent buffer (when applicable).
+ *   - Sale-plan summary: which holdings got drained, in priority
+ *     order. Collapsible to keep the warning compact by default.
+ *   - Excluded items: primary residence + user opt-outs, named so
+ *     the user knows why they weren't sold.
+ *   - Pointer to the account editor for opting out specific holdings.
+ *   - Cost-basis assumption (gainFraction = 1.0, conservative).
+ */
+function BucketFundingDisclosure({
+  delta,
+  plan,
+  scaledTaxUSD,
+}: {
+  delta: number;
+  plan: ReturnType<typeof planBucketFunding>;
+  scaledTaxUSD: number;
+}) {
+  if (delta < 0) {
+    // De-risking direction (cash → equity). No cap-gains sale here;
+    // the composition swap just moves cash into equity in the model.
+    // (Realized gains from re-deploying cash within an IRA/Roth: zero
+    // tax. Buying equity with after-tax cash: zero tax until later
+    // sale. So the SWAP itself is tax-free in v1.)
+    return (
+      <div
+        className="mt-2 rounded-md border border-amber-300/40 bg-amber-300/5 px-2.5 py-1.5 text-[10px] leading-snug text-amber-200"
+        role="status"
+      >
+        You&apos;ve sized the bucket BELOW the projected cash share
+        (de-risking out of cash into equity). The composition swap is
+        modeled; the buy side has no immediate tax. Future cap-gains
+        on the new equity position are realized when sold (not in v1).
+      </div>
+    );
+  }
+
+  // Equity → cash sale. Show the modeled tax + sale breakdown.
+  return (
+    <div
+      className="mt-2 rounded-md border border-amber-300/40 bg-amber-300/5 px-2.5 py-1.5 text-[10px] leading-snug text-amber-200"
+      role="status"
+    >
+      <div>
+        Funding the larger bucket requires selling{" "}
+        <span className="num text-amber-100">
+          {formatUSDCompact(plan.amountRaisedUSD)}
+        </span>{" "}
+        of non-cash holdings. Modeled cap-gains tax (on the taxable-
+        account portion) is{" "}
+        <span className="num text-amber-100">
+          {formatUSDCompact(scaledTaxUSD)}
+        </span>
+        , deducted from the simulator&apos;s starting NW.
+      </div>
+      {plan.shortDurationBondUSD > 0 && (
+        <div className="mt-1 text-amber-300/80">
+          Short-duration bonds (≤ 1 yr,{" "}
+          <span className="num">
+            {formatUSDCompact(plan.shortDurationBondUSD)}
+          </span>
+          ) are counted as cash-equivalent and not sold — they&apos;re
+          already part of the SORR buffer.
+        </div>
+      )}
+      {plan.shortfallUSD > 0 && (
+        <div className="mt-1 text-red-300">
+          Shortfall: only{" "}
+          <span className="num">{formatUSDCompact(plan.amountRaisedUSD)}</span>{" "}
+          could be raised vs the{" "}
+          <span className="num">
+            {formatUSDCompact(plan.amountToRaiseUSD)}
+          </span>{" "}
+          requested. Sellable non-cash holdings ran out — the simulator
+          uses the actual cash share that resulted.
+        </div>
+      )}
+      <details className="mt-1">
+        <summary className="cursor-pointer text-amber-300/90">
+          Sale plan + assumptions
+        </summary>
+        <div className="mt-1.5 space-y-1 text-amber-300/80">
+          {plan.sales.length > 0 && (
+            <div>
+              <div className="font-medium text-amber-200">
+                Sold (highest-leverage first; tax-advantaged accounts
+                preferred within tier to minimize the tax bill):
+              </div>
+              <ul className="mt-0.5 ml-3 list-disc">
+                {plan.sales.slice(0, 8).map((s) => (
+                  <li key={s.holdingId}>
+                    {s.label}
+                    {s.leverage > 1 && (
+                      <span className="text-amber-300/70">
+                        {" "}
+                        ({s.leverage}× lev)
+                      </span>
+                    )}{" "}
+                    —{" "}
+                    <span className="num">
+                      {formatUSDCompact(s.faceValueSoldUSD)}
+                    </span>{" "}
+                    from {s.accountCategory}
+                    {s.isTaxable ? (
+                      <>
+                        ,{" "}
+                        <span className="num">
+                          {formatUSDCompact(s.taxOwedUSD)}
+                        </span>{" "}
+                        tax
+                      </>
+                    ) : (
+                      ", tax-free (rebalance)"
+                    )}
+                  </li>
+                ))}
+                {plan.sales.length > 8 && (
+                  <li className="text-amber-300/70">
+                    …and {plan.sales.length - 8} more holding
+                    {plan.sales.length - 8 === 1 ? "" : "s"}
+                  </li>
+                )}
+              </ul>
+            </div>
+          )}
+          {(plan.excludedPrimaryResidenceUSD > 0 ||
+            plan.excludedUserOptOutUSD > 0) && (
+            <div>
+              <span className="font-medium text-amber-200">Excluded:</span>{" "}
+              {plan.excludedPrimaryResidenceUSD > 0 && (
+                <>
+                  primary residence (
+                  <span className="num">
+                    {formatUSDCompact(plan.excludedPrimaryResidenceUSD)}
+                  </span>{" "}
+                  — can&apos;t be sold without moving)
+                </>
+              )}
+              {plan.excludedPrimaryResidenceUSD > 0 &&
+                plan.excludedUserOptOutUSD > 0 &&
+                "; "}
+              {plan.excludedUserOptOutUSD > 0 && (
+                <>
+                  user-marked holdings (
+                  <span className="num">
+                    {formatUSDCompact(plan.excludedUserOptOutUSD)}
+                  </span>
+                  )
+                </>
+              )}
+              .
+            </div>
+          )}
+          <div>
+            To keep a specific holding (e.g. a long-held high-conviction
+            position), open the account editor and toggle{" "}
+            <span className="text-amber-200">
+              &ldquo;Don&apos;t sell for cash-bucket funding&rdquo;
+            </span>{" "}
+            in that holding&apos;s advanced section.
+          </div>
+          <div>
+            <span className="font-medium text-amber-200">Assumption:</span>{" "}
+            this app doesn&apos;t track per-holding cost basis, so the
+            model treats all current value as gain (conservative — the
+            real-world tax is typically lower if you&apos;ve held less
+            than a full doubling). Tax rate{" "}
+            <span className="num">
+              {(plan.effectiveTaxRate * 100).toFixed(0)}%
+            </span>{" "}
+            (your configured retirement long-term cap-gains rate).
+          </div>
+        </div>
+      </details>
+    </div>
   );
 }
 

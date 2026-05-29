@@ -87,6 +87,10 @@ export type HoldingsActions = {
   ) => void;
   setHoldingIsPrimaryResidence: (holdingId: HoldingId, value: boolean) => void;
   setHoldingIsIlliquid: (holdingId: HoldingId, value: boolean) => void;
+  setHoldingExcludeFromCashBucketSale: (
+    holdingId: HoldingId,
+    value: boolean,
+  ) => void;
 };
 
 /** Cross-slice fields the holdings actions write to. */
@@ -294,6 +298,17 @@ export function createHoldingsActions(
           // more specific flag). Both are honored by isLiquid().
           if (h.kind === "private_stock") return h;
           return { ...h, isIlliquid: value };
+        }),
+      ),
+
+    setHoldingExcludeFromCashBucketSale: (id, value) =>
+      set((s) =>
+        mapHolding(s, id, (h) => {
+          // private_stock is already excluded structurally (illiquid
+          // → not in the cash-bucket sale candidates). Flagging is
+          // a no-op there; preserve the existing shape.
+          if (h.kind === "private_stock") return h;
+          return { ...h, excludeFromCashBucketSale: value };
         }),
       ),
   };

@@ -27,6 +27,7 @@ import { GeographyEditor } from "./holding-editors/GeographyEditor";
 import { CompositionEditor } from "./holding-editors/CompositionEditor";
 import { CommodityBreakdownEditor } from "./holding-editors/CommodityBreakdownEditor";
 import {
+  ExcludeFromCashBucketSaleToggle,
   IlliquidToggle,
   PrimaryResidenceToggle,
 } from "./holding-editors/Toggles";
@@ -391,6 +392,24 @@ function EditorBody({ holding, onClose }: { holding: Holding; onClose: () => voi
           <IlliquidToggle
             holdingId={holding.id}
             value={holding.isIlliquid === true}
+          />
+        )}
+        {/* Cash-bucket auto-sale opt-out. Available on every kind
+            except private_stock (which is already excluded
+            structurally via isLiquid) and primary residence
+            (also structurally excluded). Cash itself is included
+            for symmetry though selling cash for cash is a no-op
+            in the engine. */}
+        {(holding.kind === "equity" ||
+          holding.kind === "bond" ||
+          holding.kind === "cash" ||
+          holding.kind === "crypto" ||
+          holding.kind === "commodity" ||
+          holding.kind === "other" ||
+          (holding.kind === "real_estate" && !holding.isPrimaryResidence)) && (
+          <ExcludeFromCashBucketSaleToggle
+            holdingId={holding.id}
+            value={holding.excludeFromCashBucketSale === true}
           />
         )}
         {holding.kind === "private_stock" && (
