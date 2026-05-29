@@ -564,6 +564,29 @@ describe("Snapshot.appState — back-compat + per-member preservation", () => {
     expect(out.appState?.memberAssumptions?.m1?.withdrawalRate).toBe(0.035);
   });
 
+  it("replaceAllSnapshots PRESERVES appState (audit-fix regression pin)", async () => {
+    // CRITICAL audit finding: the bulkPut row builder previously
+    // whitelisted only {t, netWorthUSD, household, label} and
+    // silently dropped appState on every Drive-restore / JSON-
+    // import path. This test would have caught it.
+    const { loadSnapshots, replaceAllSnapshots } = await freshModule();
+    const snap = {
+      t: Date.UTC(2024, 5, 1, 12),
+      netWorthUSD: 500_000,
+      household: TWO_MEMBER_HH,
+      appState: APP_STATE,
+      label: "Round-trip test",
+    };
+    await replaceAllSnapshots([snap as never]);
+    const [out] = await loadSnapshots();
+    expect(out.appState).toBeDefined();
+    expect(out.appState?.targetAllocation).toEqual({
+      stocks: 0.7,
+      bonds: 0.3,
+    });
+    expect(out.appState?.memberAssumptions?.m1?.withdrawalRate).toBe(0.035);
+  });
+
   it("captureSnapshotAppState deep-clones — mutating live state after capture does NOT alter the captured payload", async () => {
     const { captureSnapshotAppState } = await import(
       "@/lib/persistence/snapshotAppState"

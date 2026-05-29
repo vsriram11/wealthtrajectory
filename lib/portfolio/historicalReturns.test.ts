@@ -269,6 +269,37 @@ describe("perHoldingCAGR / perAccountCAGR / perHoldingTotalReturn", () => {
     expect(perHoldingCAGR(snaps, "never-existed")).toBeNull();
   });
 
+  it("perHoldingCAGR returns null when holding is MISSING from the FIRST snapshot (audit-fix regression pin)", () => {
+    // Critical audit finding: prior implementation silently
+    // computed a partial-window CAGR when the holding appeared
+    // mid-window. UI labeled the result as full-window performance
+    // — misleading. Now must be null.
+    const snaps: Snapshot[] = [
+      snap(T0, [{ id: "h_other", cls: "equity", v: 10_000 }]),
+      snap(T0 + YEAR, [
+        { id: "h_other", cls: "equity", v: 10_000 },
+        { id: "h_late", cls: "equity", v: 5_000 },
+      ]),
+      snap(T0 + 5 * YEAR, [
+        { id: "h_other", cls: "equity", v: 10_000 },
+        { id: "h_late", cls: "equity", v: 10_000 },
+      ]),
+    ];
+    // h_late exists only at snapshots 1 and 2, not at snapshot 0
+    // → must return null (was previously computing a 100% CAGR).
+    expect(perHoldingCAGR(snaps, "h_late")).toBeNull();
+  });
+
+  it("perHoldingCAGR returns null when holding is MISSING from the LAST snapshot (sell-and-exit)", () => {
+    const snaps: Snapshot[] = [
+      snap(T0, [{ id: "h_sold", cls: "equity", v: 10_000 }]),
+      snap(T0 + YEAR, [{ id: "h_sold", cls: "equity", v: 11_000 }]),
+      // Sold by year 2 — holding absent from final snapshot.
+      snap(T0 + 5 * YEAR, []),
+    ];
+    expect(perHoldingCAGR(snaps, "h_sold")).toBeNull();
+  });
+
   it("perAccountCAGR sums the account's holdings at each snapshot", () => {
     const snaps: Snapshot[] = [
       snap(T0, [

@@ -1,7 +1,8 @@
-import type { Snapshot } from "@/lib/persistence/persistence";
+import type { Snapshot, SnapshotAppState } from "@/lib/persistence/persistence";
 import type { Holding, Household, AssetClass } from "@/lib/types";
 import { holdingClass, householdNetWorth } from "@/lib/types";
 import { DEMO_ASSUMPTIONS, DEMO_BUDGET, DEMO_HOUSEHOLD, DEMO_INCOME_STREAMS } from "@/lib/demo";
+import type { TargetAllocation } from "@/lib/portfolio/targetAllocation";
 
 /**
  * Demo-mode synthetic snapshot history — 60 monthly snapshots
@@ -223,6 +224,61 @@ function monthAnchor(now: number, monthsAgo: number): number {
   );
 }
 
+/**
+ * Time-varying targetAllocation across the demo timeline. Models
+ * the realistic "younger investor was more aggressive 5 years ago,
+ * gradually shifted toward conservative as they aged" arc:
+ *
+ *   - monthsAgo=60 (5y ago): equity 65 / bond 20 / cash 5 / crypto 5 / real_estate 5
+ *   - monthsAgo=0 (today):   equity 75 / bond 12 / cash 3 / crypto 4 / real_estate 6
+ *
+ * Linear interpolation between the two endpoints — no fancy curve,
+ * just enough drift that a target-vs-actual visualization would
+ * have something interesting to show. Returns null when the
+ * configured drift would produce nonsensical (negative) weights;
+ * defensive bound.
+ */
+function backdatedTarget(monthsAgo: number): TargetAllocation | null {
+  // alpha = 1 at today, 0 at 5 years ago.
+  const alpha = Math.max(0, Math.min(1, 1 - monthsAgo / 60));
+  const past = {
+    equity: 0.65,
+    bond: 0.2,
+    cash: 0.05,
+    crypto: 0.05,
+    real_estate: 0.05,
+  };
+  const today = {
+    equity: 0.75,
+    bond: 0.12,
+    cash: 0.03,
+    crypto: 0.04,
+    real_estate: 0.06,
+  };
+  const out: TargetAllocation = {};
+  for (const k of Object.keys(today) as Array<keyof typeof today>) {
+    const v = past[k] + alpha * (today[k] - past[k]);
+    if (!Number.isFinite(v) || v < 0) return null;
+    out[k] = v;
+  }
+  return out;
+}
+
+/**
+ * Per-month household annual income trajectory. Models realistic
+ * compensation growth: starts at ~$155k 5 years ago, ends at
+ * $250k today (≈10% annualized — a plausible mid-career raise
+ * cadence including a job change). Linear interpolation; the
+ * appState captures this with each snapshot so a future
+ * income-history visualization has real data.
+ */
+function backdatedAnnualIncome(monthsAgo: number): number {
+  const PAST = 155_000;
+  const TODAY = 250_000;
+  const alpha = Math.max(0, Math.min(1, 1 - monthsAgo / 60));
+  return Math.round(PAST + alpha * (TODAY - PAST));
+}
+
 export function buildDemoSnapshots(
   now: number,
   months: number = MONTHS_DEFAULT,
@@ -237,27 +293,28 @@ export function buildDemoSnapshots(
     const t = monthAnchor(now, monthsAgo);
     const household = buildBackdatedHousehold(monthsAgo);
     const netWorth = householdNetWorth(household);
+    const appState: SnapshotAppState = {
+      // Assumptions + budget + income-stream SHAPE held constant
+      // across the timeline (most users don't churn these
+      // settings). Where there's realistic drift to model
+      // (targetAllocation, annual income), the helpers above
+      // produce a per-month trajectory.
+      assumptions: DEMO_ASSUMPTIONS,
+      memberAssumptions: {},
+      budgetItems: DEMO_BUDGET,
+      incomeStreams: DEMO_INCOME_STREAMS,
+      scenarios: [],
+      healthPlans: [],
+      healthImportanceWeights: {},
+      targetAllocation: backdatedTarget(monthsAgo),
+      glidePath: null,
+      householdAnnualIncomeUSD: backdatedAnnualIncome(monthsAgo),
+    };
     out.push({
       t,
       netWorthUSD: netWorth,
       household,
-      appState: {
-        // Plan slices held constant across the demo timeline —
-        // realistic for users who don't churn these settings.
-        // Future visualizations of assumption-drift will see flat
-        // lines in demo, which is fine for "see how the History
-        // tab renders" purposes.
-        assumptions: DEMO_ASSUMPTIONS,
-        memberAssumptions: {},
-        budgetItems: DEMO_BUDGET,
-        incomeStreams: DEMO_INCOME_STREAMS,
-        scenarios: [],
-        healthPlans: [],
-        healthImportanceWeights: {},
-        targetAllocation: null,
-        glidePath: null,
-        householdAnnualIncomeUSD: 250_000,
-      },
+      appState,
     });
   }
   return out;

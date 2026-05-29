@@ -55,7 +55,24 @@ export function CloudSyncer() {
       // upload from before-time-travel doesn't fire mid-session
       // either (the cleanup path below also clears any pending
       // timer when the subscription re-runs).
-      if (state.timeTravelActive) return;
+      if (state.timeTravelActive) {
+        // Cancel any in-flight debounce timer on entry. The
+        // fire-time gate at line ~110 already catches a fired
+        // timer, but cancelling here saves the round-trip and
+        // (critically) clears the `googleUploadScheduled` flag
+        // that AuthHydrator's tab-resume path watches — without
+        // this, a queued-then-entered session leaves the flag
+        // stuck true, blocking the resume pull until the
+        // session exits.
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        useAppStore
+          .getState()
+          .setGoogleSyncState({ googleUploadScheduled: false });
+        return;
+      }
       if (
         state.household === prev.household &&
         state.assumptions === prev.assumptions &&

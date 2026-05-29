@@ -236,11 +236,22 @@ export function perHoldingCAGR(
   holdingId: string,
 ): number | null {
   const sorted = [...snapshots].sort((a, b) => a.t - b.t);
+  const composition = sorted.filter((s) => s.household);
+  if (composition.length < 2) return null;
+  // FIRST + LAST presence gate — see doc comment above. Without
+  // this, a holding that exists only mid-window silently produces
+  // a partial-window CAGR labeled as full-window performance in
+  // the UI (misleading).
+  if (
+    !holdingPresentIn(composition[0], holdingId) ||
+    !holdingPresentIn(composition[composition.length - 1], holdingId)
+  ) {
+    return null;
+  }
   const valued: ClassSeriesPoint[] = [];
-  for (const snap of sorted) {
-    if (!snap.household) continue;
+  for (const snap of composition) {
     let v: number | undefined;
-    for (const acct of snap.household.accounts) {
+    for (const acct of snap.household!.accounts) {
       const h = (acct.holdings ?? []).find((x) => x.id === holdingId);
       if (h) {
         v = (v ?? 0) + (Number.isFinite(h.valueUSD) ? h.valueUSD : 0);
@@ -249,6 +260,14 @@ export function perHoldingCAGR(
     if (v !== undefined) valued.push({ t: snap.t, valueUSD: v });
   }
   return cagr(valued);
+}
+
+function holdingPresentIn(snap: Snapshot, holdingId: string): boolean {
+  if (!snap.household) return false;
+  for (const acct of snap.household.accounts) {
+    if ((acct.holdings ?? []).some((h) => h.id === holdingId)) return true;
+  }
+  return false;
 }
 
 /**
@@ -288,11 +307,20 @@ export function perHoldingTotalReturn(
   holdingId: string,
 ): number | null {
   const sorted = [...snapshots].sort((a, b) => a.t - b.t);
+  const composition = sorted.filter((s) => s.household);
+  if (composition.length < 2) return null;
+  // Same FIRST + LAST presence gate as perHoldingCAGR — see
+  // there for rationale.
+  if (
+    !holdingPresentIn(composition[0], holdingId) ||
+    !holdingPresentIn(composition[composition.length - 1], holdingId)
+  ) {
+    return null;
+  }
   const series: ClassSeriesPoint[] = [];
-  for (const snap of sorted) {
-    if (!snap.household) continue;
+  for (const snap of composition) {
     let v: number | undefined;
-    for (const acct of snap.household.accounts) {
+    for (const acct of snap.household!.accounts) {
       const h = (acct.holdings ?? []).find((x) => x.id === holdingId);
       if (h) v = (v ?? 0) + (Number.isFinite(h.valueUSD) ? h.valueUSD : 0);
     }

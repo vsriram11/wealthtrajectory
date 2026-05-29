@@ -107,6 +107,35 @@ describe("buildDemoSnapshots", () => {
     const snaps = buildDemoSnapshots(NOW, 12);
     expect(snaps).toHaveLength(12);
   });
+
+  it("appState.targetAllocation drifts across the timeline (more aggressive in the past)", () => {
+    const snaps = buildDemoSnapshots(NOW);
+    const past = snaps[0].appState!.targetAllocation!;
+    const today = snaps[snaps.length - 1].appState!.targetAllocation!;
+    // Realistic arc: equity was less heavy 5 years ago, bond
+    // weight was higher. Today's target is more equity-tilted.
+    expect(past.equity!).toBeLessThan(today.equity!);
+    expect(past.bond!).toBeGreaterThan(today.bond!);
+    // Every per-class weight should be finite, non-negative,
+    // and the total should sum to 1 (within float tolerance).
+    for (const cls of Object.keys(today)) {
+      expect(Number.isFinite(today[cls as keyof typeof today]!)).toBe(true);
+      expect(today[cls as keyof typeof today]!).toBeGreaterThanOrEqual(0);
+    }
+    const totalToday = Object.values(today).reduce((s, v) => s + (v ?? 0), 0);
+    expect(totalToday).toBeCloseTo(1, 6);
+  });
+
+  it("appState.householdAnnualIncomeUSD trends up over the timeline (modeled comp growth)", () => {
+    const snaps = buildDemoSnapshots(NOW);
+    const past = snaps[0].appState!.householdAnnualIncomeUSD!;
+    const today = snaps[snaps.length - 1].appState!.householdAnnualIncomeUSD!;
+    expect(past).toBeLessThan(today);
+    // Ratio should be in the "plausible compensation growth"
+    // band (between 1.3x and 2.0x over 5 years).
+    expect(today / past).toBeGreaterThan(1.3);
+    expect(today / past).toBeLessThan(2.0);
+  });
 });
 
 describe("classBackFactor (internal — drawdown + growth math)", () => {

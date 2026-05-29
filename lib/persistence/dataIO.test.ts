@@ -497,6 +497,61 @@ describe("snapshots in export → parseImport (audit R1 CRITICAL — Drive sync 
     expect(parsed.snapshots).toEqual(snapshots);
   });
 
+  it("drops malformed appState / household on import (defense against hand-edited JSON)", () => {
+    // Audit-fix regression pin: a JSON row with `appState: "bad"`
+    // or `appState: []` or `household: 42` would previously pass
+    // through the coercion and crash downstream consumers when
+    // they tried to deref .accounts / .members.
+    const raw = {
+      schema: 1,
+      exportedAt: Date.now(),
+      household: { accounts: [], members: [], liabilities: [] },
+      assumptions: {},
+      scenarios: [],
+      snapshots: [
+        {
+          t: 1_700_000_000_000,
+          netWorthUSD: 100_000,
+          appState: "not an object",
+          household: { accounts: [], members: [], liabilities: [] },
+        },
+        {
+          t: 1_700_500_000_000,
+          netWorthUSD: 110_000,
+          appState: [], // arrays are not valid SnapshotAppState
+          household: { accounts: [], members: [], liabilities: [] },
+        },
+        {
+          t: 1_701_000_000_000,
+          netWorthUSD: 120_000,
+          household: 42, // garbage household
+        },
+        {
+          t: 1_702_000_000_000,
+          netWorthUSD: 130_000,
+          appState: { assumptions: { withdrawalRate: 0.04 } }, // VALID
+        },
+      ],
+    };
+    const parsed = parseImport(JSON.stringify(raw));
+    const rows = parsed.snapshots as Array<{
+      appState?: unknown;
+      household?: unknown;
+      netWorthUSD: number;
+    }>;
+    // All 4 rows kept (their t + netWorthUSD are valid).
+    expect(rows).toHaveLength(4);
+    // Malformed appState / household stripped, leaving the
+    // surrounding fields intact.
+    expect(rows[0].appState).toBeUndefined();
+    expect(rows[0].household).toBeDefined();
+    expect(rows[1].appState).toBeUndefined();
+    expect(rows[2].household).toBeUndefined();
+    expect(rows[2].netWorthUSD).toBe(120_000);
+    // Valid appState preserved.
+    expect(rows[3].appState).toBeDefined();
+  });
+
   it("PRE-FEATURE JSON exports without appState import cleanly (back-compat with all earlier app versions)", () => {
     // Pin the constraint the user explicitly called out: a JSON
     // file exported by an older app version (before the appState

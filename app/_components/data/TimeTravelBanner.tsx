@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useAppStore } from "@/lib/store";
 import {
   recordSnapshot,
@@ -35,6 +35,42 @@ export function TimeTravelBanner() {
 
   const [busy, setBusy] = useState(false);
   const [savedFlash, setSavedFlash] = useState(false);
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  // Auto-dismiss the success flash after ~2.5s so the banner
+  // returns to its idle hidden state. Mount lifecycle is owned
+  // by app/page.tsx (which always renders <TimeTravelBanner />);
+  // we just toggle savedFlash to control visibility.
+  useEffect(() => {
+    if (!savedFlash) return;
+    const id = window.setTimeout(() => setSavedFlash(false), 2500);
+    return () => window.clearTimeout(id);
+  }, [savedFlash]);
+
+  // Two render branches:
+  //   1. savedFlash takes precedence over the inactive early-return
+  //      so the post-save success message actually renders. (Before
+  //      this ordering: handleSave called setSavedFlash(true) THEN
+  //      exitTimeTravelDiscard synchronously, so React's batched
+  //      next render saw active=false; the early-return at the top
+  //      ran first and the flash was never visible.)
+  //   2. After flash dismisses (or normal idle), the inactive
+  //      early-return takes over.
+  if (savedFlash) {
+    return (
+      <div
+        role="status"
+        aria-live="polite"
+        className="sticky top-0 z-50 border-b border-positive/40 bg-positive/15 px-4 py-2 text-center text-[12px] font-semibold text-positive"
+      >
+        Snapshot saved. Restoring live state…
+      </div>
+    );
+  }
 
   if (!active || !date) return null;
 
@@ -61,14 +97,16 @@ export function TimeTravelBanner() {
       // change (snapshots live in IDB, slice diff is blind to
       // them). Same pattern SnapshotsManager uses.
       bumpSnapshotsRevision();
-      // Show a brief success flash before the banner unmounts on
-      // exitTimeTravelDiscard.
+      // Show success flash (renders even after exit because the
+      // flash branch precedes the inactive early-return).
       setSavedFlash(true);
-      // Restore the baseline. This flips timeTravelActive=false,
-      // which unmounts the banner.
+      // Restore the baseline. This flips timeTravelActive=false.
       exitTimeTravelDiscard();
     } finally {
-      setBusy(false);
+      // Guard against setState after unmount. The component
+      // itself doesn't unmount (always rendered by app/page.tsx)
+      // but a future refactor could move it; guard anyway.
+      if (mountedRef.current) setBusy(false);
     }
   };
 
@@ -76,22 +114,6 @@ export function TimeTravelBanner() {
     if (busy) return;
     exitTimeTravelDiscard();
   };
-
-  // If the save just landed but the unmount hasn't run yet, show
-  // a positive flash. In practice the unmount is synchronous on
-  // exitTimeTravelDiscard, so this branch is rarely visible — but
-  // it's the right UX if the React commit is delayed.
-  if (savedFlash) {
-    return (
-      <div
-        role="status"
-        aria-live="polite"
-        className="sticky top-0 z-50 border-b border-positive/40 bg-positive/15 px-4 py-2 text-center text-[12px] font-semibold text-positive"
-      >
-        Snapshot saved. Restoring live state…
-      </div>
-    );
-  }
 
   return (
     <div

@@ -115,5 +115,16 @@ function todayISO(): string {
 }
 
 function isValidISO(s: string): boolean {
-  return /^\d{4}-\d{2}-\d{2}$/.test(s);
+  // 1. Shape: YYYY-MM-DD
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
+  // 2. Parses to a finite timestamp (catches 2024-02-31 etc — JS
+  //    over-normalizes invalid dates so we round-trip-check).
+  const t = Date.parse(`${s}T12:00:00Z`);
+  if (!Number.isFinite(t)) return false;
+  const roundtrip = new Date(t).toISOString().slice(0, 10);
+  if (roundtrip !== s) return false;
+  // 3. Not in the future. The `max` attribute is a UI hint that
+  //    DevTools / keyboard entry can bypass — defense in depth.
+  if (t > Date.now()) return false;
+  return true;
 }

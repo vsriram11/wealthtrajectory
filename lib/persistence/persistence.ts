@@ -325,11 +325,19 @@ export async function replaceAllSnapshots(rows: Snapshot[]): Promise<void> {
     await handle.snapshots.clear();
     if (rows.length > 0) {
       try {
+        // CRITICAL: include every field of the Snapshot schema —
+        // the previous whitelist {t, netWorthUSD, household, label}
+        // silently DROPPED `appState` on every Drive-restore and
+        // JSON-import path, which defeated the entire snapshot-
+        // appState feature on round-trip. New fields added to the
+        // Snapshot type MUST be added here too (or refactored to a
+        // pass-through that strips only unknown keys).
         await handle.snapshots.bulkPut(
           rows.map((r) => ({
             t: r.t,
             netWorthUSD: r.netWorthUSD,
             ...(r.household ? { household: r.household } : {}),
+            ...(r.appState ? { appState: r.appState } : {}),
             ...(r.label ? { label: r.label } : {}),
           })),
         );

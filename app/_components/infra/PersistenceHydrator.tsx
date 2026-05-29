@@ -61,7 +61,25 @@ export function PersistenceHydrator() {
       // path would record a duplicate at today's date with the
       // edited values). Both writes must be muted until the user
       // exits the session (which restores the baseline).
-      if (state.timeTravelActive) return;
+      if (state.timeTravelActive) {
+        // Critical: cancel any in-flight timers when entering
+        // time-travel. Without this, a save/snapshot scheduled
+        // 249ms ago would fire 1ms later with a CLOSED-OVER
+        // pre-time-travel `state` reference — which the
+        // fire-time gate catches via getState()...active... but
+        // see the fire-time fix below: we now read fresh state
+        // at fire time too, so the closure is no longer
+        // load-bearing. Belt-and-suspenders.
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        if (snapTimer) {
+          clearTimeout(snapTimer);
+          snapTimer = null;
+        }
+        return;
+      }
       if (
         state.household === prev.household &&
         state.assumptions === prev.assumptions &&
@@ -83,36 +101,41 @@ export function PersistenceHydrator() {
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => {
         // Fire-time gate: if the user entered time-travel during
-        // the 250ms debounce window, abort the save. The handler's
-        // entry-time gate already covers the common path; this is
-        // defense in depth for the queued-then-entered race.
-        if (useAppStore.getState().timeTravelActive) return;
+        // the 250ms debounce window, abort the save.
+        // Read FRESH state at fire time so a save scheduled
+        // pre-time-travel that hasn't been cancelled yet sees
+        // the current (possibly hypothetical) household — and
+        // the timeTravelActive gate aborts it before any write.
+        const fresh = useAppStore.getState();
+        if (fresh.timeTravelActive) return;
+        if (fresh.mode !== "real") return;
         void saveRealState({
-          household: state.household,
-          assumptions: state.assumptions,
-          memberAssumptions: state.memberAssumptions,
-          preferredMemberId: state.preferredMemberId,
-          targetAllocation: state.targetAllocation,
-          glidePath: state.glidePath,
-          householdAnnualIncomeUSD: state.householdAnnualIncomeUSD,
-          goals: state.goals,
-          budgetItems: state.budgetItems,
-          incomeStreams: state.incomeStreams,
-          scenarios: state.scenarios,
-          driveEncryptionEnabled: state.driveEncryptionEnabled,
-          healthPlans: state.healthPlans,
-          healthImportanceWeights: state.healthImportanceWeights,
+          household: fresh.household,
+          assumptions: fresh.assumptions,
+          memberAssumptions: fresh.memberAssumptions,
+          preferredMemberId: fresh.preferredMemberId,
+          targetAllocation: fresh.targetAllocation,
+          glidePath: fresh.glidePath,
+          householdAnnualIncomeUSD: fresh.householdAnnualIncomeUSD,
+          goals: fresh.goals,
+          budgetItems: fresh.budgetItems,
+          incomeStreams: fresh.incomeStreams,
+          scenarios: fresh.scenarios,
+          driveEncryptionEnabled: fresh.driveEncryptionEnabled,
+          healthPlans: fresh.healthPlans,
+          healthImportanceWeights: fresh.healthImportanceWeights,
         });
       }, 250);
       if (snapTimer) clearTimeout(snapTimer);
       snapTimer = setTimeout(() => {
         void (async () => {
-          // Same fire-time gate for the auto-snapshot path.
-          if (useAppStore.getState().timeTravelActive) return;
+          // Same fire-time pattern — read fresh state.
           const fresh = useAppStore.getState();
+          if (fresh.timeTravelActive) return;
+          if (fresh.mode !== "real") return;
           const wrote = await maybeRecordSnapshot(
-            householdNetWorth(state.household),
-            state.household,
+            householdNetWorth(fresh.household),
+            fresh.household,
             undefined,
             undefined,
             captureSnapshotAppState(fresh),

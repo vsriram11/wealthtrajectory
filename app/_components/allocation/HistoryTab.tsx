@@ -14,7 +14,7 @@ import {
   type ClassSeries,
 } from "@/lib/portfolio/historicalReturns";
 import { formatPercent, formatUSD } from "@/lib/format";
-import type { AssetClass } from "@/lib/types";
+import { filterHousehold, type AssetClass, type Household } from "@/lib/types";
 
 const CLASS_LABEL: Record<AssetClass, string> = {
   equity: "Stocks",
@@ -55,6 +55,13 @@ const CLASS_COLOR: Record<AssetClass, string> = {
 export function HistoryTab() {
   const snapshotsRevision = useAppStore((s) => s.snapshotsRevision);
   const mode = useAppStore((s) => s.mode);
+  // Member-filter cascade: when the user has filtered the view
+  // to one member (via MemberFilter), the History tab MUST scope
+  // its per-class series to that member's holdings — same
+  // contract as every other rollup-aware surface (PRD §rollup,
+  // lib/rollupContract.test.ts). Otherwise a single-member view
+  // silently shows household totals here.
+  const selectedMemberId = useAppStore((s) => s.selectedMemberId);
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -81,14 +88,30 @@ export function HistoryTab() {
     };
   }, [snapshotsRevision, mode]);
 
+  // Apply the member filter to each snapshot's household before
+  // bucketing — rollup-cascade contract. With memberId=null this
+  // is a no-op pass-through; with a member id, holdings owned by
+  // other members drop out of the historical series.
+  const scopedSnapshots = useMemo(
+    () =>
+      snapshots.map((snap) => {
+        if (!snap.household) return snap;
+        const filtered: Household = filterHousehold(
+          snap.household,
+          selectedMemberId,
+        );
+        return { ...snap, household: filtered };
+      }),
+    [snapshots, selectedMemberId],
+  );
   const buckets = useMemo(
-    () => buildAssetClassSeries(snapshots),
-    [snapshots],
+    () => buildAssetClassSeries(scopedSnapshots),
+    [scopedSnapshots],
   );
   const rows = useMemo(() => summarizeClassReturns(buckets), [buckets]);
 
   // Snapshots-with-household — anything else has no class data.
-  const withHousehold = snapshots.filter((s) => s.household);
+  const withHousehold = scopedSnapshots.filter((s) => s.household);
 
   if (loading) {
     return (
@@ -98,7 +121,21 @@ export function HistoryTab() {
     );
   }
 
-  if (withHousehold.length < 2) {
+  if (withHousehold.length < 2 || rows.length === 0) {
+    // Two failure modes share this empty state:
+    //   1. < 2 snapshots carry `household` (the common new-user
+    //      or pre-feature case).
+    //   2. >=2 snapshots carry household, but every account is
+    //      empty or every holding has valueUSD that doesn't
+    //      bucket (e.g. all liabilities, no assets). The rows
+    //      table would otherwise render with a title and no
+    //      content — worse UX than a clean empty state.
+    const message =
+      withHousehold.length === 0
+        ? "No composition-bearing snapshots found."
+        : withHousehold.length === 1
+          ? "Only one composition-bearing snapshot found."
+          : "Snapshots are present, but no holdings could be bucketed. Add accounts and holdings to see allocation history.";
     return (
       <section className="px-5 pt-3 pb-6">
         <div className="rounded-2xl border border-dashed border-border bg-bg-surface px-4 py-6 text-center">
@@ -107,9 +144,7 @@ export function HistoryTab() {
           </h2>
           <p className="mt-2 text-[12px] leading-relaxed text-text-muted">
             History needs at least two snapshots that include holdings
-            composition. {withHousehold.length === 0
-              ? "No composition-bearing snapshots found."
-              : "Only one composition-bearing snapshot found."}{" "}
+            composition. {message}{" "}
             New snapshots are taken automatically once per calendar
             month, or you can record one manually from the Data page.
           </p>
@@ -147,8 +182,109 @@ export function HistoryTab() {
       </div>
 
       <PerClassTable rows={rows} buckets={buckets} />
+      <TargetDriftCard snapshots={withHousehold} />
       <Disclaimer />
     </section>
+  );
+}
+
+/**
+ * "Target allocation drift" — uses the newly-captured
+ * `appState.targetAllocation` to show how the user's TARGET per
+ * class (not realized) has evolved across the snapshot window.
+ *
+ * Renders nothing when fewer than 2 snapshots carry a non-null
+ * target (e.g., the user has never set a target, or the field
+ * pre-dates this PR's schema extension). Up-front gate keeps
+ * the rest of the tab tidy for users without the data.
+ *
+ * The card shows the FIRST and LAST snapshot side-by-side with
+ * per-class deltas — minimum-viable visualization that proves
+ * the appState capture works end-to-end. A future stacked-bar
+ * trajectory could replace this if richer evolution becomes
+ * worth showing.
+ */
+function TargetDriftCard({ snapshots }: { snapshots: Snapshot[] }) {
+  const withTarget = snapshots.filter(
+    (s) =>
+      s.appState?.targetAllocation != null &&
+      Object.keys(s.appState.targetAllocation).length > 0,
+  );
+  if (withTarget.length < 2) return null;
+  const first = withTarget[0];
+  const last = withTarget[withTarget.length - 1];
+  const firstTarget = first.appState!.targetAllocation!;
+  const lastTarget = last.appState!.targetAllocation!;
+  // Union of class keys across both endpoints — handles the
+  // case where a class was added to or removed from the target
+  // over time.
+  const keys = new Set<AssetClass>([
+    ...(Object.keys(firstTarget) as AssetClass[]),
+    ...(Object.keys(lastTarget) as AssetClass[]),
+  ]);
+
+  const rows = Array.from(keys)
+    .map((k) => {
+      const from = firstTarget[k] ?? 0;
+      const to = lastTarget[k] ?? 0;
+      return { cls: k, from, to, delta: to - from };
+    })
+    .filter((r) => r.from !== 0 || r.to !== 0)
+    .sort((a, b) => b.to - a.to);
+
+  if (rows.length === 0) return null;
+
+  return (
+    <div className="rounded-2xl border border-border bg-bg-surface overflow-hidden">
+      <h2 className="px-4 pt-3 pb-1 text-xs font-medium uppercase tracking-wider text-text-muted">
+        Target allocation drift
+      </h2>
+      <p className="px-4 pb-2 text-[11px] text-text-dim">
+        How your TARGET (not realized) per class moved between{" "}
+        {formatDate(first.t)} and {formatDate(last.t)}.
+      </p>
+      <ul className="divide-y divide-border">
+        {rows.map((r) => (
+          <li key={r.cls} className="px-4 py-2 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2 min-w-0">
+              <span
+                aria-hidden
+                className="inline-block h-2 w-2 shrink-0 rounded-full"
+                style={{ backgroundColor: CLASS_COLOR[r.cls] ?? "#64748b" }}
+              />
+              <span className="text-[12px] font-medium">
+                {CLASS_LABEL[r.cls] ?? r.cls}
+              </span>
+            </div>
+            <div className="flex items-baseline gap-2 text-[12px]">
+              <span className="num text-text-muted">
+                {formatPercent(r.from)}
+              </span>
+              <span className="text-text-dim" aria-hidden>
+                →
+              </span>
+              <span className="num font-semibold">
+                {formatPercent(r.to)}
+              </span>
+              <span
+                className={`num text-[11px] tabular-nums ${
+                  r.delta > 0
+                    ? "text-positive"
+                    : r.delta < 0
+                      ? "text-negative"
+                      : "text-text-dim"
+                }`}
+                aria-label={`Delta ${r.delta >= 0 ? "+" : ""}${(r.delta * 100).toFixed(1)} percentage points`}
+              >
+                {r.delta === 0
+                  ? "±0"
+                  : `${r.delta > 0 ? "+" : ""}${(r.delta * 100).toFixed(1)}pp`}
+              </span>
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
@@ -203,7 +339,15 @@ function ClassRow({
       </div>
 
       <div className="mt-2">
-        <Sparkline series={series} color={color} />
+        <Sparkline
+          series={series}
+          color={color}
+          label={`${label} bucket trajectory${
+            row.totalReturn != null
+              ? `, ${formatPercent(row.totalReturn)} total return`
+              : ""
+          }`}
+        />
       </div>
 
       <dl className="mt-2 grid grid-cols-3 gap-2 text-[11px]">
@@ -266,11 +410,13 @@ function ClassRow({
 function Sparkline({
   series,
   color,
+  label,
   width = 320,
   height = 40,
 }: {
   series: ClassSeries;
   color: string;
+  label: string;
   width?: number;
   height?: number;
 }) {
@@ -294,11 +440,12 @@ function Sparkline({
   return (
     <svg
       role="img"
-      aria-label="Value trajectory"
+      aria-label={label}
       viewBox={`0 0 ${width} ${height}`}
       preserveAspectRatio="none"
       className="w-full h-10"
     >
+      <title>{label}</title>
       <polygon points={area} fill={color} opacity="0.12" />
       <polyline
         points={points}

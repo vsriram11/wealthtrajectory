@@ -349,15 +349,39 @@ export function parseImport(text: string): ExportPayload {
     coerced.snapshots = [];
   }
   if (Array.isArray(coerced.snapshots)) {
-    coerced.snapshots = (coerced.snapshots as unknown[]).filter((s) => {
-      if (s == null || typeof s !== "object") return false;
+    coerced.snapshots = (coerced.snapshots as unknown[]).flatMap((s) => {
+      if (s == null || typeof s !== "object") return [];
       const row = s as Record<string, unknown>;
-      return (
-        typeof row.t === "number" &&
-        Number.isFinite(row.t) &&
-        typeof row.netWorthUSD === "number" &&
-        Number.isFinite(row.netWorthUSD)
-      );
+      if (
+        typeof row.t !== "number" ||
+        !Number.isFinite(row.t) ||
+        typeof row.netWorthUSD !== "number" ||
+        !Number.isFinite(row.netWorthUSD)
+      ) {
+        return [];
+      }
+      // Drop malformed `household` / `appState` rather than
+      // letting them through to downstream consumers
+      // (historicalReturns, HistoryTab) which dereference
+      // .accounts / .members / nested fields without runtime
+      // type guards. A hand-edited or malicious JSON with
+      // `household: 42` or `appState: []` would otherwise crash
+      // the engine on first deref. Surrounding fields (t,
+      // netWorthUSD, label) are preserved so the row is still
+      // useful as a lightweight NW-only checkpoint.
+      if (
+        row.household != null &&
+        (typeof row.household !== "object" || Array.isArray(row.household))
+      ) {
+        delete row.household;
+      }
+      if (
+        row.appState != null &&
+        (typeof row.appState !== "object" || Array.isArray(row.appState))
+      ) {
+        delete row.appState;
+      }
+      return [row];
     });
   }
   // Double cast through `unknown` is the standard TS pattern for
