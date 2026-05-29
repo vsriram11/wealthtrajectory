@@ -986,9 +986,14 @@ export function HistoricalMonteCarloCard() {
             cap-gains; cash → equity has no direct tax hit, but
             we still flag the composition change explicitly. */}
         {(() => {
-          if (!cashBucketOverrideActive) return null;
-          const requestedFrac = (cashBucketSizePct ?? 0) / 100;
-          const delta = requestedFrac - projectedCashShare;
+          if (!cashBucketOverrideActive || requestedCashFraction == null)
+            return null;
+          // Compare against the clamped value the simulator actually
+          // consumes (already inside [0, CASH_BUCKET_MAX_PCT/100]),
+          // not the raw `cashBucketSizePct / 100`. Equivalent today
+          // (UI gates the input) but robust against a future
+          // programmatic setter pushing the raw value out of range.
+          const delta = requestedCashFraction - projectedCashShare;
           if (Math.abs(delta) <= 0.001) return null;
           return (
             <div
@@ -1152,8 +1157,8 @@ export function HistoricalMonteCarloCard() {
                 cash slice first — only spilling proportionally to
                 other classes when cash runs dry.{" "}
                 {rebalance === "annual"
-                  ? "CAVEAT: with annual rebalance, the next year-start snap restores cash share from appreciated equity. So at year-end MC snapshot resolution (what this simulator measures), the success rate is IDENTICAL to annual + no-bucket. The benefit is within-year liquidity / tax-lot timing, NOT survival rate. For OBSERVABLE SORR shielding in the simulator, switch rebalance to 'no rebalance' (depleting reserve)."
-                  : "Cash is NEVER refilled (no rebalance) — the slice monotonically depletes. Once exhausted, withdrawals fall through to proportional draw. This is a FINITE shield for the early-retirement danger zone (typically ~5-10 years), not perpetual protection. Survival rate genuinely diverges from no-bucket."}{" "}
+                  ? "CAVEAT: with annual rebalance, the next year-start snap restores cash share back to target weights. So at year-end MC snapshot resolution (what this simulator measures), the success rate is observationally equivalent to annual + no-bucket. The benefit is within-year liquidity / tax-lot timing, NOT survival rate. For OBSERVABLE SORR shielding in the simulator, switch rebalance to 'no rebalance' (depleting reserve)."
+                  : "Cash is never refilled by rebalance — the slice trends toward depletion through retirement-year draws. (It can still grow modestly from real cash returns or absorb a slice of any positive income.) Once exhausted, withdrawals fall through to proportional draw. The protection horizon depends on bucket size: a 5% cash slice at a 4% real spend rate lasts only ~1–2 years; a 20–30% bucket gives 5–10 years of shielding. Survival rate genuinely diverges from no-bucket."}{" "}
                 Composes with the fixed-nominal freeze and variable
                 haircut: all three can be on simultaneously.
               </li>
@@ -1163,11 +1168,13 @@ export function HistoricalMonteCarloCard() {
                 Mid-year cash-flow timing.
               </span>{" "}
               Contributions (pre-retirement) and spend (retirement)
-              are applied at mid-year: a $40K real spend in a −10%
-              year reduces NW by $40K × (1 + −0.05) = $38K, not the
-              full $40K — the unspent half avoids the second half of
-              the drawdown. Matches the deterministic Independence
-              projection.
+              are applied at mid-year: a $40K real spend in a year
+              with a −10% blended portfolio return reduces NW by
+              $40K × (1 + −0.05) = $38K, not the full $40K — the
+              unspent half avoids the second half of the drawdown.
+              (Blended, not stocks-only: in a 60/40 mix a −10% stocks
+              year is a ~−6% blended year.) Matches the deterministic
+              Independence projection.
             </li>
             {(leveragedBuckets.stocks2xUSD +
               leveragedBuckets.postTaxDeleverageToStocks2xUSD >
