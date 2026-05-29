@@ -82,6 +82,13 @@ export const TIME_TRAVEL_SLICE_INITIAL: TimeTravelSliceState = {
 type Ctx = TimeTravelSliceState & {
   household: Household;
   assumptions: Assumptions;
+  // Mode is read at entry time to refuse activation outside
+  // real mode (audit fix: SnapshotsManager UI is real-mode-only,
+  // but the slice action is publicly addressable via the store
+  // — defense in depth keeps demo-mode DevTools users from
+  // entering a session that would leak hypothetical edits into
+  // a real user's next-load IDB state).
+  mode: "demo" | "real";
 };
 
 export function createTimeTravelSliceActions(
@@ -95,6 +102,16 @@ export function createTimeTravelSliceActions(
         // are in flight. The UI gates the entry button on
         // `timeTravelActive`; this is defense in depth.
         if (s.timeTravelActive) return {};
+        // Refuse outside real mode. Time-travel only makes sense
+        // for historical backdating of REAL user data — entering
+        // it in demo mode would let DevTools users stage
+        // hypothetical edits that wouldn't persist anywhere
+        // (PersistenceHydrator/CloudSyncer gates on mode==="real")
+        // AND would leave the banner showing while the rest of
+        // the demo app behaves normally. SnapshotsManager already
+        // gates its modal on mode==="real" at the UI layer; this
+        // is the corresponding slice-layer gate.
+        if (s.mode !== "real") return {};
         return {
           timeTravelActive: true,
           timeTravelDate: date,

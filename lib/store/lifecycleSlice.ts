@@ -47,6 +47,7 @@ import type { HouseholdSliceState } from "./householdSlice";
 import { MEMBER_VIEW_SLICE_INITIAL } from "./memberViewSlice";
 import { SCENARIOS_SLICE_INITIAL } from "./scenariosSlice";
 import { TARGET_ALLOCATION_SLICE_INITIAL } from "./targetAllocationSlice";
+import { TIME_TRAVEL_SLICE_INITIAL } from "./timeTravelSlice";
 import { UI_SLICE_INITIAL } from "./uiSlice";
 
 export type LifecycleSliceState = {
@@ -154,6 +155,12 @@ export type LifecycleSliceContext = LifecycleSliceState &
     subscription: "free" | "pro";
     subscriptionCheckedAt: number | null;
     viewBasis: import("./uiTypes").ViewBasis;
+    // Time-travel fields — included so the freshSlate spread of
+    // TIME_TRAVEL_SLICE_INITIAL type-checks.
+    timeTravelActive: boolean;
+    timeTravelDate: string | null;
+    baselineHousehold: Household | null;
+    baselineAssumptions: Assumptions | null;
   };
 
 /**
@@ -192,6 +199,11 @@ function freshSlate(
     ...HEALTH_SLICE_INITIAL,
     ...SCENARIOS_SLICE_INITIAL,
     ...TARGET_ALLOCATION_SLICE_INITIAL,
+    // Time-travel session resets on EVERY lifecycle transition.
+    // Audit fix (round-2): without this, switchToReal /
+    // resetToDemo with timeTravelActive=true left the banner
+    // showing with stale baselines from the prior mode.
+    ...TIME_TRAVEL_SLICE_INITIAL,
     mode,
     household,
   };

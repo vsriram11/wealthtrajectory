@@ -59,7 +59,12 @@ import { useAppStore } from "@/lib/store";
 
 function resetStore() {
   // Reset the time-travel slice + bump counter to a known state.
+  // Force mode="real" since the slice's enterTimeTravel gate
+  // refuses demo-mode entry (audit fix); the store's default
+  // initial state is demo, so without this override every
+  // enterTimeTravel call in tests would be a silent no-op.
   useAppStore.setState({
+    mode: "real",
     timeTravelActive: false,
     timeTravelDate: null,
     baselineHousehold: null,

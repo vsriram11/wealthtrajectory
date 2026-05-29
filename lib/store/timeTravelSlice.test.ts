@@ -11,6 +11,7 @@ import {
 type Ctx = TimeTravelSliceState & {
   household: Household;
   assumptions: Assumptions;
+  mode: "demo" | "real";
 };
 
 function makeFakeStore(seed: Partial<Ctx> = {}) {
@@ -18,6 +19,10 @@ function makeFakeStore(seed: Partial<Ctx> = {}) {
     ...TIME_TRAVEL_SLICE_INITIAL,
     household: structuredClone(DEMO_HOUSEHOLD),
     assumptions: structuredClone(DEMO_ASSUMPTIONS),
+    // Tests default to real mode (where time-travel is allowed).
+    // Individual tests override seed.mode to verify the demo
+    // refusal path.
+    mode: "real",
     ...seed,
   };
   return {
@@ -169,5 +174,33 @@ describe("Time-travel slice — exitTimeTravelDiscard", () => {
     // edited version).
     a.exitTimeTravelDiscard();
     expect(s.state.household.accounts[0]?.id).toBe(baselineFirstAccountId);
+  });
+});
+
+describe("Time-travel slice — mode gate (audit fix)", () => {
+  it("refuses enterTimeTravel when mode === 'demo' (DevTools / slice-level defense)", () => {
+    // Audit fix: SnapshotsManager's UI button is gated on
+    // mode==="real", but the slice action is publicly callable
+    // via useAppStore.getState().enterTimeTravel(...). Without
+    // this slice-level gate, a DevTools-curious demo user could
+    // enter a time-travel session with no persistence backing
+    // (PersistenceHydrator/CloudSyncer both gate on
+    // mode==="real") and leave the banner visible while the
+    // app silently muted their edits.
+    const s = makeFakeStore({ mode: "demo" });
+    const a = createTimeTravelSliceActions(s.set);
+    a.enterTimeTravel("2024-01-01");
+    expect(s.state.timeTravelActive).toBe(false);
+    expect(s.state.timeTravelDate).toBeNull();
+    expect(s.state.baselineHousehold).toBeNull();
+  });
+
+  it("ALLOWS enterTimeTravel when mode === 'real' (happy path)", () => {
+    const s = makeFakeStore({ mode: "real" });
+    const a = createTimeTravelSliceActions(s.set);
+    a.enterTimeTravel("2024-01-01");
+    expect(s.state.timeTravelActive).toBe(true);
+    expect(s.state.timeTravelDate).toBe("2024-01-01");
+    expect(s.state.baselineHousehold).not.toBeNull();
   });
 });

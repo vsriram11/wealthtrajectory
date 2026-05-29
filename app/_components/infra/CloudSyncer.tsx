@@ -55,6 +55,20 @@ export function CloudSyncer() {
       // upload from before-time-travel doesn't fire mid-session
       // either (the cleanup path below also clears any pending
       // timer when the subscription re-runs).
+      // Sync-in-progress gate (round-2 audit fix #5): when a
+      // PULL is in flight (pullFromDrive sets googleSyncing=true
+      // before its applyImportedPayload call), the cascade of
+      // slice changes that applyImportedPayload produces would
+      // otherwise schedule a queued upload — which fires after
+      // the pull completes, redundantly re-uploading what we
+      // just pulled. With multiple slice changes in the same
+      // import (household + assumptions + scenarios + ...), the
+      // subscribe fires N times and N upload attempts get
+      // queued. Gating on googleSyncing makes the import
+      // atomic from CloudSyncer's perspective: zero upload
+      // schedules during a pull, and the user's NEXT genuine
+      // edit triggers a fresh debounce normally.
+      if (state.googleSyncing) return;
       if (state.timeTravelActive) {
         // Cancel any in-flight debounce timer on entry. The
         // fire-time gate at line ~110 already catches a fired
