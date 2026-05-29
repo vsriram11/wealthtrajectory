@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useDeferredValue, useMemo, useState } from "react";
 import { useAppStore } from "@/lib/store";
 import { useActiveProjection } from "@/lib/projection/useActiveProjection";
 import {
@@ -214,6 +214,22 @@ export function HistoricalMonteCarloCard() {
     null,
   );
 
+  // Defer the four free-form NumberInput values before they feed
+  // into the expensive MC simulator + bucket-funding plan. Round-9
+  // audit CRITICAL: every keystroke in cashBucketSizePct cascaded
+  // through bucketFundingPlan + leveragedBuckets + applyCashBucket
+  // + runHistoricalSequences (67-98 paths × 30 yrs = ~3k path-years
+  // per stroke, up to 60k in bootstrap mode). useDeferredValue lets
+  // the input itself stay snappy (React paints at the new value
+  // immediately) while React schedules the heavy recompute at low
+  // priority — typically the next idle frame. User pauses typing →
+  // sim catches up. User keeps typing → React skips intermediate
+  // sims. Inputs still display the live value (no perceived lag).
+  const deferredStartingNW = useDeferredValue(startingNW);
+  const deferredAnnualSpend = useDeferredValue(annualSpend);
+  const deferredHorizonYears = useDeferredValue(horizonYears);
+  const deferredCashBucketSizePct = useDeferredValue(cashBucketSizePct);
+
   // Project the household forward to the date the user is expected
   // to reach the Independence target — then derive allocation from
   // THAT composition, not today's. This is what makes a CAGR-only
@@ -362,13 +378,22 @@ export function HistoricalMonteCarloCard() {
   //   2. cashBucketSizePct is set
   //   3. No glide path active (glide bypasses static allocation)
   const CASH_BUCKET_MAX_PCT = 50;
+  // `cashBucketOverrideActive` uses the DEFERRED size so the gate +
+  // the consumption are coherent (otherwise the gate could flip
+  // between live and deferred frames, producing transient
+  // mis-classification on the way through a transition).
   const cashBucketOverrideActive =
-    cashBucketPriority && cashBucketSizePct != null && !glidePathActive;
+    cashBucketPriority &&
+    deferredCashBucketSizePct != null &&
+    !glidePathActive;
   const projectedCashShare = portfolio.classes.cashShare;
   const requestedCashFraction = cashBucketOverrideActive
     ? Math.max(
         0,
-        Math.min(CASH_BUCKET_MAX_PCT / 100, (cashBucketSizePct ?? 0) / 100),
+        Math.min(
+          CASH_BUCKET_MAX_PCT / 100,
+          (deferredCashBucketSizePct ?? 0) / 100,
+        ),
       )
     : null;
 
@@ -628,9 +653,14 @@ export function HistoricalMonteCarloCard() {
   // Both are taxable-account-only (tax-advantaged rebalancing is
   // tax-free); both default to gainFraction=1.0 (conservative —
   // no cost-basis tracking, so assume all current value is gain).
+  // effectiveStartingNW uses DEFERRED startingNW so the MC sim
+  // doesn't re-run on every keystroke. UI surfaces that display
+  // startingNW (e.g., the "Starting NW" disclosure block, the
+  // NumberInput value, the "your tax cost on $X" prose) continue
+  // to use live `startingNW` for snappy feel. Round-9 audit fix.
   const effectiveStartingNW = Math.max(
     0,
-    startingNW * (1 - taxHitFraction - bucketFundingTaxFraction),
+    deferredStartingNW * (1 - taxHitFraction - bucketFundingTaxFraction),
   );
   const effectiveWR =
     effectiveStartingNW > 0 ? annualSpend / effectiveStartingNW : 0;
@@ -649,17 +679,22 @@ export function HistoricalMonteCarloCard() {
     const haircutRate = clampHaircut(effective.retirementVariableHaircut);
     const haircutOnDownYearOnly =
       effective.retirementVariableHaircutOnDownYearOnly === true;
+    // Sim inputs use DEFERRED values for the four free-form
+    // NumberInputs (startingNW already deferred via
+    // effectiveStartingNW; annualSpend + horizonYears deferred
+    // here). UI displays stay snappy; the MC simulator only
+    // re-runs when React idle-time allows. Round-9 audit fix.
     const inputs = {
       startingNetWorthUSD: effectiveStartingNW,
       allocation,
-      annualSpendUSD: annualSpend,
+      annualSpendUSD: deferredAnnualSpend,
       // Dynamic-spending config. Always pass it so the simulator
       // is the SINGLE source of truth for haircut application —
       // even the "always apply" mode now flows through here
       // rather than being baked upstream. When haircut is 0 this
       // is a no-op for the simulator's per-year math.
       spending: {
-        variableUSD: annualSpend * variableShare,
+        variableUSD: deferredAnnualSpend * variableShare,
         haircut: {
           rate: haircutRate,
           onlyAfterDownYear: haircutOnDownYearOnly,
@@ -705,9 +740,9 @@ export function HistoricalMonteCarloCard() {
           activeMemberIds(scopedHousehold),
         ),
         baseYear,
-        Math.max(1, Math.min(60, horizonYears)),
+        Math.max(1, Math.min(60, deferredHorizonYears)),
       ),
-      retirementHorizonYears: Math.max(1, Math.min(60, horizonYears)),
+      retirementHorizonYears: Math.max(1, Math.min(60, deferredHorizonYears)),
       otherTreatedAsStocks: altsAs === "stocks",
       // When a glide path is configured + we know the member's age,
       // pass them so the simulator interpolates the allocation
@@ -727,13 +762,13 @@ export function HistoricalMonteCarloCard() {
   }, [
     effectiveStartingNW,
     allocation,
-    annualSpend,
+    deferredAnnualSpend,
     budgetItems,
     incomeStreams,
     scopedHousehold,
     memberId,
     effective,
-    horizonYears,
+    deferredHorizonYears,
     mode,
     bootstrapPaths,
     altsAs,
