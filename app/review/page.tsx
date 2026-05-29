@@ -65,9 +65,15 @@ export default function ReviewPage() {
   const liquidityView = useAppStore((s) => s.liquidityView);
 
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
+  // Audit fix (round-3 BLOCK #2): re-fetch on revision bump so
+  // the Annual Review picks up snapshot mutations from other
+  // tabs (SnapshotsManager edits, TimeTravelBanner saves, auto
+  // writes). Empty-deps version showed stale snapshot deltas
+  // until next mount.
+  const snapshotsRevision = useAppStore((s) => s.snapshotsRevision);
   useEffect(() => {
     void loadSnapshots().then((s) => setSnapshots(s));
-  }, []);
+  }, [snapshotsRevision]);
 
   // Round-6 audit HIGH: Annual Review previously read base
   // `assumptions` AND base household, ignoring the active scenario.

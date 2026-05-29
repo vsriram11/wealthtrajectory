@@ -387,10 +387,12 @@ export function parseImport(text: string): ExportPayload {
         delete row.appState;
       }
       // `source` must be one of the allowed enum values, else
-      // strip it. Defends against hand-edited JSON with
-      // `source: "auto-prune-me"` or similar.
+      // strip it. `null` is also stripped (treated same as
+      // missing) so downstream `r.source === "auto"` checks
+      // are deterministic. Defends against hand-edited JSON
+      // with `source: "auto-prune-me"` or `source: null`.
       if (
-        row.source != null &&
+        row.source !== undefined &&
         row.source !== "auto" &&
         row.source !== "manual"
       ) {

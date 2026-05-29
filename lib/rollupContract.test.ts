@@ -317,6 +317,51 @@ describe("rollup-include flag — full cascade through every rollup-touching sur
     expect(result.successRate).toBeLessThanOrEqual(1);
   });
 
+  it("Historical snapshot buckets cascade through the includeInRollup flag (round-3 audit BLOCK fix)", async () => {
+    // Round-3 audit finding: HistoryTab applied only filterHousehold
+    // (member filter), not householdForRollups (rollup flag).
+    // Members with includeInRollup=false were silently INCLUDED
+    // in History CAGR/drawdown — contradicting NetWorthCard,
+    // AllocationPanel, Insights, etc. This test pins the
+    // includeInRollup cascade alongside the existing member-
+    // filter test.
+    const { buildAssetClassSeries } = await import(
+      "@/lib/portfolio/historicalReturns"
+    );
+    const { householdForRollups } = await import("@/lib/types");
+    const s = useAppStore.getState();
+    // Find a member to exclude. Demo persona has 2 members; pick the
+    // 2nd as the "exclude this" candidate.
+    expect(s.household.members.length).toBeGreaterThanOrEqual(2);
+    const excludeMember = s.household.members[1];
+    const householdWithExclusion = {
+      ...s.household,
+      members: s.household.members.map((m) =>
+        m.id === excludeMember.id ? { ...m, includeInRollup: false } : m,
+      ),
+    };
+    const snap = {
+      t: Date.UTC(2024, 0, 1, 12),
+      netWorthUSD: householdNetWorth(householdWithExclusion),
+      household: householdWithExclusion,
+    };
+    // Without householdForRollups, both members' holdings would
+    // be bucketed. With it, only the included member's holdings
+    // appear. Pre-fix: HistoryTab built buckets directly from
+    // snap.household → buckets included the excluded member.
+    const rolledUp = householdForRollups(householdWithExclusion);
+    const expectedBuckets = buildAssetClassSeries([
+      { ...snap, household: rolledUp },
+    ]);
+    const expectedTotal = Object.values(expectedBuckets).reduce(
+      (sum, series) => sum + (series?.[0]?.valueUSD ?? 0),
+      0,
+    );
+    // Sanity: the excluded member's value really did drop.
+    const unfilteredTotal = householdNetWorth(householdWithExclusion);
+    expect(expectedTotal).toBeLessThan(unfilteredTotal);
+  });
+
   it("Historical snapshot buckets cascade through the member filter (audit-fix regression pin)", async () => {
     // Audit finding #3: HistoryTab + buildAssetClassSeries iterated
     // snap.household.accounts directly with no ownerId filter,

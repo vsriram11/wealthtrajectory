@@ -116,6 +116,37 @@ describe("cagr", () => {
     expect(cagr([{ t: T0, valueUSD: 100 }])).toBeNull();
   });
 
+  it("returns -1 when V_end is exactly 0 (total loss — audit BLOCK fix)", () => {
+    // The honest CAGR for a position that went to zero is -100%.
+    // Returning null would hide this in the UI as "—" which is
+    // worse than the correct -1.
+    expect(
+      cagr([
+        { t: T0, valueUSD: 100_000 },
+        { t: T0 + 5 * YEAR, valueUSD: 0 },
+      ]),
+    ).toBe(-1);
+    expect(
+      cagr([
+        { t: T0, valueUSD: 100 },
+        { t: T0 + 2 * YEAR, valueUSD: 0 },
+      ]),
+    ).toBe(-1);
+  });
+
+  it("returns null for negative V_end (pathological — not a real-world case)", () => {
+    // Negative end value would imply net-negative wealth in the
+    // bucket, which the current engine doesn't model. Reject
+    // rather than produce a fictional CAGR via complex-number
+    // gymnastics on the fractional power.
+    expect(
+      cagr([
+        { t: T0, valueUSD: 100 },
+        { t: T0 + YEAR, valueUSD: -50 },
+      ]),
+    ).toBeNull();
+  });
+
   it("returns null when V_start is zero or negative", () => {
     expect(
       cagr([
@@ -209,6 +240,27 @@ describe("maxDrawdown", () => {
   it("returns null on < 2 points", () => {
     expect(maxDrawdown([])).toBeNull();
     expect(maxDrawdown([{ t: T0, valueUSD: 100 }])).toBeNull();
+  });
+
+  it("handles series starting at 0 — peak resets at first positive value", () => {
+    // Round-3 audit gap: the `peakV <= 0` skip branch on line ~175
+    // is the load-bearing defense against early-zero series.
+    // A series [0, -5] has no positive peak ever → null.
+    expect(
+      maxDrawdown([
+        { t: T0, valueUSD: 0 },
+        { t: T0 + YEAR, valueUSD: -5 },
+      ]),
+    ).toBeNull();
+    // A series [0, 100, 50] — peak resets to 100 at year 1, then
+    // drops 50% → drawdown=0.5.
+    const d = maxDrawdown([
+      { t: T0, valueUSD: 0 },
+      { t: T0 + YEAR, valueUSD: 100 },
+      { t: T0 + 2 * YEAR, valueUSD: 50 },
+    ]);
+    expect(d).not.toBeNull();
+    expect(d!.lossPct).toBeCloseTo(0.5, 6);
   });
 
   it("picks the DEEPER of two competing drawdowns", () => {
@@ -351,6 +403,20 @@ describe("perHoldingCAGR / perAccountCAGR / perHoldingTotalReturn", () => {
     ];
     const r = perAccountCAGR(snaps, "a1");
     expect(r).toBeCloseTo(0.1, 4);
+  });
+
+  it("perHoldingCAGR + perAccountCAGR return null on empty input (defensive)", () => {
+    // Round-3 audit gap: zero-snapshot and no-household-anywhere
+    // paths weren't tested. Both must return null cleanly.
+    expect(perHoldingCAGR([], "h1")).toBeNull();
+    expect(perAccountCAGR([], "a1")).toBeNull();
+    // Snapshots that are all lightweight (no household field):
+    const lightOnly: Snapshot[] = [
+      { t: T0, netWorthUSD: 100 },
+      { t: T0 + YEAR, netWorthUSD: 110 },
+    ];
+    expect(perHoldingCAGR(lightOnly, "h1")).toBeNull();
+    expect(perAccountCAGR(lightOnly, "a1")).toBeNull();
   });
 
   it("perHoldingTotalReturn matches V_end/V_start - 1 (no annualization)", () => {

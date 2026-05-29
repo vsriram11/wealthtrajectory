@@ -14,7 +14,12 @@ import {
   type ClassSeries,
 } from "@/lib/portfolio/historicalReturns";
 import { formatPercent, formatUSD } from "@/lib/format";
-import { filterHousehold, type AssetClass, type Household } from "@/lib/types";
+import {
+  filterHousehold,
+  householdForRollups,
+  type AssetClass,
+  type Household,
+} from "@/lib/types";
 
 const CLASS_LABEL: Record<AssetClass, string> = {
   equity: "Stocks",
@@ -96,21 +101,26 @@ export function HistoryTab() {
     };
   }, [snapshotsRevision, mode]);
 
-  // Apply the member filter to each snapshot's household before
-  // bucketing — rollup-cascade contract. Performance: when
-  // memberId is null, filterHousehold is a no-op pass-through —
-  // skip the entire map + spread (audit fix: was allocating
-  // ~3K objects per render on a 240-snapshot history just to
-  // produce identical-shape snapshots).
+  // Two-stage cascade per the rollup contract (CLAUDE.md +
+  // lib/rollupContract.test.ts):
+  //   1. ALWAYS apply householdForRollups — drops members whose
+  //      `includeInRollup === false` flag is set. Same routing
+  //      every other rollup-aware surface uses. Round-3 audit
+  //      BLOCK fix #1: previously, the History tab bypassed
+  //      this and showed rollup-excluded members' holdings in
+  //      CAGR/drawdown, contradicting NetWorthCard /
+  //      AllocationPanel / Insights.
+  //   2. THEN apply filterHousehold(memberId) if a per-member
+  //      view is active. When memberId is null, this is a
+  //      no-op pass-through and we save the second map.
   const scopedSnapshots = useMemo(() => {
-    if (selectedMemberId == null) return snapshots;
     return snapshots.map((snap) => {
       if (!snap.household) return snap;
-      const filtered: Household = filterHousehold(
-        snap.household,
-        selectedMemberId,
-      );
-      return { ...snap, household: filtered };
+      let scoped: Household = householdForRollups(snap.household);
+      if (selectedMemberId != null) {
+        scoped = filterHousehold(scoped, selectedMemberId);
+      }
+      return { ...snap, household: scoped };
     });
   }, [snapshots, selectedMemberId]);
   const buckets = useMemo(

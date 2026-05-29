@@ -497,6 +497,60 @@ describe("snapshots in export → parseImport (audit R1 CRITICAL — Drive sync 
     expect(parsed.snapshots).toEqual(snapshots);
   });
 
+  it("strips unknown fields from snapshot rows on import (round-2 audit LOW fix)", () => {
+    // KNOWN_FIELDS allowlist drops anything else — protects
+    // downstream consumers from foreign keys that could
+    // shadow type expectations or leak memory.
+    const raw = {
+      schema: 1,
+      exportedAt: Date.now(),
+      household: { accounts: [], members: [], liabilities: [] },
+      assumptions: {},
+      scenarios: [],
+      snapshots: [
+        {
+          t: 1_700_000_000_000,
+          netWorthUSD: 100_000,
+          label: "ok",
+          notes: "should be stripped",
+          malicious: { huge: "x".repeat(10) },
+          __proto__: { foo: "bar" },
+        },
+      ],
+    };
+    const parsed = parseImport(JSON.stringify(raw));
+    expect(parsed.snapshots).toHaveLength(1);
+    const row = (parsed.snapshots as Array<Record<string, unknown>>)[0];
+    expect(Object.keys(row).sort()).toEqual(["label", "netWorthUSD", "t"]);
+  });
+
+  it("validates Snapshot.source field on import (round-2 audit regression pin)", () => {
+    // source must be "auto" | "manual" — anything else strips so
+    // the monthly-prune classification stays accurate. A regression
+    // to "trust any string" would silently break pruning.
+    const raw = {
+      schema: 1,
+      exportedAt: Date.now(),
+      household: { accounts: [], members: [], liabilities: [] },
+      assumptions: {},
+      scenarios: [],
+      snapshots: [
+        { t: 1, netWorthUSD: 1, source: "auto-prune-me" },
+        { t: 2, netWorthUSD: 2, source: "manual" },
+        { t: 3, netWorthUSD: 3, source: "auto" },
+        { t: 4, netWorthUSD: 4, source: null },
+        { t: 5, netWorthUSD: 5 },
+      ],
+    };
+    const parsed = parseImport(JSON.stringify(raw));
+    const rows = parsed.snapshots as Array<{ source?: unknown }>;
+    expect(rows[0].source).toBeUndefined(); // invalid → stripped
+    expect(rows[1].source).toBe("manual");
+    expect(rows[2].source).toBe("auto");
+    expect(rows[3].source).toBeUndefined(); // null left alone? actually null passes the != null check
+    expect(rows[4].source).toBeUndefined();
+  });
+
   it("drops malformed appState / household on import (defense against hand-edited JSON)", () => {
     // Audit-fix regression pin: a JSON row with `appState: "bad"`
     // or `appState: []` or `household: 42` would previously pass

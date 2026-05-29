@@ -522,6 +522,36 @@ describe("maybeRecordMonthlySnapshot — monthly auto-snapshot policy (R-monthly
     expect(rows[0].t).toBe(may10);
   });
 
+  it("replaceAllSnapshots is atomic — bulkPut failure rolls back the clear() (round-3 audit gap)", async () => {
+    // Documented load-bearing atomicity guarantee in
+    // replaceAllSnapshots. If bulkPut throws mid-transaction,
+    // the prior clear() MUST also be rolled back so IDB retains
+    // the user's pre-restore data. Without this guarantee, a
+    // failed Drive restore would silently delete all local
+    // snapshots.
+    const { loadSnapshots, recordSnapshot, replaceAllSnapshots } =
+      await freshModule();
+    // Seed two good rows.
+    await recordSnapshot({ t: 1, netWorthUSD: 100, source: "manual" });
+    await recordSnapshot({ t: 2, netWorthUSD: 200, source: "manual" });
+    // Try to restore with a row that will fail the put (using
+    // an undefined/NaN primary key — Dexie will reject).
+    const badRows = [
+      { t: Number.NaN, netWorthUSD: 99 },
+    ] as never;
+    let threw = false;
+    try {
+      await replaceAllSnapshots(badRows);
+    } catch {
+      threw = true;
+    }
+    expect(threw).toBe(true);
+    // Rollback semantics: the seed rows MUST still be present.
+    const rows = await loadSnapshots();
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.netWorthUSD).sort()).toEqual([100, 200]);
+  });
+
   it("concurrent maybeRecordSnapshot calls don't double-write (audit fix #7 — transactionality)", async () => {
     // Audit finding: two concurrent invocations both passed the
     // min-interval check before either wrote, then both wrote

@@ -82,6 +82,12 @@ export function HistoryView({
   const [loading, setLoading] = useState(false);
   const [range, setRange] = useState<HistoryRange>("1Y");
   const [hovered, setHovered] = useState<HistoryPoint | null>(null);
+  // Audit fix (round-3 BLOCK #2): subscribe to snapshotsRevision
+  // so the NW history view re-fetches on snapshot mutations
+  // (Add, Edit, Delete via SnapshotsManager; Save from
+  // TimeTravelBanner; auto-snapshotter writes). Without the
+  // dep, this view showed stale data until next mount.
+  const snapshotsRevision = useAppStore((s) => s.snapshotsRevision);
 
   useEffect(() => {
     let cancelled = false;
@@ -91,7 +97,7 @@ export function HistoryView({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [snapshotsRevision]);
 
   // setLoading(true) below is the canonical "start an async data
   // load" pattern. The React 19 idiomatic alternative is Suspense

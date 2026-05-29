@@ -54,10 +54,15 @@ export function GrowthVelocityCard() {
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
   // Default REAL — aligns with the rest of the app's real-terms model.
   const [view, setView] = useState<"real" | "nominal">("real");
+  // Audit fix (round-3 BLOCK #2): subscribe to snapshotsRevision
+  // so the velocity card re-fetches when snapshots change.
+  // Without this dep, mutations via SnapshotsManager /
+  // TimeTravelBanner produced visible cross-tab divergence.
+  const snapshotsRevision = useAppStore((s) => s.snapshotsRevision);
 
   useEffect(() => {
     void loadSnapshots().then((s) => setSnapshots(s));
-  }, []);
+  }, [snapshotsRevision]);
 
   const filtered = useMemo(
     () => memberFilteredSnapshots(snapshots, memberId),
