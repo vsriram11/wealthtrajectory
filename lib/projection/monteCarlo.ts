@@ -293,6 +293,21 @@ export type MonteCarloInputs = {
  *               ignored under this policy (no rebalance = no
  *               glide-target snap).
  */
+/**
+ * The rebalance policy for the MC simulator. See `SimulationOptions`
+ * for the 2D matrix with `spending.cashBucketPriority`.
+ *
+ * HISTORY: until 2026-05 this union included a `"bucket"` value that
+ * collapsed "refilling reserve" + "down-year cash-first" into one
+ * policy and produced minimal observable signal vs "annual". The
+ * value was never persisted in any release lineage (UI state is
+ * useState-only — see `HistoricalMonteCarloCard.tsx:188-204`), so
+ * the union shrink required no migration. If a future feature
+ * persists `RebalancePolicy` to disk, a runtime guard MUST be added
+ * at the engine boundary to reject unknown strings (the current
+ * `?? "annual"` only handles nullish — see the whitelist
+ * normalization at the dispatch site).
+ */
 export type RebalancePolicy = "annual" | "none";
 
 export type SimulationOptions = {
@@ -496,7 +511,15 @@ export function simulatePath(
     pathId = (pathIdOrOptions as string) ?? "";
     options = optionsArg;
   }
-  const rebalancePolicy: RebalancePolicy = options.rebalance ?? "annual";
+  // Whitelist the rebalance policy at the engine boundary. TypeScript
+  // pins the union at compile time, but a runtime untrusted-string
+  // (e.g. legacy persisted state, future user import, dev tools
+  // tampering) would slip past `?? "annual"` and fall through both
+  // branches below — silently behaving like a third undocumented
+  // mode. Explicit whitelist + the exhaustive `else` block at the
+  // dispatch site locks the contract.
+  const rebalancePolicy: RebalancePolicy =
+    options.rebalance === "none" ? "none" : "annual";
   const yearsPre = inputs.yearsUntilRetirement ?? 0;
   const yearsRet = inputs.retirementHorizonYears;
   const totalYears = yearsPre + yearsRet;
@@ -592,8 +615,15 @@ export function simulatePath(
       gB = nw * wG;
       rB = nw * wR;
       lB = nw * wL;
+    } else if (rebalancePolicy === "none") {
+      // `none` mode: balances persist from the previous iteration. No snap.
+    } else {
+      // Exhaustiveness pin: TS will complain at compile time if a
+      // future contributor extends `RebalancePolicy` without adding
+      // a branch here. Cheap insurance against silent fall-through.
+      const _exhaustive: never = rebalancePolicy;
+      void _exhaustive;
     }
-    // `none` mode: balances persist from the previous iteration. No snap.
 
     // Apply this year's real returns.
     const rs = stockReturns[y] ?? 0;

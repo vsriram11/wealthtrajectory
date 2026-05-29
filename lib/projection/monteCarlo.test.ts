@@ -1079,6 +1079,49 @@ describe("simulatePath — cashBucketPriority (orthogonal to rebalance policy)",
     ).toBeGreaterThan(1);
   });
 
+  it("unknown rebalance string (legacy 'bucket' or arbitrary) degrades to 'annual' — no silent fall-through", () => {
+    // Defense-in-depth: TS pins the union at compile time, but a
+    // dev-tools tamper / future legacy import could push an
+    // unknown string into options.rebalance. The engine's
+    // whitelist normalizer (`=== "none" ? "none" : "annual"`)
+    // should treat anything else as "annual". Without that guard,
+    // both branches would fall through and the simulator would
+    // freeze per-class state — a silent wrong-answer mode.
+    const inputs: MonteCarloInputs = {
+      startingNetWorthUSD: 1_000_000,
+      allocation: { stocksFraction: 0.6, bondsFraction: 0.4, cashFraction: 0 },
+      annualSpendUSD: 40_000,
+      retirementHorizonYears: 5,
+    };
+    const stocks = [0.1, -0.05, 0.08, 0.03, 0.07];
+    const known = simulatePath(
+      inputs,
+      stocks,
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      "known-annual",
+      { rebalance: "annual" },
+    );
+    const tampered = simulatePath(
+      inputs,
+      stocks,
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      [0, 0, 0, 0, 0],
+      "tampered",
+      // Force an unknown value past the TS check to simulate
+      // tampered persisted state / legacy "bucket" string.
+      { rebalance: "bucket" as unknown as "annual" | "none" },
+    );
+    // The tampered run MUST equal the annual-baseline run.
+    for (let i = 0; i < known.trajectory.length; i++) {
+      expect(tampered.trajectory[i]).toBeCloseTo(known.trajectory[i], 6);
+    }
+  });
+
   it("bucket flag on with retirement never reached (yearsUntilRetirement > totalYears) is byte-equal to no-bucket", () => {
     // If `yearsUntilRetirement` exceeds the simulated horizon, the
     // bucket gate (`y >= yearsPre`) never opens. The flag should be
