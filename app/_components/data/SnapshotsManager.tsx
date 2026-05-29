@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useAppStore } from "@/lib/store";
 import {
   deleteSnapshot,
@@ -66,6 +66,48 @@ export function SnapshotsManager() {
   const [editDate, setEditDate] = useState<string>("");
   const [editNW, setEditNW] = useState<string>("");
   const [editLabel, setEditLabel] = useState<string>("");
+  // Round-5 audit HIGH: track validation error inline so screen
+  // readers (via aria-describedby) hear it and sighted users
+  // see why Save didn't fire on an invalid NW input.
+  const [editNWError, setEditNWError] = useState<string>("");
+  // Two-stage delete confirm — Round-5 audit CRITICAL: replaces
+  // delete-on-first-click with "click → confirm within 4s window"
+  // so a misclick on the Delete button doesn't permanently
+  // destroy a historical snapshot. `pendingDelete` is the `t` of
+  // the row armed for confirm; auto-clears on timer or any
+  // unrelated action.
+  const [pendingDelete, setPendingDelete] = useState<number | null>(null);
+  // Live-region status text (Round-5 audit HIGH). Polite SR
+  // announcements after async save / delete success.
+  const [statusMessage, setStatusMessage] = useState<string>("");
+  // Focus management — Round-5 audit HIGH. Stash the row's Edit
+  // button so we can restore focus on Cancel (don't drop focus to
+  // <body>). The first edit-mode input gets focused on entry.
+  const editButtonRefs = useRef<Map<number, HTMLButtonElement>>(new Map());
+  const firstEditInputRef = useRef<HTMLInputElement | null>(null);
+
+  // When entering edit mode, focus the first input. Keeps
+  // keyboard / SR users oriented at the form they just opened.
+  useEffect(() => {
+    if (editingT != null && firstEditInputRef.current) {
+      firstEditInputRef.current.focus();
+    }
+  }, [editingT]);
+
+  // Auto-clear pendingDelete after 4s so it can't sit armed forever.
+  useEffect(() => {
+    if (pendingDelete == null) return;
+    const id = window.setTimeout(() => setPendingDelete(null), 4000);
+    return () => window.clearTimeout(id);
+  }, [pendingDelete]);
+
+  // Auto-clear status messages after they've been announced so
+  // they don't accumulate visually.
+  useEffect(() => {
+    if (!statusMessage) return;
+    const id = window.setTimeout(() => setStatusMessage(""), 3000);
+    return () => window.clearTimeout(id);
+  }, [statusMessage]);
   const [includeComposition, setIncludeComposition] = useState(true);
 
   const refresh = async () => {
@@ -163,14 +205,29 @@ export function SnapshotsManager() {
     }
   };
 
-  const handleDelete = async (t: number) => {
-    setBusy(true);
-    try {
-      await deleteSnapshot(t);
-      await refresh();
-    } finally {
-      setBusy(false);
+  /**
+   * Round-5 audit CRITICAL: two-stage delete confirm. First click
+   * arms the row (button label flips to "Confirm delete"); second
+   * click within 4 seconds actually deletes. Auto-disarms on
+   * timeout. Prevents permanent data loss from a misclick on the
+   * wrong row (Edit + Delete are visually adjacent).
+   */
+  const handleDeleteClick = (t: number) => {
+    if (pendingDelete !== t) {
+      setPendingDelete(t);
+      return;
     }
+    void (async () => {
+      setBusy(true);
+      try {
+        await deleteSnapshot(t);
+        await refresh();
+        setStatusMessage("Snapshot deleted.");
+        setPendingDelete(null);
+      } finally {
+        setBusy(false);
+      }
+    })();
   };
 
   /**
@@ -184,13 +241,24 @@ export function SnapshotsManager() {
     setEditDate(toISO(s.t));
     setEditNW(String(s.netWorthUSD));
     setEditLabel(s.label ?? "");
+    setEditNWError("");
+    setPendingDelete(null);
   };
 
   const handleCancelEdit = () => {
+    const t = editingT;
     setEditingT(null);
     setEditDate("");
     setEditNW("");
     setEditLabel("");
+    setEditNWError("");
+    // Round-5 audit HIGH (focus management): restore focus to the
+    // Edit button that opened this form. Without this, focus drops
+    // to <body> on Cancel, disorienting keyboard / SR users.
+    if (t != null) {
+      const btn = editButtonRefs.current.get(t);
+      if (btn) requestAnimationFrame(() => btn.focus());
+    }
   };
 
   /**
@@ -202,9 +270,24 @@ export function SnapshotsManager() {
   const handleSaveEdit = async (originalT: number) => {
     if (editingT !== originalT) return;
     const newT = parseISO(editDate);
-    if (!Number.isFinite(newT)) return;
-    const newNW = Number(editNW);
-    if (!Number.isFinite(newNW)) return;
+    if (!Number.isFinite(newT)) {
+      setEditNWError("Date must be a valid YYYY-MM-DD.");
+      return;
+    }
+    // Round-5 audit HIGH: surface the validation error to the user
+    // via aria-describedby + visible error text. Previously
+    // silently returned on invalid input.
+    const trimmed = editNW.trim();
+    if (trimmed === "") {
+      setEditNWError("Net worth is required.");
+      return;
+    }
+    const newNW = Number(trimmed);
+    if (!Number.isFinite(newNW)) {
+      setEditNWError("Net worth must be a number.");
+      return;
+    }
+    setEditNWError("");
     setBusy(true);
     try {
       // Find the original snapshot to preserve household + other
@@ -235,6 +318,7 @@ export function SnapshotsManager() {
       }
       await recordSnapshot(updated);
       await refresh();
+      setStatusMessage("Snapshot updated.");
       handleCancelEdit();
     } finally {
       setBusy(false);
@@ -282,6 +366,21 @@ export function SnapshotsManager() {
 
       {open && (
         <div className="border-t border-border px-3 py-3">
+          {/* Round-5 audit HIGH: polite live region announces async
+              save / delete success to screen readers. Visually
+              hidden when empty; styled like a small chip when
+              present. */}
+          <div
+            role="status"
+            aria-live="polite"
+            className={
+              statusMessage
+                ? "mb-2 rounded-md border border-positive/30 bg-positive/10 px-2 py-1 text-[11px] text-positive"
+                : "sr-only"
+            }
+          >
+            {statusMessage}
+          </div>
           {/* Plain-language reassurance so users don't worry that
               capturing a snapshot will alter their live state. */}
           <div className="mb-3 rounded-md border border-positive/30 bg-positive/5 px-3 py-2 text-[11px] text-text-muted">
@@ -437,15 +536,30 @@ export function SnapshotsManager() {
                     className="rounded-md border border-border bg-bg-surface px-3 py-2"
                   >
                     {isEditing ? (
-                      // EDIT MODE — explicit Save / Cancel buttons,
-                      // no onBlur autosave. Round-1 audit HIGH fix:
-                      // user can edit date, NW value, and label
-                      // all in one safe form.
-                      <div className="space-y-2">
+                      // EDIT MODE — Round-5 audit HIGHs: <form>
+                      // wrapper enables Enter-to-save; Escape
+                      // handler enables Esc-to-cancel; aria-busy
+                      // signals async work; first input auto-
+                      // focuses via ref + useEffect on editingT.
+                      <form
+                        aria-busy={busy}
+                        onSubmit={(e) => {
+                          e.preventDefault();
+                          void handleSaveEdit(s.t);
+                        }}
+                        onKeyDown={(e) => {
+                          if (e.key === "Escape") {
+                            e.preventDefault();
+                            handleCancelEdit();
+                          }
+                        }}
+                        className="space-y-2"
+                      >
                         <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
                           <label className="block text-[10px] text-text-muted">
                             Date
                             <input
+                              ref={firstEditInputRef}
                               type="date"
                               value={editDate}
                               onChange={(e) => setEditDate(e.target.value)}
@@ -458,8 +572,19 @@ export function SnapshotsManager() {
                               type="number"
                               inputMode="decimal"
                               value={editNW}
-                              onChange={(e) => setEditNW(e.target.value)}
-                              className="num mt-0.5 w-full rounded border border-border-strong bg-bg-elevated px-2 py-1 text-[11px] text-text outline-none focus:border-accent"
+                              onChange={(e) => {
+                                setEditNW(e.target.value);
+                                if (editNWError) setEditNWError("");
+                              }}
+                              aria-invalid={editNWError ? true : undefined}
+                              aria-describedby={
+                                editNWError ? `nw-err-${s.t}` : undefined
+                              }
+                              className={`num mt-0.5 w-full rounded border bg-bg-elevated px-2 py-1 text-[11px] text-text outline-none focus:border-accent ${
+                                editNWError
+                                  ? "border-red-400/60"
+                                  : "border-border-strong"
+                              }`}
                             />
                           </label>
                           <label className="block text-[10px] text-text-muted">
@@ -473,25 +598,33 @@ export function SnapshotsManager() {
                             />
                           </label>
                         </div>
+                        {editNWError && (
+                          <div
+                            id={`nw-err-${s.t}`}
+                            role="alert"
+                            className="text-[10px] text-red-300"
+                          >
+                            {editNWError}
+                          </div>
+                        )}
                         <div className="flex items-center justify-end gap-2">
                           <button
                             type="button"
                             onClick={handleCancelEdit}
                             disabled={busy}
-                            className="rounded border border-border-strong bg-bg-elevated px-2 py-1 text-[10px] text-text-muted disabled:opacity-40 active:opacity-70"
+                            className="rounded border border-border-strong bg-bg-elevated px-2.5 py-1.5 text-[11px] text-text-muted disabled:opacity-40 active:opacity-70"
                           >
                             Cancel
                           </button>
                           <button
-                            type="button"
-                            onClick={() => void handleSaveEdit(s.t)}
+                            type="submit"
                             disabled={busy}
-                            className="rounded bg-accent px-2.5 py-1 text-[10px] font-medium text-bg disabled:opacity-40 active:opacity-80"
+                            className="rounded bg-accent px-3 py-1.5 text-[11px] font-medium text-bg disabled:opacity-40 active:opacity-80"
                           >
                             {busy ? "Saving…" : "Save"}
                           </button>
                         </div>
-                      </div>
+                      </form>
                     ) : (
                       // READ MODE — Edit + Delete buttons.
                       <div className="flex items-center justify-between gap-2">
@@ -527,22 +660,43 @@ export function SnapshotsManager() {
                         </div>
                         <div className="flex items-center gap-1.5">
                           <button
+                            ref={(el) => {
+                              if (el) editButtonRefs.current.set(s.t, el);
+                              else editButtonRefs.current.delete(s.t);
+                            }}
                             type="button"
                             onClick={() => handleStartEdit(s)}
                             disabled={busy}
-                            className="rounded border border-border-strong bg-bg-elevated px-2 py-1 text-[10px] text-text-muted disabled:opacity-40 active:opacity-70 hover:text-text"
-                            aria-label="Edit snapshot"
+                            className="rounded border border-border-strong bg-bg-elevated px-2.5 py-1.5 text-[11px] text-text-muted disabled:opacity-40 active:opacity-70 hover:text-text"
+                            aria-label={`Edit snapshot from ${formatDate(s.t)}, ${formatUSD(s.netWorthUSD)}`}
                           >
                             Edit
                           </button>
+                          {/* Round-5 audit CRITICAL: two-stage
+                              confirm. First click arms (label
+                              flips to "Confirm delete"); second
+                              click within 4s actually deletes.
+                              Auto-disarms on timeout (effect
+                              above). aria-label includes the row
+                              context for screen readers. */}
                           <button
                             type="button"
-                            onClick={() => handleDelete(s.t)}
+                            onClick={() => handleDeleteClick(s.t)}
                             disabled={busy}
-                            className="rounded border border-negative/40 bg-bg-surface px-2 py-1 text-[10px] font-medium text-negative disabled:opacity-40 active:opacity-70"
-                            aria-label="Delete snapshot"
+                            className={`rounded border px-2.5 py-1.5 text-[11px] font-medium disabled:opacity-40 active:opacity-70 ${
+                              pendingDelete === s.t
+                                ? "border-negative bg-negative text-bg"
+                                : "border-negative/40 bg-bg-surface text-negative"
+                            }`}
+                            aria-label={
+                              pendingDelete === s.t
+                                ? `Confirm delete of snapshot from ${formatDate(s.t)}`
+                                : `Delete snapshot from ${formatDate(s.t)}, ${formatUSD(s.netWorthUSD)}`
+                            }
                           >
-                            Delete
+                            {pendingDelete === s.t
+                              ? "Confirm delete"
+                              : "Delete"}
                           </button>
                         </div>
                       </div>
