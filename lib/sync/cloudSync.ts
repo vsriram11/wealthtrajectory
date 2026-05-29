@@ -247,6 +247,12 @@ export async function pullFromDrive(
     // the user has explicitly consented to the data loss.
     if (!skipShrinkageCheck) {
       const localNow = store.getState();
+      // Round-1-D1 audit CRITICAL fix: snapshot count comes from
+      // IDB (not the store). MUST be loaded BEFORE the shrinkage
+      // check, otherwise a Drive payload with snapshots: [] would
+      // pass the guard and silently wipe N local snapshots via
+      // replaceAllSnapshots downstream.
+      const localSnapshotsForShrinkage = await loadSnapshots();
       const shrinkage = isInboundShrinkage(parsed, {
         healthImportanceWeights: localNow.healthImportanceWeights,
         memberAssumptions: localNow.memberAssumptions,
@@ -255,6 +261,7 @@ export async function pullFromDrive(
         budgetItems: localNow.budgetItems,
         incomeStreams: localNow.incomeStreams,
         healthPlans: localNow.healthPlans,
+        snapshots: localSnapshotsForShrinkage,
       });
       if (shrinkage) {
         s.setGoogleSyncState({
@@ -379,6 +386,12 @@ export async function pushToDrive(
         const existing = await findBackupFile(token);
         if (existing) {
           const driveText = await downloadBackup(token, existing.id);
+          // Round-1-D1 audit CRITICAL fix: snapshots are now in
+          // SHRINKAGE_GUARDED_ARRAY_COLLECTIONS, so the outbound
+          // guard MUST see the local snapshot count too — otherwise
+          // a device with zero local snapshots would silently wipe
+          // N snapshots on Drive when this user pushes.
+          const localSnapshotsForShrinkage = await loadSnapshots();
           const shrinkage = await checkShrinkageAgainstDrive(
             driveText,
             s.encryptionPassphrase,
@@ -390,6 +403,7 @@ export async function pushToDrive(
               healthPlans: s.healthPlans,
               healthImportanceWeights: s.healthImportanceWeights,
               memberAssumptions: s.memberAssumptions,
+              snapshots: localSnapshotsForShrinkage,
             },
           );
           if (shrinkage) {

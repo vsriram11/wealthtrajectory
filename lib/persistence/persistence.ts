@@ -243,16 +243,23 @@ export async function loadSnapshots(): Promise<Snapshot[]> {
  * user wiping local data lost their entire snapshot history. This
  * helper closes that gap.
  *
- * Atomicity: we clear and re-populate in a single transaction so a
- * partial failure can't leave a half-merged state.
+ * Atomicity: clear-then-bulkPut runs inside a Dexie `rw` transaction
+ * so a partial failure aborts the WHOLE thing — `clear()` is rolled
+ * back. R1-D5 audit HIGH fix: previously the outer try/catch
+ * swallowed any BulkError thrown by Dexie and `clear()` stayed in
+ * effect, causing silent data loss when a single corrupt row halted
+ * the bulkPut. Now we (a) re-throw on BulkError to abort the txn
+ * and (b) let the error bubble to the caller (applyImportedPayload)
+ * so pullFromDrive can surface it as `googleSyncError` instead of
+ * claiming success.
  */
 export async function replaceAllSnapshots(rows: Snapshot[]): Promise<void> {
   const handle = getDB();
   if (!handle) return;
-  try {
-    await handle.transaction("rw", handle.snapshots, async () => {
-      await handle.snapshots.clear();
-      if (rows.length > 0) {
+  await handle.transaction("rw", handle.snapshots, async () => {
+    await handle.snapshots.clear();
+    if (rows.length > 0) {
+      try {
         await handle.snapshots.bulkPut(
           rows.map((r) => ({
             t: r.t,
@@ -261,11 +268,16 @@ export async function replaceAllSnapshots(rows: Snapshot[]): Promise<void> {
             ...(r.label ? { label: r.label } : {}),
           })),
         );
+      } catch (e) {
+        // Dexie's `bulkPut` resolves with a BulkError on partial
+        // failures BY DEFAULT (the txn commits with whatever rows
+        // succeeded). Throwing here forces Dexie to roll the entire
+        // transaction back, leaving IDB in its pre-clear state —
+        // the only behavior consistent with "atomic restore."
+        throw e;
       }
-    });
-  } catch (e) {
-    console.warn("WealthTrajectory: failed to replace snapshots", e);
-  }
+    }
+  });
 }
 
 export async function deleteSnapshot(t: number): Promise<void> {

@@ -43,6 +43,15 @@ import { SnapshotStagingPanel } from "./SnapshotStagingPanel";
 export function SnapshotsManager() {
   const household = useAppStore((s) => s.household);
   const mode = useAppStore((s) => s.mode);
+  // R1-D3 audit CRITICAL fix: snapshots live in IDB, so CloudSyncer's
+  // slice-reference diff is structurally blind to snapshot
+  // mutations. Bump this counter after every successful write so
+  // the debounced uploader sees a change and schedules a Drive
+  // push. Without this, snapshots stay local-only until some
+  // unrelated slice happens to change.
+  const bumpSnapshotsRevision = useAppStore(
+    (s) => s.bumpSnapshotsRevision,
+  );
   // Round-6 audit HIGH fix: surface the active-scenario mismatch.
   // The NetWorthCard (and every other projection-driven display)
   // reads through `useActiveProjection`, which applies the active
@@ -237,6 +246,7 @@ export function SnapshotsManager() {
         ...(draftLabel.trim() ? { label: draftLabel.trim() } : {}),
       };
       await recordSnapshot(snap);
+      bumpSnapshotsRevision();
       await refresh();
       setDraftLabel("");
     } finally {
@@ -268,6 +278,7 @@ export function SnapshotsManager() {
         ...(draftLabel.trim() ? { label: draftLabel.trim() } : {}),
       };
       await recordSnapshot(snap);
+      bumpSnapshotsRevision();
       await refresh();
       setStatusMessage(
         "Historical snapshot saved. Live accounts unchanged.",
@@ -295,6 +306,7 @@ export function SnapshotsManager() {
       setBusy(true);
       try {
         await deleteSnapshot(t);
+        bumpSnapshotsRevision();
         await refresh();
         setStatusMessage("Snapshot deleted.");
         setPendingDelete(null);
@@ -391,6 +403,7 @@ export function SnapshotsManager() {
         delete (updated as { label?: string }).label;
       }
       await recordSnapshot(updated);
+      bumpSnapshotsRevision();
       await refresh();
       setStatusMessage("Snapshot updated.");
       handleCancelEdit();

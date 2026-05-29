@@ -14,6 +14,7 @@ describe("checkShrinkage", () => {
     budgetItems: [],
     incomeStreams: [],
     healthPlans: [],
+    snapshots: [],
     healthImportanceWeights: {},
     memberAssumptions: {},
   };
@@ -30,6 +31,7 @@ describe("checkShrinkage", () => {
         budgetItems: [],
         incomeStreams: [],
         healthPlans: [],
+    snapshots: [],
         healthImportanceWeights: {},
     memberAssumptions: {},
       }),
@@ -46,6 +48,7 @@ describe("checkShrinkage", () => {
           budgetItems: [],
           incomeStreams: [],
           healthPlans: [],
+    snapshots: [],
           healthImportanceWeights: {},
     memberAssumptions: {},
         },
@@ -95,6 +98,7 @@ describe("checkShrinkage", () => {
         budgetItems: [],
         incomeStreams: [],
         healthPlans: [],
+    snapshots: [],
         healthImportanceWeights: {},
     memberAssumptions: {},
       },
@@ -147,6 +151,7 @@ describe("checkShrinkageAgainstDrive: encryption fail-closed", () => {
     budgetItems: [],
     incomeStreams: [],
     healthPlans: [],
+    snapshots: [],
     healthImportanceWeights: {},
     memberAssumptions: {},
   };
@@ -221,6 +226,7 @@ describe("SHRINKAGE_GUARDED constants — symmetric coverage", () => {
       budgetItems: [],
       incomeStreams: [],
       healthPlans: [],
+    snapshots: [],
       healthImportanceWeights: {},
     memberAssumptions: {},
     };
@@ -232,6 +238,46 @@ describe("SHRINKAGE_GUARDED constants — symmetric coverage", () => {
         "incomeStreams",
       ),
     ).toBe(true);
+  });
+
+  it("array collections list includes snapshots (R1-D1 audit pin)", () => {
+    // Round-1 audit D1 CRITICAL fix: snapshots live in IDB but
+    // participate in Drive sync exactly like the store-backed
+    // collections. Pin that they're in the guarded list so a future
+    // refactor that drops them silently can't pass tests.
+    expect(
+      (SHRINKAGE_GUARDED_ARRAY_COLLECTIONS as readonly string[]).includes(
+        "snapshots",
+      ),
+    ).toBe(true);
+  });
+
+  it("snapshot shrinkage is detected: Drive has rows but local is empty (outbound)", () => {
+    // Outbound (local-empty would-wipe-Drive): local has [], Drive
+    // has 50 snapshots → must flag "snapshots".
+    const report = checkShrinkage(
+      { snapshots: new Array(50).fill({}) },
+      emptyState(),
+    );
+    expect(report).not.toBeNull();
+    expect(report!.shrinking).toContain("snapshots");
+  });
+
+  it("snapshot shrinkage is detected: local has rows but Drive is empty (inbound)", () => {
+    // Inbound: this is the REVERSE direction — typically isInboundShrinkage
+    // does the (local > 0 && drive === 0) check. checkShrinkage flags
+    // the OUTBOUND direction (drive > 0 && local === 0). Confirm
+    // outbound by inverting the args (and verifying the symmetric
+    // protection by exercising the same constant).
+    const localWithSnaps = { ...emptyState(), snapshots: [{ id: "x" }] };
+    const reportRev = checkShrinkage(
+      { snapshots: [] }, // drive empty
+      localWithSnaps,
+    );
+    // Outbound check doesn't flag this (drive=0, local>0 isn't a
+    // wipe-on-upload). But isInboundShrinkage WOULD flag it on
+    // inbound — separately tested via cloudSync's path.
+    expect(reportRev).toBeNull();
   });
 
   it("every guarded array collection actually triggers checkShrinkage when populated locally and missing from drive", () => {

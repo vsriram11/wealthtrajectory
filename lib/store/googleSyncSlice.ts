@@ -41,6 +41,18 @@ export type GoogleSyncSliceState = {
    * local edits.
    */
   googleUploadScheduled: boolean;
+  /**
+   * Monotonically-bumping counter on every snapshot write
+   * (create / edit / delete / replace-from-import). Snapshots live
+   * in IndexedDB rather than the Zustand state slice, so the
+   * existing CloudSyncer diff (which compares slice references)
+   * is structurally blind to snapshot mutations. Without this
+   * counter, a user who only takes snapshots (a normal quarterly
+   * check-in pattern) never triggers a Drive upload — the new
+   * snapshot stays local-only until some unrelated slice happens
+   * to change. R1-D3 audit CRITICAL fix.
+   */
+  snapshotsRevision: number;
   /** Result of the most recent post-sign-in cloud-sync. */
   lastSyncOutcome: SyncOutcome;
 };
@@ -48,6 +60,15 @@ export type GoogleSyncSliceState = {
 export type GoogleSyncSliceActions = {
   setGoogleSyncState: (patch: Partial<GoogleSyncSliceState>) => void;
   dismissSyncOutcome: () => void;
+  /**
+   * Bump the snapshots-revision counter. SnapshotsManager + the
+   * staging panel call this after every successful write to IDB
+   * so CloudSyncer's diff (which compares slice references) sees
+   * a change and schedules an upload. Internally it always sets
+   * (current + 1) — never accepts an arbitrary value — so multiple
+   * concurrent callers can't accidentally re-set it.
+   */
+  bumpSnapshotsRevision: () => void;
 };
 
 export const GOOGLE_SYNC_SLICE_INITIAL: GoogleSyncSliceState = {
@@ -56,14 +77,18 @@ export const GOOGLE_SYNC_SLICE_INITIAL: GoogleSyncSliceState = {
   googleLastSyncAt: null,
   googleSyncBlockedReason: null,
   googleUploadScheduled: false,
+  snapshotsRevision: 0,
   lastSyncOutcome: null,
 };
 
 export function createGoogleSyncSliceActions(
   set: (patch: Partial<GoogleSyncSliceState>) => void,
+  get: () => GoogleSyncSliceState,
 ): GoogleSyncSliceActions {
   return {
     setGoogleSyncState: (patch) => set(patch),
     dismissSyncOutcome: () => set({ lastSyncOutcome: null }),
+    bumpSnapshotsRevision: () =>
+      set({ snapshotsRevision: get().snapshotsRevision + 1 }),
   };
 }

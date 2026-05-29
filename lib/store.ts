@@ -225,7 +225,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   ...AUTH_SLICE_INITIAL,
   ...createAuthSliceActions(set),
   ...GOOGLE_SYNC_SLICE_INITIAL,
-  ...createGoogleSyncSliceActions(set),
+  ...createGoogleSyncSliceActions(set, get),
   ...ENCRYPTION_SLICE_INITIAL,
   ...createEncryptionSliceActions(set),
   ...createActivitySliceInitial(),

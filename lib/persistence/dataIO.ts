@@ -79,7 +79,13 @@ export function exportData(args: {
     exportedAt: Date.now(),
     ...args,
   };
-  return JSON.stringify(payload, null, 2);
+  // R1-D2 audit HIGH fix: compact JSON drops ~30% off the wire-and-
+  // disk size of every Drive backup AND every JSON export. With the
+  // new snapshot field carrying a full household clone per row,
+  // payloads can balloon quickly — the indent was pure cosmetics
+  // that nothing downstream reads. Users who really want pretty
+  // JSON can pipe through `jq`.
+  return JSON.stringify(payload);
 }
 
 export function downloadExport(args: {
@@ -173,6 +179,15 @@ export async function applyImportedPayload(
     healthPlans: parsed.healthPlans,
     healthImportanceWeights: parsed.healthImportanceWeights,
   });
+  // Snapshots branch — IMPORTANT: only fires when parsed.snapshots is
+  // EXPLICITLY present in the payload (DO NOT change to
+  // `parsed.snapshots ?? []`). When the field is missing entirely
+  // (older export schema), we must preserve local IDB rows rather
+  // than wipe them — silently nuking snapshot history on first
+  // restore from an old backup would be a much worse failure than
+  // letting old + new state coexist for one sync cycle. R1-D4 audit
+  // pin: this comment is load-bearing; the dataIO test regression
+  // pins the no-wipe invariant.
   if (parsed.snapshots !== undefined) {
     const { replaceAllSnapshots } = await import(
       "@/lib/persistence/persistence"

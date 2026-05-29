@@ -10,6 +10,7 @@ import {
   uploadBackup,
 } from "@/lib/sync/googleDrive";
 import { exportData } from "@/lib/persistence/dataIO";
+import { loadSnapshots } from "@/lib/persistence/persistence";
 import { isDemoHousehold } from "@/lib/types";
 import {
   DriveUnreadableError,
@@ -57,7 +58,13 @@ export function CloudSyncer() {
         state.budgetItems === prev.budgetItems &&
         state.incomeStreams === prev.incomeStreams &&
         state.healthPlans === prev.healthPlans &&
-        state.healthImportanceWeights === prev.healthImportanceWeights
+        state.healthImportanceWeights === prev.healthImportanceWeights &&
+        // Round-1-D3 audit CRITICAL fix: snapshots live in IDB, but
+        // the slice carries a monotonic revision counter that
+        // SnapshotsManager bumps after every create / edit / delete.
+        // Without this comparison the debounced uploader was blind
+        // to snapshot mutations.
+        state.snapshotsRevision === prev.snapshotsRevision
       ) {
         return;
       }
@@ -179,6 +186,14 @@ export function CloudSyncer() {
             const existing = await findBackupFile(token);
             if (existing) {
               const driveText = await downloadBackup(token, existing.id);
+              // Round-1-D1 audit CRITICAL fix: include local
+              // snapshot count in the outbound shrinkage check so
+              // the debounced CloudSyncer upload doesn't silently
+              // wipe Drive snapshots when local IDB is empty (fresh
+              // device that hasn't completed initial sync yet, but
+              // CloudSyncer's gate already requires googleLastSyncAt
+              // != null — still belt-and-suspenders).
+              const localSnapshotsForShrinkage = await loadSnapshots();
               const shrinkage = await checkShrinkageAgainstDrive(
                 driveText,
                 s.encryptionPassphrase,
@@ -190,6 +205,7 @@ export function CloudSyncer() {
                   healthPlans: s.healthPlans,
                   healthImportanceWeights: s.healthImportanceWeights,
                   memberAssumptions: s.memberAssumptions,
+                  snapshots: localSnapshotsForShrinkage,
                 },
               );
               if (shrinkage) {

@@ -23,7 +23,15 @@ type Collection =
   | "goals"
   | "budgetItems"
   | "incomeStreams"
-  | "healthPlans";
+  | "healthPlans"
+  /**
+   * Snapshots live in IndexedDB rather than in the Zustand state
+   * slice, but they participate in Drive sync exactly like the
+   * store-backed collections (since the Round-1 audit fix), so they
+   * need the same wipe-protection. Callers pass the local snapshot
+   * COUNT into the guard (cheap), not the rows themselves.
+   */
+  | "snapshots";
 /**
  * Sparse-map collections also need wipe-protection — same N→0 risk,
  * but the underlying shape is `Record<string, ...>` instead of an
@@ -74,6 +82,7 @@ export const SHRINKAGE_GUARDED_ARRAY_COLLECTIONS = [
   "budgetItems",
   "incomeStreams",
   "healthPlans",
+  "snapshots",
 ] as const satisfies readonly Collection[];
 
 export const SHRINKAGE_GUARDED_MAP_COLLECTIONS = [
@@ -109,6 +118,7 @@ export function checkShrinkage(
     budgetItems?: unknown[];
     incomeStreams?: unknown[];
     healthPlans?: unknown[];
+    snapshots?: unknown[];
     healthImportanceWeights?: Record<string, unknown>;
     memberAssumptions?: Record<string, unknown>;
   },
@@ -118,6 +128,7 @@ export function checkShrinkage(
     budgetItems: unknown[];
     incomeStreams: unknown[];
     healthPlans: unknown[];
+    snapshots: unknown[];
     healthImportanceWeights: Record<string, unknown>;
     memberAssumptions: Record<string, unknown>;
   },
@@ -184,6 +195,7 @@ export async function checkShrinkageAgainstDrive(
     budgetItems: unknown[];
     incomeStreams: unknown[];
     healthPlans: unknown[];
+    snapshots: unknown[];
     healthImportanceWeights: Record<string, unknown>;
     memberAssumptions: Record<string, unknown>;
   },
