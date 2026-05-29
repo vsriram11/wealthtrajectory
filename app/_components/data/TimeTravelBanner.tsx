@@ -82,7 +82,7 @@ export function TimeTravelBanner() {
       <div
         role="status"
         aria-live="polite"
-        className="fixed inset-x-0 top-0 z-50 border-b border-positive/40 bg-positive/15 px-4 py-2 text-center text-[12px] font-semibold text-positive"
+        className="sticky top-0 z-50 border-b border-positive/40 bg-positive/15 px-4 py-2 text-center text-[12px] font-semibold text-positive"
       >
         Snapshot saved. Restoring live state…
       </div>
@@ -93,7 +93,7 @@ export function TimeTravelBanner() {
     <div
       role="region"
       aria-label="Time-travel backdating session active"
-      className="fixed inset-x-0 top-0 z-50 border-b border-amber-300/60 bg-amber-300/95 px-4 py-2 text-bg shadow-md"
+      className="sticky top-0 z-50 border-b border-amber-300/60 bg-amber-300/95 px-4 py-2 text-bg shadow-md"
     >
       <div className="mx-auto flex max-w-md flex-wrap items-center justify-between gap-2">
         <div className="min-w-0 flex-1 text-[12px] font-semibold leading-snug">
