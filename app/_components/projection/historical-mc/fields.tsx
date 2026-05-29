@@ -54,7 +54,7 @@ export function NumberInput({
 }) {
   return (
     <label
-      className={`block rounded-md border border-border bg-bg-elevated px-3 py-2 ${
+      className={`block rounded-md border border-border bg-bg-elevated px-3 py-2 focus-within:border-accent ${
         compact ? "max-w-[160px]" : ""
       }`}
     >

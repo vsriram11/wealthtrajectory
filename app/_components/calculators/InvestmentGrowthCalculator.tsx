@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 
 import { formatUSD, formatUSDCompact } from "@/lib/format";
 import {
@@ -357,11 +357,11 @@ export function InvestmentGrowthCalculator() {
               <table className="w-full text-[11px]">
                 <thead className="text-text-muted">
                   <tr>
-                    <th className="px-3 py-2 text-left font-medium">Year</th>
-                    <th className="px-3 py-2 text-right font-medium">
+                    <th scope="col" className="px-3 py-2 text-left font-medium">Year</th>
+                    <th scope="col" className="px-3 py-2 text-right font-medium">
                       Default (escalated)
                     </th>
-                    <th className="px-3 py-2 text-right font-medium">
+                    <th scope="col" className="px-3 py-2 text-right font-medium">
                       Override
                     </th>
                   </tr>
@@ -416,14 +416,14 @@ export function InvestmentGrowthCalculator() {
             <table className="w-full text-[11px]">
               <thead className="text-text-muted">
                 <tr>
-                  <th className="px-3 py-2 text-left font-medium">Year</th>
-                  <th className="px-3 py-2 text-right font-medium">
+                  <th scope="col" className="px-3 py-2 text-left font-medium">Year</th>
+                  <th scope="col" className="px-3 py-2 text-right font-medium">
                     Contributions
                   </th>
-                  <th className="px-3 py-2 text-right font-medium">
+                  <th scope="col" className="px-3 py-2 text-right font-medium">
                     Interest
                   </th>
-                  <th className="px-3 py-2 text-right font-medium">
+                  <th scope="col" className="px-3 py-2 text-right font-medium">
                     Ending balance
                   </th>
                 </tr>
@@ -473,10 +473,16 @@ function CalcInput({
   hint?: string;
   onChange: (v: number) => void;
 }) {
+  // Stable id so aria-describedby pairs the input with whichever
+  // (error / hint) message exists. Round-12 audit HIGH: screen
+  // readers heard "invalid" with no explanation; now the relevant
+  // text is read alongside the input.
+  const reactId = useId();
+  const messageId = `${reactId}-message`;
   return (
     <div>
       <label
-        className={`block rounded-md border bg-bg-surface px-3 py-2 ${
+        className={`block rounded-md border bg-bg-surface px-3 py-2 focus-within:border-accent ${
           error ? "border-red-400/60" : "border-border"
         }`}
       >
@@ -499,19 +505,24 @@ function CalcInput({
             max={max}
             step={step}
             aria-invalid={error ? true : undefined}
+            aria-describedby={error || hint ? messageId : undefined}
             className="num w-full bg-transparent text-right text-sm font-medium text-text outline-none"
           />
         </span>
       </label>
       {error ? (
         <div
+          id={messageId}
           className="mt-1 text-[10px] leading-snug text-red-300"
           role="alert"
         >
           {error}
         </div>
       ) : hint ? (
-        <div className="mt-1 text-[10px] leading-snug text-text-dim">
+        <div
+          id={messageId}
+          className="mt-1 text-[10px] leading-snug text-text-dim"
+        >
           {hint}
         </div>
       ) : null}
@@ -531,7 +542,7 @@ function CalcSelect({
   onChange: (v: string) => void;
 }) {
   return (
-    <label className="block rounded-md border border-border bg-bg-surface px-3 py-2">
+    <label className="block rounded-md border border-border bg-bg-surface px-3 py-2 focus-within:border-accent">
       <span className="block text-[10px] uppercase tracking-wider text-text-muted">
         {label}
       </span>

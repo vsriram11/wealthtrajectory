@@ -328,6 +328,7 @@ function Th({
 }) {
   return (
     <th
+      scope="col"
       className={`px-1.5 py-1 font-medium ${align === "right" ? "text-right" : "text-left"}`}
     >
       {children}

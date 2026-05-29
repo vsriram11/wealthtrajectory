@@ -175,6 +175,9 @@ export function SnapshotsManager() {
 
   return (
     <div className="mt-4 rounded-xl border border-border bg-bg-elevated">
+      {/* WCAG 4.1.2: the toggle button can't NEST another interactive
+          or status region. Round-12 audit. The summary status region
+          lives as a SIBLING below the button instead. */}
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -182,21 +185,8 @@ export function SnapshotsManager() {
         aria-expanded={open}
         aria-label="Toggle snapshots panel"
       >
-        <div>
-          <div className="text-[11px] font-medium uppercase tracking-wider text-text-muted">
-            Snapshots
-          </div>
-          {/* Summary lives OUTSIDE the button's accessible name (via
-              aria-label above) and is announced separately as a
-              status region so screen-reader users hear filter
-              changes without re-reading the toggle. */}
-          <div
-            className="mt-0.5 text-[10px] text-text-dim"
-            role="status"
-            aria-live="polite"
-          >
-            {summaryText}
-          </div>
+        <div className="text-[11px] font-medium uppercase tracking-wider text-text-muted">
+          Snapshots
         </div>
         <span
           className={`text-text-dim transition ${open ? "rotate-90" : ""}`}
@@ -205,6 +195,13 @@ export function SnapshotsManager() {
           ›
         </span>
       </button>
+      <div
+        className="px-3 pb-2 -mt-1 text-[10px] text-text-dim"
+        role="status"
+        aria-live="polite"
+      >
+        {summaryText}
+      </div>
 
       {open && (
         <div className="border-t border-border px-3 py-3">

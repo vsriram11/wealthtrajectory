@@ -43,6 +43,7 @@ export function CalculatorsPage() {
           {SUB_TABS.map((t) => (
             <SubTab
               key={t.id}
+              id={t.id}
               label={t.label}
               active={tab === t.id}
               onClick={() => setTab(t.id)}
@@ -66,16 +67,26 @@ export function CalculatorsPage() {
         </div>
       </div>
 
-      {tab === "investment-growth" && <InvestmentGrowthCalculator />}
+      {/* Tabpanel — keyed off the active tab id so screen readers
+          pair the panel with the tab. Round-12 audit fix. */}
+      <div
+        role="tabpanel"
+        id={`calc-panel-${tab}`}
+        aria-labelledby={`calc-tab-${tab}`}
+      >
+        {tab === "investment-growth" && <InvestmentGrowthCalculator />}
+      </div>
     </>
   );
 }
 
 function SubTab({
+  id,
   label,
   active,
   onClick,
 }: {
+  id: string;
   label: string;
   active: boolean;
   onClick: () => void;
@@ -84,7 +95,10 @@ function SubTab({
     <button
       type="button"
       role="tab"
+      id={`calc-tab-${id}`}
       aria-selected={active}
+      aria-controls={`calc-panel-${id}`}
+      tabIndex={active ? 0 : -1}
       onClick={onClick}
       className={`shrink-0 rounded-full px-3 py-1.5 text-[12px] font-medium transition active:opacity-70 ${
         active ? "bg-accent text-bg" : "text-text-muted hover:text-text"
