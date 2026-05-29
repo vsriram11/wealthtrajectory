@@ -13,10 +13,12 @@ import {
   filterHousehold,
   householdForRollups,
   householdNetWorth,
+  type Household,
 } from "@/lib/types";
 import { memberFilteredSnapshots } from "@/lib/data/history";
 import { formatUSD } from "@/lib/format";
 import { useActiveProjection } from "@/lib/projection/useActiveProjection";
+import { SnapshotStagingPanel } from "./SnapshotStagingPanel";
 
 /**
  * History snapshot manager.
@@ -83,6 +85,16 @@ export function SnapshotsManager() {
         ? (snapshots.find((s) => s.t === draftT) ?? null)
         : null,
     [snapshots, draftT],
+  );
+  // Time-travel staging state (R-snapshot UX) — when non-null, the
+  // user has entered "Stage past holdings" mode. The staged
+  // household lives in REACT STATE ONLY and never touches Zustand
+  // or IDB. Cancel discards it atomically; Commit calls
+  // recordSnapshot with the staged payload and resets to null. The
+  // dance the old <details> block described (Export → mutate live →
+  // snapshot → mutate back → import) is now obviated.
+  const [stagedHousehold, setStagedHousehold] = useState<Household | null>(
+    null,
   );
   // Per-row edit state (Audit R1 HIGH #5 + #6). When non-null,
   // the row whose `t` matches is in edit mode; the draft fields
@@ -226,6 +238,41 @@ export function SnapshotsManager() {
       };
       await recordSnapshot(snap);
       await refresh();
+      setDraftLabel("");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  /**
+   * Time-travel commit. Saves a snapshot from the STAGED household
+   * (the React-local working copy) at the chosen date. Live store
+   * state is untouched. Status message announces the safety
+   * guarantee so the user knows their actual holdings weren't
+   * mutated. Auto-collapses the staging panel on success.
+   */
+  const handleStagedCommit = async () => {
+    if (!stagedHousehold) return;
+    const t = parseISO(draftDate);
+    if (!Number.isFinite(t)) return;
+    setBusy(true);
+    try {
+      // Defensive clone — the React state could be aliased into
+      // an upcoming render's diff calculation. Same pattern as
+      // handleAdd above.
+      const stagedClone = structuredClone(stagedHousehold);
+      const snap: Snapshot = {
+        t,
+        netWorthUSD: householdNetWorth(stagedClone),
+        household: stagedClone,
+        ...(draftLabel.trim() ? { label: draftLabel.trim() } : {}),
+      };
+      await recordSnapshot(snap);
+      await refresh();
+      setStatusMessage(
+        "Historical snapshot saved. Live accounts unchanged.",
+      );
+      setStagedHousehold(null);
       setDraftLabel("");
     } finally {
       setBusy(false);
@@ -554,44 +601,54 @@ export function SnapshotsManager() {
               portfolio looked different. Surfaced as collapsible
               guidance so the simple "save current state" case isn't
               cluttered with the destructive-edit warning. */}
-          <details className="mt-3 rounded-lg border border-border bg-bg-surface px-3 py-2 text-[11px] text-text-muted">
-            <summary className="cursor-pointer text-text-muted">
-              Want to record a past state with different holdings?
-            </summary>
-            <div className="mt-2 space-y-1.5 text-text-dim">
-              <p>
-                The capture above always records your{" "}
-                <em>current</em> holdings — only the date and label
-                are configurable. To anchor a past date with a
-                different composition (e.g. &ldquo;In 2022 I held only
-                VTI&rdquo;), the safest workflow is:
-              </p>
-              <ol className="list-decimal space-y-1 pl-5">
-                <li>
-                  <span className="text-text-muted">Back up first.</span>{" "}
-                  On the{" "}
-                  <span className="rounded border border-border-strong bg-bg-elevated px-1.5 py-0.5 text-[10px] text-text-muted">
-                    Data
-                  </span>{" "}
-                  page, hit <span className="text-text-muted">Export</span>
-                  {" "}— that&apos;s your safety net if anything goes
-                  sideways. If you&apos;re signed in, Drive sync is
-                  already covering you too.
-                </li>
-                <li>
-                  Edit holdings to match the past composition.
-                </li>
-                <li>
-                  Come back here, set the date, and{" "}
-                  <span className="text-text-muted">Save snapshot</span>.
-                </li>
-                <li>
-                  Edit holdings back to the present. (Or restore from
-                  your export.)
-                </li>
-              </ol>
-            </div>
-          </details>
+          {/* Time-travel staging: lets the user backdate a snapshot
+              with DIFFERENT holdings than today, without the
+              previous cumbersome Export → mutate-live → snapshot →
+              mutate-back → import dance. Staged state lives
+              entirely in React local state — live store + Drive
+              backup are NEVER touched until the user clicks Commit
+              (and even then only the snapshot collection mutates,
+              not the live household). */}
+          {stagedHousehold == null ? (
+            <button
+              type="button"
+              onClick={() => {
+                // Initialize staging from the SAME base used for
+                // currentDisplayNW — rollup-include + member-filter
+                // applied so the staged starting point matches what
+                // the user sees as "Live NW (today)" in the panel
+                // header.
+                const base =
+                  memberId == null
+                    ? householdForRollups(household)
+                    : filterHousehold(household, memberId);
+                setStagedHousehold(structuredClone(base));
+              }}
+              className="mt-3 w-full rounded-lg border border-dashed border-border bg-bg-surface px-3 py-2 text-left text-[11px] text-text-muted hover:border-accent hover:text-accent"
+              aria-label="Open time-travel staging panel to record a past state with different holdings"
+            >
+              <span className="font-medium text-text">
+                Stage past holdings…
+              </span>{" "}
+              Backdate a snapshot with different composition (e.g.
+              &ldquo;in 2022 I held only VTI&rdquo;) without touching
+              your live accounts or Drive backup.
+            </button>
+          ) : (
+            <SnapshotStagingPanel
+              base={
+                memberId == null
+                  ? householdForRollups(household)
+                  : filterHousehold(household, memberId)
+              }
+              staged={stagedHousehold}
+              onChange={setStagedHousehold}
+              onCommit={() => void handleStagedCommit()}
+              onCancel={() => setStagedHousehold(null)}
+              busy={busy}
+              collisionExists={collidingSnapshot != null}
+            />
+          )}
 
           {sorted.length > 0 && (
             <ul className="mt-3 space-y-1.5">
