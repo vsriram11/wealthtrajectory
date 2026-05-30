@@ -78,13 +78,26 @@ export function CloudSyncer() {
         // this, a queued-then-entered session leaves the flag
         // stuck true, blocking the resume pull until the
         // session exits.
+        //
+        // CRITICAL: only call setGoogleSyncState when there's
+        // actually something to clear. Without this gate, the
+        // setGoogleSyncState call fires a Zustand commit, which
+        // re-triggers THIS subscribe, which sees timeTravelActive
+        // still true, which calls setGoogleSyncState again →
+        // infinite loop → "Maximum call stack size exceeded".
+        // User-reported regression from a structuredClone-mask
+        // (the previous structuredClone crash inside the slice
+        // action was preventing the set from committing, hiding
+        // this bug).
         if (timer) {
           clearTimeout(timer);
           timer = null;
         }
-        useAppStore
-          .getState()
-          .setGoogleSyncState({ googleUploadScheduled: false });
+        if (state.googleUploadScheduled) {
+          useAppStore
+            .getState()
+            .setGoogleSyncState({ googleUploadScheduled: false });
+        }
         return;
       }
       if (
