@@ -44,6 +44,15 @@ export type TimeTravelSliceState = {
   /** Deep copy of assumptions at session entry. Null when inactive. */
   baselineAssumptions: Assumptions | null;
   /**
+   * When set, the session was entered to EDIT an existing snapshot
+   * at this primary key (t value). The banner's Save flow uses
+   * this to overwrite the existing row directly without prompting
+   * the user (they explicitly chose to edit, so a confirmation
+   * dialog would be redundant friction). null = fresh session
+   * with no editing target.
+   */
+  editingSnapshotT: number | null;
+  /**
    * Status of the historical-price auto-fill, surfaced in the
    * TimeTravelBanner so the user knows which holdings got
    * auto-filled vs which need manual entry.
@@ -94,6 +103,27 @@ export type TimeTravelSliceActions = {
    */
   enterTimeTravel: (date: string) => void;
   /**
+   * Begin a session to EDIT an existing snapshot. Like
+   * enterTimeTravel, but also LOADS the snapshot's household
+   * (and appState.assumptions, when present) into the live store
+   * so the user can pick up exactly where they left off. The
+   * baseline still captures the user's live state so Exit
+   * restores it cleanly.
+   *
+   * The banner's Save flow consults `editingSnapshotT` to
+   * overwrite the existing row directly (no collision dialog).
+   *
+   * User-reported gap: "once you say save snapshot no way to
+   * further time travel edit that snapshot. There should be an
+   * edit time travel button for existing time travel snapshots."
+   */
+  enterTimeTravelEditingSnapshot: (snapshot: {
+    t: number;
+    household: Household;
+    assumptions?: Assumptions | null;
+    date: string;
+  }) => void;
+  /**
    * Restore the captured baseline into household + assumptions,
    * clear the baseline, deactivate. Safe to call when not active
    * (no-op). Used by both the "Exit" and "Save and exit" paths —
@@ -124,6 +154,7 @@ export const TIME_TRAVEL_SLICE_INITIAL: TimeTravelSliceState = {
   timeTravelDate: null,
   baselineHousehold: null,
   baselineAssumptions: null,
+  editingSnapshotT: null,
   timeTravelPriceStatus: {
     appliedSymbols: [],
     clampedSymbols: [],
@@ -188,8 +219,31 @@ export function createTimeTravelSliceActions(
           timeTravelDate: date,
           baselineHousehold: s.household,
           baselineAssumptions: s.assumptions,
+          editingSnapshotT: null,
           // Reset status on entry — historical-price flow will
           // populate it as fetches complete.
+          timeTravelPriceStatus: {
+            appliedSymbols: [],
+            clampedSymbols: [],
+            failedSymbols: [],
+          },
+        };
+      }),
+    enterTimeTravelEditingSnapshot: (snap) =>
+      set((s) => {
+        if (s.timeTravelActive) return {};
+        // Baseline = the user's CURRENT live state (so Exit
+        // restores cleanly). Load the snapshot's household +
+        // assumptions into the live store so the editor picks
+        // up exactly where the snapshot left off.
+        return {
+          timeTravelActive: true,
+          timeTravelDate: snap.date,
+          baselineHousehold: s.household,
+          baselineAssumptions: s.assumptions,
+          editingSnapshotT: snap.t,
+          household: snap.household,
+          ...(snap.assumptions ? { assumptions: snap.assumptions } : {}),
           timeTravelPriceStatus: {
             appliedSymbols: [],
             clampedSymbols: [],

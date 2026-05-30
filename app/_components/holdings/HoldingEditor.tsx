@@ -149,13 +149,13 @@ function EditorBody({ holding, onClose }: { holding: Holding; onClose: () => voi
         const r = priceAtDetailed(q, targetMs);
         if (r === null) {
           setRefreshError(
-            `No historical data for ${holding.symbol} — enter price manually below.`,
+            `No historical data for ${holding.symbol} — enter the per-share price in the Price field above.`,
           );
           return;
         }
         if (r.clamped) {
           setRefreshError(
-            `Historical data for ${holding.symbol} doesn't extend back to ${timeTravelDate}. Enter price manually below.`,
+            `Historical data for ${holding.symbol} doesn't extend back to ${timeTravelDate}. Enter the per-share price in the Price field above.`,
           );
           return;
         }
@@ -341,9 +341,35 @@ function EditorBody({ holding, onClose }: { holding: Holding; onClose: () => voi
         {isPricedHolding(holding) && holding.isManualPrice && (
           <div className="rounded-xl border border-border bg-bg-elevated px-4 py-3 text-[11px] text-text-muted">
             <div>
-              Manual price — {holding.kind === "crypto" ? "crypto positions are tracked manually." : <>last fetch for <span className="text-text">{holding.symbol}</span> didn&apos;t return data.</>} Edit Value above directly{isLivePriceable(holding) ? ", or retry live tracking below." : "."}
+              {timeTravelActive ? (
+                <>
+                  Manual entry mode — set Value directly, OR set Shares
+                  and Price above and the Value updates as{" "}
+                  <span className="text-text">shares × price</span>.
+                </>
+              ) : holding.kind === "crypto" ? (
+                <>
+                  Manual price — crypto positions are tracked manually.
+                  Edit Value above directly.
+                </>
+              ) : (
+                <>
+                  Manual price — last fetch for{" "}
+                  <span className="text-text">{holding.symbol}</span>{" "}
+                  didn&apos;t return data. Edit Value above directly
+                  {isLivePriceable(holding)
+                    ? ", or retry live tracking below."
+                    : "."}
+                </>
+              )}
             </div>
-            {isLivePriceable(holding) && (
+            {/* "Try live tracking" affordance is hidden during
+                time-travel: switching to live would fetch CURRENT
+                market price and overwrite the user's carefully-
+                set historical state. The historical "Fetch
+                historical price" button above is the equivalent
+                affordance in this mode. User-reported audit. */}
+            {isLivePriceable(holding) && !timeTravelActive && (
               <div className="mt-2 flex items-center justify-between gap-2">
                 <span className="text-text-dim">
                   Switching to live keeps your current Value and computes shares
