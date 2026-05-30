@@ -265,17 +265,40 @@ type StaticCacheHit = {
   trailingSpliced: boolean;
 };
 
+/**
+ * Diagnostic enum surfaced via the API response so a single curl
+ * tells you WHY the static cache wasn't used on a given request.
+ * Avoids the "configure something invisible, redeploy, wonder why
+ * it doesn't work" feedback loop.
+ */
+type StaticCacheStatus =
+  | "hit"
+  | "no_env_var"
+  | "manifest_fetch_failed"
+  | "shard_fetch_failed"
+  | "symbol_not_in_shard"
+  | "shard_history_empty"
+  | "shard_too_stale";
+
+type StaticCacheResult =
+  | { status: "hit"; hit: StaticCacheHit }
+  | { status: Exclude<StaticCacheStatus, "hit"> };
+
 async function tryStaticCache(
   symbol: string,
   range: "5y" | "max",
-): Promise<StaticCacheHit | null> {
+): Promise<StaticCacheResult> {
+  const manifestUrl = process.env.NEXT_PUBLIC_QUOTE_HISTORY_MANIFEST;
+  if (!manifestUrl) return { status: "no_env_var" };
   const manifest = await loadManifest();
-  if (!manifest) return null;
+  if (!manifest) return { status: "manifest_fetch_failed" };
   const shardIdx = shardForSymbol(symbol);
   const shard = await loadShard(manifest, shardIdx);
-  if (!shard) return null;
+  if (!shard) return { status: "shard_fetch_failed" };
   const history = shard.tickers[symbol];
-  if (!history || history.length === 0) return null;
+  if (!history || history.length === 0) {
+    return { status: "symbol_not_in_shard" };
+  }
 
   // Splice fresh trailing prices onto the cached baseline. The
   // shard was generated up to ~30 days ago (monthly cron); the
@@ -318,17 +341,20 @@ async function tryStaticCache(
   const cutoff =
     range === "max" ? 0 : now - 5 * 365 * 24 * 60 * 60 * 1000;
   const clamped = merged.filter((p) => p.t >= cutoff);
-  if (clamped.length === 0) return null;
+  if (clamped.length === 0) return { status: "shard_history_empty" };
   return {
-    quote: {
-      symbol,
-      currentPrice: mergedCurrent,
-      currency: "USD",
-      name: null,
-      history: clamped,
+    status: "hit",
+    hit: {
+      quote: {
+        symbol,
+        currentPrice: mergedCurrent,
+        currency: "USD",
+        name: null,
+        history: clamped,
+      },
+      shardGeneratedAt: shard.generatedAt,
+      trailingSpliced: !!trailing && trailing.length > 0,
     },
-    shardGeneratedAt: shard.generatedAt,
-    trailingSpliced: !!trailing && trailing.length > 0,
   };
 }
 
@@ -415,50 +441,56 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
   // dependency, and bypasses Vercel's IP-class rate-limit
   // entirely. A miss (long-tail tickers, brand-new symbols) falls
   // through to the Yahoo+Finnhub path as before.
-  const cached = await tryStaticCache(symbol, range);
+  const cacheResult = await tryStaticCache(symbol, range);
   // Defense-in-depth: if the shard is older than 5 weeks, the
   // monthly cron missed AND the cache is too stale to trust the
   // trading-day boundaries. Fall through to the dynamic path
   // rather than serve obviously-old data.
-  const cacheTooStale =
-    cached &&
-    Date.now() - cached.shardGeneratedAt > STATIC_CACHE_MAX_STALENESS_MS;
-  if (cached && !cacheTooStale) {
-    // DON'T poison the LRU when trailing failed — currentPrice is
-    // null in that case and the LRU fallback path serves it as
-    // "lru-fallback" which would propagate the null indefinitely.
-    if (cached.trailingSpliced) lruSet(symbol, cached.quote);
-    return json(
-      {
-        ...cached.quote,
-        cachedFromStatic: true,
-        // Surfaces staleness to the client: how old is the shard
-        // we served from? UI can warn if shardGeneratedAt is too
-        // old (e.g., > 35 days = monthly cron missed a run).
-        shardGeneratedAt: cached.shardGeneratedAt,
-        trailingSpliced: cached.trailingSpliced,
-        fetchedAt: Date.now(),
-      },
-      200,
-      {
-        // Vercel edge cache: serve repeat requests for the same
-        // symbol from the edge — collapsing thousands of function
-        // invocations into ~one per ticker per cache window.
-        //
-        // Trailing-spliced (fresh tail + current price): 5 min
-        // edge cache, 1 hour stale-while-revalidate. Trailing-
-        // failed (currentPrice null, history may be stale at the
-        // tail): 30 sec edge cache, 5 min stale-while-revalidate
-        // so we retry the trailing fetch sooner instead of
-        // burning a long window serving the null price.
-        "Cache-Control": cached.trailingSpliced
-          ? "public, s-maxage=300, stale-while-revalidate=3600"
-          : "public, s-maxage=30, stale-while-revalidate=300",
-        // CDN-tagged so a force-refresh can invalidate per-symbol
-        // (Vercel `revalidateTag` API).
-        "Cache-Tag": `quote:${symbol}`,
-      },
-    );
+  let staticCacheStatus: StaticCacheStatus = cacheResult.status;
+  if (cacheResult.status === "hit") {
+    const hit = cacheResult.hit;
+    const cacheTooStale =
+      Date.now() - hit.shardGeneratedAt > STATIC_CACHE_MAX_STALENESS_MS;
+    if (cacheTooStale) {
+      staticCacheStatus = "shard_too_stale";
+    } else {
+      // DON'T poison the LRU when trailing failed — currentPrice is
+      // null in that case and the LRU fallback path serves it as
+      // "lru-fallback" which would propagate the null indefinitely.
+      if (hit.trailingSpliced) lruSet(symbol, hit.quote);
+      return json(
+        {
+          ...hit.quote,
+          cachedFromStatic: true,
+          // Surfaces staleness to the client: how old is the shard
+          // we served from? UI can warn if shardGeneratedAt is too
+          // old (e.g., > 35 days = monthly cron missed a run).
+          shardGeneratedAt: hit.shardGeneratedAt,
+          trailingSpliced: hit.trailingSpliced,
+          staticCacheStatus: "hit",
+          fetchedAt: Date.now(),
+        },
+        200,
+        {
+          // Vercel edge cache: serve repeat requests for the same
+          // symbol from the edge — collapsing thousands of function
+          // invocations into ~one per ticker per cache window.
+          //
+          // Trailing-spliced (fresh tail + current price): 5 min
+          // edge cache, 1 hour stale-while-revalidate. Trailing-
+          // failed (currentPrice null, history may be stale at the
+          // tail): 30 sec edge cache, 5 min stale-while-revalidate
+          // so we retry the trailing fetch sooner instead of
+          // burning a long window serving the null price.
+          "Cache-Control": hit.trailingSpliced
+            ? "public, s-maxage=300, stale-while-revalidate=3600"
+            : "public, s-maxage=30, stale-while-revalidate=300",
+          // CDN-tagged so a force-refresh can invalidate per-symbol
+          // (Vercel `revalidateTag` API).
+          "Cache-Tag": `quote:${symbol}`,
+        },
+      );
+    }
   }
 
   // Track upstream diagnostic reasons so the response payload
@@ -541,6 +573,13 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
         ...parsed,
         source,
         asOf: Date.now(),
+        // Surface the static-cache status even on the dynamic
+        // path — tells you whether the cache was bypassed because
+        // it wasn't configured (no_env_var), the manifest fetch
+        // failed (manifest_fetch_failed), or the symbol simply
+        // isn't in the universe (symbol_not_in_shard). One curl
+        // diagnoses the whole pipeline.
+        staticCacheStatus,
         ...(partialError ? { error: partialError } : {}),
       },
       200,
@@ -567,6 +606,7 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
         ...fallback,
         source: "lru-fallback",
         asOf: Date.now(),
+        staticCacheStatus,
       },
       200,
       {
@@ -619,6 +659,7 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
       unavailable: true,
       error,
       asOf: Date.now(),
+      staticCacheStatus,
     },
     200,
     { "Cache-Control": "no-store" },
