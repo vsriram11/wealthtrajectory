@@ -1,5 +1,12 @@
 import { NextRequest } from "next/server";
 
+import {
+  NUM_HISTORY_SHARDS,
+  shardForSymbol,
+  type HistoryManifest,
+  type ShardPayload,
+} from "@/lib/data/historyShards";
+
 export const runtime = "nodejs";
 
 const UA_VARIATIONS = [
@@ -8,6 +15,196 @@ const UA_VARIATIONS = [
 ];
 
 const HOSTS = ["query1.finance.yahoo.com", "query2.finance.yahoo.com"];
+
+/**
+ * Full browser-style header set for Yahoo Finance fetches.
+ *
+ * Vercel's serverless function IPs are heavily throttled by Yahoo's
+ * WAF (every Vercel tenant scrapes Yahoo through the same IP pools).
+ * From cleaner residential / GitHub-Action IPs, just a UA header is
+ * enough to get 200s reliably — but on Vercel IPs the WAF demands
+ * the full browser fingerprint (Sec-Fetch-*, Sec-CH-UA-*, full
+ * Accept-* triplet) before relenting. Adding these is the
+ * highest-leverage fix we can make to the dynamic-fetch path: it
+ * doesn't avoid the IP problem entirely but materially shifts the
+ * success rate.
+ *
+ * Sec-Fetch-Site=same-site claims the request originates from a
+ * finance.yahoo.com subdomain — paired with the Origin / Referer
+ * already set, it's the same fingerprint the real browser sends
+ * when finance.yahoo.com client-side code fetches query2.
+ */
+function browserHeaders(ua: string): Record<string, string> {
+  return {
+    "User-Agent": ua,
+    Accept: "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    Referer: "https://finance.yahoo.com/",
+    Origin: "https://finance.yahoo.com",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-site",
+    "Sec-CH-UA":
+      '"Chromium";v="120", "Not(A:Brand";v="24", "Google Chrome";v="120"',
+    "Sec-CH-UA-Mobile": "?0",
+    "Sec-CH-UA-Platform": '"macOS"',
+    DNT: "1",
+  };
+}
+
+/**
+ * Module-level Yahoo session state. The cookie+crumb dance with
+ * fc.yahoo.com → getcrumb establishes a session the WAF treats more
+ * leniently. Cached per warm Vercel instance; re-established on
+ * cold start or 24h staleness.
+ */
+let yahooSession: {
+  cookie: string;
+  crumb: string;
+  fetchedAt: number;
+} | null = null;
+const YAHOO_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+
+async function getYahooSession(
+  ua: string,
+): Promise<{ cookie: string; crumb: string } | null> {
+  if (
+    yahooSession &&
+    Date.now() - yahooSession.fetchedAt < YAHOO_SESSION_TTL_MS
+  ) {
+    return { cookie: yahooSession.cookie, crumb: yahooSession.crumb };
+  }
+  try {
+    const cookieRes = await fetch("https://fc.yahoo.com/", {
+      headers: browserHeaders(ua),
+      // Don't follow redirects — we just want the Set-Cookie headers.
+      redirect: "manual",
+    });
+    const setCookies: string[] = [];
+    cookieRes.headers.forEach((v, k) => {
+      if (k.toLowerCase() === "set-cookie") setCookies.push(v);
+    });
+    if (setCookies.length === 0) return null;
+    const cookie = setCookies
+      .map((c) => c.split(";")[0])
+      .filter(Boolean)
+      .join("; ");
+    const crumbRes = await fetch(
+      "https://query2.finance.yahoo.com/v1/test/getcrumb",
+      {
+        headers: { ...browserHeaders(ua), Cookie: cookie },
+      },
+    );
+    if (!crumbRes.ok) return null;
+    const crumb = (await crumbRes.text()).trim();
+    if (!crumb || crumb.length > 32) return null; // sanity check
+    yahooSession = { cookie, crumb, fetchedAt: Date.now() };
+    return { cookie, crumb };
+  } catch {
+    return null;
+  }
+}
+
+// ── Static historical-price cache ────────────────────────────────
+//
+// Top-1000-by-AUM ETFs (plus the app's preset symbols) have their
+// 10y daily history pre-fetched and uploaded to Vercel Blob as 32
+// hash-shards by a monthly GitHub Action. The route consults the
+// static cache FIRST: a hit returns instantly via Vercel's CDN
+// (no upstream dependency, no rate-limit risk) and the rare
+// trailing-days gap is filled by a small dynamic Yahoo call.
+//
+// The manifest URL lives in NEXT_PUBLIC_QUOTE_HISTORY_MANIFEST.
+// When unset (local dev / no static data yet), the cache lookup
+// returns null and the route falls through to the existing
+// Yahoo+Finnhub path — no behavior change vs pre-cache.
+
+const STATIC_CACHE_TTL_MS = 60 * 60 * 1000; // 1h
+type ManifestCache = { manifest: HistoryManifest; fetchedAt: number };
+let manifestCache: ManifestCache | null = null;
+
+async function loadManifest(): Promise<HistoryManifest | null> {
+  const manifestUrl = process.env.NEXT_PUBLIC_QUOTE_HISTORY_MANIFEST;
+  if (!manifestUrl) return null;
+  if (
+    manifestCache &&
+    Date.now() - manifestCache.fetchedAt < STATIC_CACHE_TTL_MS
+  ) {
+    return manifestCache.manifest;
+  }
+  try {
+    const res = await fetch(manifestUrl, {
+      next: { revalidate: 86400 },
+    });
+    if (!res.ok) return null;
+    const manifest = (await res.json()) as HistoryManifest;
+    if (
+      !manifest ||
+      !Array.isArray(manifest.shards) ||
+      manifest.numShards !== NUM_HISTORY_SHARDS
+    ) {
+      return null;
+    }
+    manifestCache = { manifest, fetchedAt: Date.now() };
+    return manifest;
+  } catch {
+    return null;
+  }
+}
+
+const shardCache = new Map<number, { payload: ShardPayload; fetchedAt: number }>();
+
+async function loadShard(
+  manifest: HistoryManifest,
+  shardIdx: number,
+): Promise<ShardPayload | null> {
+  const cached = shardCache.get(shardIdx);
+  if (cached && Date.now() - cached.fetchedAt < STATIC_CACHE_TTL_MS) {
+    return cached.payload;
+  }
+  const entry = manifest.shards.find((s) => s.shard === shardIdx);
+  if (!entry) return null;
+  try {
+    const res = await fetch(entry.url, { next: { revalidate: 86400 } });
+    if (!res.ok) return null;
+    const payload = (await res.json()) as ShardPayload;
+    if (!payload || typeof payload.tickers !== "object") return null;
+    shardCache.set(shardIdx, { payload, fetchedAt: Date.now() });
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+async function tryStaticCache(
+  symbol: string,
+  range: "5y" | "max",
+): Promise<ParsedQuote | null> {
+  const manifest = await loadManifest();
+  if (!manifest) return null;
+  const shardIdx = shardForSymbol(symbol);
+  const shard = await loadShard(manifest, shardIdx);
+  if (!shard) return null;
+  const history = shard.tickers[symbol];
+  if (!history || history.length === 0) return null;
+  // Clamp to the requested range.
+  const now = Date.now();
+  const cutoff =
+    range === "max" ? 0 : now - 5 * 365 * 24 * 60 * 60 * 1000;
+  const clamped = history
+    .filter(([t]) => t >= cutoff)
+    .map(([t, p]) => ({ t, p }));
+  if (clamped.length === 0) return null;
+  const currentPrice = clamped[clamped.length - 1].p;
+  return {
+    symbol,
+    currentPrice,
+    currency: "USD",
+    name: null,
+    history: clamped,
+  };
+}
 
 // ── Module-level state (persists across requests within a warm Vercel
 // function instance; resets on cold start). Two structures:
@@ -74,6 +271,25 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
   // payload is ~3-10x larger but caches identically (per-symbol
   // LRU + IDB), so subsequent requests pay nothing extra.
   const range = req.nextUrl.searchParams.get("range") === "max" ? "max" : "5y";
+
+  // FAST PATH — static historical cache.
+  //
+  // For the top ~1000 US ETFs by AUM (plus the app's preset
+  // symbols), full 10y daily history is pre-fetched into Vercel
+  // Blob shards via a monthly GitHub Action and served from the
+  // CDN. A hit here returns in tens of ms, avoids any upstream
+  // dependency, and bypasses Vercel's IP-class rate-limit
+  // entirely. A miss (long-tail tickers, brand-new symbols) falls
+  // through to the Yahoo+Finnhub path as before.
+  const cached = await tryStaticCache(symbol, range);
+  if (cached) {
+    lruSet(symbol, cached);
+    return json({
+      ...cached,
+      cachedFromStatic: true,
+      fetchedAt: Date.now(),
+    });
+  }
 
   // Track upstream diagnostic reasons so the response payload
   // carries an `error` string when both fail — surfaced in the
@@ -375,6 +591,11 @@ async function tryYahoo(
   // failure is a 401/403/429 — surfacing the status code makes
   // it instantly diagnosable.
   let lastReason = "yahoo: no attempt made";
+  // Warm a Yahoo session once per cold start. Yahoo's WAF treats
+  // requests with an established session cookie + crumb materially
+  // more leniently than naked-IP fetches — measurably increases
+  // 200s on Vercel's shared IP pool.
+  const session = await getYahooSession(UA_VARIATIONS[0]);
   for (const host of HOSTS) {
     for (const ua of UA_VARIATIONS) {
       try {
@@ -385,26 +606,16 @@ async function tryYahoo(
         // 750ms backoff often gets us through the next rate
         // window (Yahoo's tier is per-rolling-second).
         // User reported: "21 holdings all 429."
+        const headers = browserHeaders(ua);
+        if (session) headers.Cookie = session.cookie;
         let res = await fetch(`https://${host}${path}`, {
-          headers: {
-            "User-Agent": ua,
-            Accept: "application/json,text/plain,*/*",
-            "Accept-Language": "en-US,en;q=0.9",
-            Referer: "https://finance.yahoo.com/",
-            Origin: "https://finance.yahoo.com",
-          },
+          headers,
           next: { revalidate: 86400 },
         });
         if (res.status === 429) {
           await new Promise((r) => setTimeout(r, 750));
           res = await fetch(`https://${host}${path}`, {
-            headers: {
-              "User-Agent": ua,
-              Accept: "application/json,text/plain,*/*",
-              "Accept-Language": "en-US,en;q=0.9",
-              Referer: "https://finance.yahoo.com/",
-              Origin: "https://finance.yahoo.com",
-            },
+            headers,
             next: { revalidate: 86400 },
           });
         }
