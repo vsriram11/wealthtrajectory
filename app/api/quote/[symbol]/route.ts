@@ -79,16 +79,53 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
   // carries an `error` string when both fail — surfaced in the
   // UI banner so the user can diagnose (Yahoo IP blocked, no
   // Finnhub key, rate-limited, etc).
+  //
+  // FALLBACK STRATEGY (refined after user-reported "0 history
+  // points" bug):
+  //   Finnhub free tier provides /quote (current price) but
+  //   /stock/candle requires paid tier → free-tier requests
+  //   silently return empty history. Yahoo is the only free
+  //   source for history.
+  //
+  //   1. Try Finnhub. If it gives us a current price BUT empty
+  //      history, treat as PARTIAL success and ALSO try Yahoo.
+  //   2. Yahoo's full quote (price + history) wins on success.
+  //   3. If Yahoo fails but Finnhub gave a current price, use
+  //      Finnhub's partial quote (better than nothing for live
+  //      NW; historical CAGR back-projection takes over).
+  //   4. If both fail entirely, surface both reasons + serve LRU.
   const finnhubResult = await tryFinnhub(symbol, range);
   let parsed: ParsedQuote | null = null;
   let source = "finnhub";
   let finnhubReason: string | null = null;
   let yahooReason: string | null = null;
+  let yahooResult: UpstreamResult | null = null;
   if (finnhubResult.ok) {
     parsed = finnhubResult.quote;
+    // Partial-success path: Finnhub gave us current price but
+    // empty history. Try Yahoo for the history; if Yahoo
+    // succeeds, prefer its full quote.
+    if (parsed.history.length === 0) {
+      yahooResult = await tryYahoo(symbol, range);
+      if (yahooResult.ok && yahooResult.quote.history.length > 0) {
+        parsed = yahooResult.quote;
+        source = "yahoo";
+      } else if (!yahooResult.ok) {
+        yahooReason = yahooResult.reason;
+        finnhubReason =
+          "finnhub: current price OK but candle endpoint returned no history (likely free-tier limitation — /stock/candle requires paid tier)";
+      } else {
+        // Yahoo succeeded but also had no history — rare.
+        // Keep Finnhub's partial quote; record both partial
+        // statuses for diagnostic.
+        finnhubReason =
+          "finnhub: current price OK but no history (free-tier candle limitation)";
+        yahooReason = "yahoo: response OK but history empty";
+      }
+    }
   } else {
     finnhubReason = finnhubResult.reason;
-    const yahooResult = await tryYahoo(symbol, range);
+    yahooResult = await tryYahoo(symbol, range);
     if (yahooResult.ok) {
       parsed = yahooResult.quote;
       source = "yahoo";
@@ -99,8 +136,27 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
 
   if (parsed) {
     lruSet(symbol, parsed);
+    // Surface partial-failure diagnostics on the success path
+    // too. The user-reported scenario: Finnhub gave us current
+    // price but empty history, Yahoo (the only free history
+    // source) also failed. The chart's historical view will
+    // then fail with `priceAt returned null` — and the user
+    // deserves to see WHY (rate limited / paid tier / etc),
+    // not a generic "0 history points" message.
+    const partialErrorParts: string[] = [];
+    if (finnhubReason) partialErrorParts.push(finnhubReason);
+    if (yahooReason) partialErrorParts.push(yahooReason);
+    const partialError =
+      partialErrorParts.length > 0 && parsed.history.length === 0
+        ? partialErrorParts.join(" | ")
+        : undefined;
     return json(
-      { ...parsed, source, asOf: Date.now() },
+      {
+        ...parsed,
+        source,
+        asOf: Date.now(),
+        ...(partialError ? { error: partialError } : {}),
+      },
       200,
       {
         // Historical daily closes never change retroactively; current
@@ -244,35 +300,28 @@ async function tryFinnhub(
     };
   }
 
-  try {
-    if (canCallFinnhub()) {
-      recordFinnhubCall();
-      const profRes = await fetch(
-        `https://finnhub.io/api/v1/stock/profile2?symbol=${enc}&token=${key}`,
-        { next: { revalidate: 86400 } },
-      );
-      if (profRes.ok) {
-        const p = (await profRes.json()) as {
-          name?: string;
-          currency?: string;
-        };
-        name = p.name ?? null;
-        if (p.currency) currency = p.currency;
-      }
-    }
-  } catch {
-    /* skip profile failure — currentPrice is enough */
-  }
+  // PROFILE FETCH SKIPPED. Was using a slot of the 60/min
+  // Finnhub free-tier budget for nice-to-have `name` + currency.
+  // Tripled per-symbol call cost and contributed to the
+  // user-reported "finnhub: rate-limit safety belt (≥55/min)"
+  // errors. Names come from the preset registry / user's own
+  // nickname; currency defaults to USD.
+  void name;
+  void currency;
 
+  // HISTORY FETCH: only attempted for the default 5y range. For
+  // range="max" Finnhub's free tier returns 403 (paid tier needed)
+  // — wasting a budget slot AND silently producing empty history,
+  // which then masked Yahoo from being tried. Saving 1 call per
+  // symbol on max-range requests roughly halves Finnhub usage
+  // during time-travel sessions.
   const history: Array<{ t: number; p: number }> = [];
+  const shouldTryHistory = range !== "max";
   try {
-    if (canCallFinnhub()) {
+    if (shouldTryHistory && canCallFinnhub()) {
       recordFinnhubCall();
       const now = Math.floor(Date.now() / 1000);
-      const fromOffsetSec =
-        range === "max"
-          ? 30 * 365 * 24 * 60 * 60
-          : 5 * 365 * 24 * 60 * 60;
+      const fromOffsetSec = 5 * 365 * 24 * 60 * 60;
       const fromTs = now - fromOffsetSec;
       const candleRes = await fetch(
         `https://finnhub.io/api/v1/stock/candle?symbol=${enc}&resolution=D&from=${fromTs}&to=${now}&token=${key}`,

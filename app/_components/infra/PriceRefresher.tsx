@@ -192,11 +192,16 @@ export function PriceRefresher() {
         }
         const r = priceAtDetailed(q, targetMs);
         if (r === null) {
-          recordTimeTravelPriceOutcome(
-            s,
-            "failed",
-            `priceAt returned null — quote had ${q.history.length} history points`,
-          );
+          // Empty history → use the upstream's diagnostic reason
+          // when available (typically a Finnhub free-tier or
+          // Yahoo rate-limit message). The plain "0 history
+          // points" message was unhelpful — the user couldn't
+          // tell whether to enter manually, retry later, or
+          // configure their own API key.
+          const reason = q.error
+            ? `Historical data unavailable for ${s}: ${q.error}`
+            : `Historical data unavailable for ${s} (upstream returned no history). Enter manually below.`;
+          recordTimeTravelPriceOutcome(s, "failed", reason);
           continue;
         }
         if (r.clamped) {
