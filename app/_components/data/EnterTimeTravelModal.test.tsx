@@ -66,85 +66,110 @@ describe("EnterTimeTravelModal — gated rendering", () => {
   });
 });
 
-describe("EnterTimeTravelModal — date validation (audit fix UI#5)", () => {
-  it("disables Confirm for a future date (DevTools / keyboard bypass of max= attribute)", () => {
+describe("EnterTimeTravelModal — inline validation (no disabled-button no-op)", () => {
+  it("shows an inline error for a future date (DevTools / keyboard bypass of max= attribute)", () => {
     render(<EnterTimeTravelModal open onClose={() => {}} />);
     const input = screen.getByLabelText(/Date to backdate to/i) as HTMLInputElement;
     act(() => {
       fireEvent.change(input, { target: { value: "2099-01-01" } });
     });
-    expect(
-      (
-        screen.getByRole("button", { name: /Enter time-travel/i }) as HTMLButtonElement
-      ).disabled,
-    ).toBe(true);
+    act(() => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Enter time-travel/i }),
+      );
+    });
+    expect(screen.getByRole("alert").textContent).toMatch(
+      /today or earlier/i,
+    );
+    expect(useAppStore.getState().timeTravelActive).toBe(false);
   });
 
-  it("disables Confirm for an invalid calendar date (Feb 31 silently normalizes)", () => {
+  it("shows an inline error for an invalid calendar date (Feb 31 silently normalizes)", () => {
     render(<EnterTimeTravelModal open onClose={() => {}} />);
     const input = screen.getByLabelText(/Date to backdate to/i) as HTMLInputElement;
     act(() => {
       fireEvent.change(input, { target: { value: "2024-02-31" } });
     });
-    expect(
-      (
-        screen.getByRole("button", { name: /Enter time-travel/i }) as HTMLButtonElement
-      ).disabled,
-    ).toBe(true);
+    act(() => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Enter time-travel/i }),
+      );
+    });
+    expect(screen.getByRole("alert").textContent).toMatch(
+      /valid date|YYYY-MM-DD/i,
+    );
+    expect(useAppStore.getState().timeTravelActive).toBe(false);
   });
 
-  it("disables Confirm for a malformed date string (wrong shape)", () => {
+  it("shows an inline error for a malformed date string (wrong shape)", () => {
     render(<EnterTimeTravelModal open onClose={() => {}} />);
     const input = screen.getByLabelText(/Date to backdate to/i) as HTMLInputElement;
     act(() => {
-      // Browsers normally prevent this via type=date, but
-      // some setups allow it. Defense in depth.
       fireEvent.change(input, { target: { value: "abcd" } });
     });
-    expect(
-      (
-        screen.getByRole("button", { name: /Enter time-travel/i }) as HTMLButtonElement
-      ).disabled,
-    ).toBe(true);
+    act(() => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Enter time-travel/i }),
+      );
+    });
+    expect(screen.getByRole("alert").textContent).toMatch(/YYYY-MM-DD/i);
   });
 
-  it("enables Confirm for a valid past date", () => {
-    render(<EnterTimeTravelModal open onClose={() => {}} />);
+  it("succeeds for a valid past date (button always firing, no disabled trap)", () => {
+    const onClose = vi.fn();
+    render(<EnterTimeTravelModal open onClose={onClose} />);
     const input = screen.getByLabelText(/Date to backdate to/i) as HTMLInputElement;
     act(() => {
       fireEvent.change(input, { target: { value: "2020-01-15" } });
     });
-    expect(
-      (
-        screen.getByRole("button", { name: /Enter time-travel/i }) as HTMLButtonElement
-      ).disabled,
-    ).toBe(false);
+    act(() => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Enter time-travel/i }),
+      );
+    });
+    expect(useAppStore.getState().timeTravelActive).toBe(true);
+    expect(useAppStore.getState().timeTravelDate).toBe("2020-01-15");
+    expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("enables Confirm for TODAY's date even when current wall clock is BEFORE noon UTC (audit fix — user-reported button no-op)", () => {
-    // CRITICAL bug surfaced by user: "Pressing 'enter time travel
-    // mode' for snapshots does not work; button is a no-op."
-    // Root cause: isValidISO compared the parsed t (anchored to
-    // noon UTC) against Date.now() at moment-precision. For a
-    // user clicking the modal before noon UTC, today's default
-    // date parsed to today-noon-UTC which was IN THE FUTURE,
-    // returning false → Confirm permanently disabled → no-op.
-    // Fix: lexicographic date-string comparison against
-    // today's UTC date. Today is always valid.
-    vi.setSystemTime(new Date("2024-06-15T03:00:00Z")); // 3am UTC
+  it("succeeds for TODAY's date at 3am UTC (user-reported no-op regression pin)", () => {
+    // The button-no-op symptom: prior implementation disabled
+    // the button when the parsed-noon-UTC of today was greater
+    // than Date.now() (i.e. user clicking before noon UTC).
+    // With the new flow: button is always clickable, validation
+    // is lexicographic on date strings, today is always valid.
+    vi.setSystemTime(new Date("2024-06-15T03:00:00Z"));
+    const onClose = vi.fn();
     const { rerender } = render(
-      <EnterTimeTravelModal open onClose={() => {}} />,
+      <EnterTimeTravelModal open onClose={onClose} />,
     );
-    // Default input value is today (2024-06-15). Confirm must be
-    // enabled even though current wall clock is hours before noon.
+    act(() => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Enter time-travel/i }),
+      );
+    });
+    expect(useAppStore.getState().timeTravelActive).toBe(true);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    rerender(<EnterTimeTravelModal open={false} onClose={onClose} />);
+  });
+
+  it("error message clears when user picks a new (valid) date", () => {
+    render(<EnterTimeTravelModal open onClose={() => {}} />);
     const input = screen.getByLabelText(/Date to backdate to/i) as HTMLInputElement;
-    expect(input.value).toBe("2024-06-15");
-    expect(
-      (
-        screen.getByRole("button", { name: /Enter time-travel/i }) as HTMLButtonElement
-      ).disabled,
-    ).toBe(false);
-    rerender(<EnterTimeTravelModal open={false} onClose={() => {}} />);
+    act(() => {
+      fireEvent.change(input, { target: { value: "2099-01-01" } });
+    });
+    act(() => {
+      fireEvent.click(
+        screen.getByRole("button", { name: /Enter time-travel/i }),
+      );
+    });
+    expect(screen.getByRole("alert")).toBeTruthy();
+    // Pick a valid date — error should clear via useEffect.
+    act(() => {
+      fireEvent.change(input, { target: { value: "2020-01-01" } });
+    });
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });
 
@@ -167,25 +192,22 @@ describe("EnterTimeTravelModal — flow control", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
-  it("Confirm with future date is a no-op (defense in depth — button disabled, but if styles bypass it)", () => {
+  it("Confirm with future date surfaces inline error (button always clickable)", () => {
     const onClose = vi.fn();
     render(<EnterTimeTravelModal open onClose={onClose} />);
     const input = screen.getByLabelText(/Date to backdate to/i) as HTMLInputElement;
     act(() => {
       fireEvent.change(input, { target: { value: "2099-01-01" } });
     });
-    const confirmBtn = screen.getByRole("button", {
-      name: /Enter time-travel/i,
-    });
-    // Even if we force-click a disabled button (shouldn't be
-    // possible normally, but a styling bug could allow it), the
-    // handleConfirm internally re-checks isValidISO and refuses.
     act(() => {
-      fireEvent.click(confirmBtn);
+      fireEvent.click(
+        screen.getByRole("button", { name: /Enter time-travel/i }),
+      );
     });
     expect(useAppStore.getState().timeTravelActive).toBe(false);
-    // onClose may or may not have been called by the click — the
-    // session state is the load-bearing assertion.
+    expect(screen.getByRole("alert")).toBeTruthy();
+    // onClose NOT called because validation failed.
+    expect(onClose).not.toHaveBeenCalled();
   });
 
   it("Cancel closes without dispatching enterTimeTravel", () => {

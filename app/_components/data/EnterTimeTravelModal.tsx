@@ -23,6 +23,7 @@ export function EnterTimeTravelModal({
 }) {
   const enterTimeTravel = useAppStore((s) => s.enterTimeTravel);
   const [date, setDate] = useState<string>(todayISO());
+  const [error, setError] = useState<string | null>(null);
   const firstFocusRef = useRef<HTMLInputElement | null>(null);
   const lastFocusRef = useRef<HTMLButtonElement | null>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
@@ -42,11 +43,49 @@ export function EnterTimeTravelModal({
     };
   }, [open]);
 
+  // (Error message cleared inline by the date-change handler
+  // below — see <input onChange>.)
+
   if (!open) return null;
 
+  // Diagnostic refactor (user reported "click does nothing"):
+  // we previously disabled the button via `disabled={!isValidISO}`.
+  // If isValidISO returned false for any reason (e.g. an iOS date
+  // picker delivering an unexpected string format, a build/cache
+  // staleness issue, a regex mismatch), the button was silently
+  // disabled and the user saw a no-op. The new flow:
+  //   1. Button is ALWAYS clickable.
+  //   2. handleConfirm validates inline and surfaces an error
+  //      message if the date is malformed or in the future.
+  //   3. On success: enterTimeTravel + onClose run normally.
+  // This guarantees the user gets visible feedback for EVERY tap.
   const handleConfirm = () => {
-    if (!isValidISO(date)) return;
-    enterTimeTravel(date);
+    setError(null);
+    const t = parseISODate(date);
+    if (t === null) {
+      setError(
+        `Pick a valid date in YYYY-MM-DD format (got "${date}"). Try selecting the date again.`,
+      );
+      return;
+    }
+    if (!isPastOrToday(date)) {
+      setError(
+        `Pick a date that's today or earlier (got "${date}", today is ${todayISO()} UTC).`,
+      );
+      return;
+    }
+    try {
+      enterTimeTravel(date);
+    } catch (e) {
+      // Defense-in-depth: if the slice action throws for any
+      // reason (e.g. structuredClone failure on a corrupt
+      // household shape), surface it instead of silently
+      // swallowing.
+      setError(
+        `Could not enter time-travel mode: ${e instanceof Error ? e.message : String(e)}. Please report this.`,
+      );
+      return;
+    }
     onClose();
   };
 
@@ -106,7 +145,10 @@ export function EnterTimeTravelModal({
             ref={firstFocusRef}
             type="date"
             value={date}
-            onChange={(e) => setDate(e.target.value)}
+            onChange={(e) => {
+              setDate(e.target.value);
+              if (error) setError(null);
+            }}
             // Defensive max — block future dates so a user can't
             // accidentally pick tomorrow and stage a snapshot
             // dated in the future.
@@ -114,6 +156,15 @@ export function EnterTimeTravelModal({
             className="mt-1 w-full rounded border border-border-strong bg-bg-surface px-2 py-1.5 text-[12px] text-text outline-none focus:border-accent"
           />
         </label>
+
+        {error && (
+          <div
+            role="alert"
+            className="mt-3 rounded-md border border-negative/40 bg-negative/10 px-3 py-2 text-[11px] text-negative"
+          >
+            {error}
+          </div>
+        )}
 
         <div className="mt-4 flex items-center justify-end gap-2">
           <button
@@ -127,8 +178,7 @@ export function EnterTimeTravelModal({
             ref={lastFocusRef}
             type="button"
             onClick={handleConfirm}
-            disabled={!isValidISO(date)}
-            className="rounded-md bg-accent px-3 py-1.5 text-[11px] font-semibold text-bg disabled:opacity-40 active:opacity-80"
+            className="rounded-md bg-accent px-3 py-1.5 text-[11px] font-semibold text-bg active:opacity-80"
           >
             Enter time-travel mode
           </button>
@@ -138,17 +188,7 @@ export function EnterTimeTravelModal({
   );
 }
 
-// Local re-exports (renamed for compatibility with existing usage
-// inside the file). The shared `parseISODate` + `isPastOrToday`
-// helpers in lib/dateInput.ts are the source of truth — see that
-// file for the silent-overwrite history + round-trip semantics.
+// Thin wrapper preserved for naming continuity within this file.
 function todayISO(): string {
   return todayISODate();
-}
-
-function isValidISO(s: string): boolean {
-  // Combined check: well-formed shape, parseable, NOT in future,
-  // AND not over-normalized (e.g. 2024-02-31). All four conditions
-  // live in the shared helper now.
-  return parseISODate(s) !== null && isPastOrToday(s);
 }
