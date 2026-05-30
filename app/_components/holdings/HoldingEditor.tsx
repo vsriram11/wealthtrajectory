@@ -98,6 +98,7 @@ function EditorBody({ holding, onClose }: { holding: Holding; onClose: () => voi
   const setHoldingAcquiredAt = useAppStore((s) => s.setHoldingAcquiredAt);
   const removeHolding = useAppStore((s) => s.removeHolding);
   const convertToLive = useAppStore((s) => s.convertHoldingToLive);
+  const convertToManual = useAppStore((s) => s.convertHoldingToManual);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [convertError, setConvertError] = useState<string | null>(null);
@@ -338,6 +339,30 @@ function EditorBody({ holding, onClose }: { holding: Holding; onClose: () => voi
                     {refreshError}
                   </div>
                 )}
+                {/* "Track manually" affordance — user-reported gap:
+                    once a holding was live, the only way to stop the
+                    auto-refresh was delete + re-add. Surfacing the
+                    inverse of the existing manual→live toggle lets
+                    users freeze a holding's value (price stops
+                    moving with the market) without the destructive
+                    workaround. The "your edit got overwritten on
+                    reload" complaint maps to this gap: the
+                    live-refresh keeps recomputing valueUSD = shares
+                    × livePrice every time the app loads. */}
+                <div className="flex items-center justify-between gap-2 border-t border-border/40 pt-2">
+                  <span className="text-text-dim leading-snug">
+                    Stop auto-refreshing — the current Value freezes
+                    and won&apos;t move with the market.
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => convertToManual(holding.id)}
+                    className="shrink-0 rounded-md border border-border-strong bg-bg-surface px-2.5 py-1 text-[11px] font-medium text-text-muted active:opacity-70"
+                    aria-label={`Stop auto-refresh for ${holding.symbol}; switch to manual tracking`}
+                  >
+                    Track manually
+                  </button>
+                </div>
               </div>
             )}
           </>

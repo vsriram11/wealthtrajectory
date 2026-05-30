@@ -156,11 +156,14 @@ export type LifecycleSliceContext = LifecycleSliceState &
     subscriptionCheckedAt: number | null;
     viewBasis: import("./uiTypes").ViewBasis;
     // Time-travel fields — included so the freshSlate spread of
-    // TIME_TRAVEL_SLICE_INITIAL type-checks.
+    // TIME_TRAVEL_SLICE_INITIAL type-checks AND so the hydrate
+    // paths can explicitly clear the session-scoped fields without
+    // an `as never` cast.
     timeTravelActive: boolean;
     timeTravelDate: string | null;
     baselineHousehold: Household | null;
     baselineAssumptions: Assumptions | null;
+    editingSnapshotT: number | null;
   };
 
 /**
@@ -323,6 +326,20 @@ export function createLifecycleSliceActions(
           healthImportanceWeights:
             healthImportanceWeights ?? s.healthImportanceWeights ?? {},
           selectedMemberId: pref,
+          // Defense-in-depth: explicitly clear time-travel session
+          // state on hydrate. Should already be at INITIAL values
+          // (false / null) because the slice constructor sets them,
+          // but if a future code path (Drive re-sync, manual
+          // setState during dev, etc.) ever leaves the flag on
+          // across an IDB rehydrate, we'd be locked in a session
+          // with a baseline pointing at the just-replaced household
+          // — meaning Exit would "restore" the user's freshly-
+          // loaded IDB state onto itself. Reset unconditionally.
+          timeTravelActive: false,
+          timeTravelDate: null,
+          baselineHousehold: null,
+          baselineAssumptions: null,
+          editingSnapshotT: null,
         };
       }),
 
@@ -384,6 +401,15 @@ export function createLifecycleSliceActions(
           googleConnected: s.googleConnected,
           subscription: s.subscription,
           subscriptionCheckedAt: s.subscriptionCheckedAt,
+          // Mirror hydrateFromPersisted's defensive reset of
+          // time-travel session state — a Drive payload re-import
+          // should never leave the user in a half-set time-travel
+          // session pointing at a now-stale baseline.
+          timeTravelActive: false,
+          timeTravelDate: null,
+          baselineHousehold: null,
+          baselineAssumptions: null,
+          editingSnapshotT: null,
         };
       }),
   };

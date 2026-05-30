@@ -64,6 +64,20 @@ export type HoldingsActions = {
     livePrice: number,
     pricedAt: number,
   ) => void;
+  /**
+   * Inverse of convertHoldingToLive: switch a live-priceable
+   * holding to manual price tracking, freezing its current dollar
+   * value. The user is saying "stop auto-refreshing this; I'll
+   * maintain it myself." The PriceRefresher loop honors
+   * `isManualPrice=true` and skips the holding from then on.
+   *
+   * UX motivation: previously the only way to stop a holding from
+   * live-updating was to delete + re-add it. A user editing
+   * historical values during time-travel had no way to make those
+   * values stick across reloads (the next live-refresh would
+   * overwrite shares × livePrice on whatever values IDB held).
+   */
+  convertHoldingToManual: (holdingId: HoldingId) => void;
   setHoldingStyleBox: (
     holdingId: HoldingId,
     styleBox: StyleBoxAllocation,
@@ -194,6 +208,17 @@ export function createHoldingsActions(
             isManualPrice: false,
             valueUSD: value,
           };
+        }),
+      ),
+
+    convertHoldingToManual: (id) =>
+      set((s) =>
+        mapHolding(s, id, (h) => {
+          if (!isLivePriceable(h)) return h;
+          // Just flip the manual flag — value, shares, lastPriceUSD
+          // are all preserved at whatever they are right now. The
+          // PriceRefresher will skip this holding from now on.
+          return { ...h, isManualPrice: true };
         }),
       ),
 

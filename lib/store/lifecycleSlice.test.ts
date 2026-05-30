@@ -77,6 +77,7 @@ function makeFakeStore(seed: Partial<LifecycleSliceContext> = {}) {
     timeTravelDate: null,
     baselineHousehold: null,
     baselineAssumptions: null,
+    editingSnapshotT: null,
     ...seed,
   };
   return {
