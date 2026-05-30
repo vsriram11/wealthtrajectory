@@ -143,37 +143,26 @@ export function reconstructHistory(
 ): HistoryPoint[] {
   let start = rangeStartMs(range, now);
   if (range === "ALL") {
-    // R7 audit: the ALL range previously recursed into "5Y" and
-    // filtered to the earliest QUOTE timestamp. Two bugs there:
-    //   (a) when no quotes existed (all-manual household), the
-    //       recursion was skipped and `start` stayed at 0 (Unix
-    //       epoch) — chart became a nonsensical 1970-onward sweep.
-    //   (b) when quotes existed older than 5y, the chart silently
-    //       capped at 5y but still labeled itself "ALL".
+    // User-reported semantic: "All" should show real recorded
+    // history, not CAGR-estimated back-projection. The
+    // pre-snapshot region is just synthesized from each holding's
+    // expected real CAGR — it's a guess, not data. Using
+    // earliest-snapshot as the start clamps the chart to what
+    // the user actually has snapshots for.
     //
-    // Fix: derive the earliest meaningful start from BOTH the
-    // quote earliest AND the oldest snapshot t; take the older of
-    // the two. Fall back to 5y if neither exists.
-    const earliestQuote = earliestQuoteTimestamp(quotes);
+    // When no snapshots exist (brand-new install / member with no
+    // recorded history), there's no "All" to show, so we fall
+    // back to a 1y window — the chart is still useful as a
+    // forecast-shape view rather than a "sweep from Unix epoch."
     const oldestSnapT = snapshots.reduce<number | null>(
       (acc, s) =>
         Number.isFinite(s.t) && (acc === null || s.t < acc) ? s.t : acc,
       null,
     );
-    let derivedStart: number | null = null;
-    if (earliestQuote != null && oldestSnapT != null) {
-      derivedStart = Math.min(earliestQuote, oldestSnapT);
-    } else if (earliestQuote != null) {
-      derivedStart = earliestQuote;
-    } else if (oldestSnapT != null) {
-      derivedStart = oldestSnapT;
-    }
-    if (derivedStart != null && derivedStart > 0 && derivedStart < now) {
-      start = derivedStart;
+    if (oldestSnapT != null && oldestSnapT > 0 && oldestSnapT < now) {
+      start = oldestSnapT;
     } else {
-      // No quotes, no snapshots — fall back to 5y so the chart
-      // still renders something instead of an epoch sweep.
-      start = rangeStartMs("5Y", now);
+      start = rangeStartMs("1Y", now);
     }
   }
 
