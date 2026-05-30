@@ -120,6 +120,32 @@ describe("EnterTimeTravelModal — date validation (audit fix UI#5)", () => {
       ).disabled,
     ).toBe(false);
   });
+
+  it("enables Confirm for TODAY's date even when current wall clock is BEFORE noon UTC (audit fix — user-reported button no-op)", () => {
+    // CRITICAL bug surfaced by user: "Pressing 'enter time travel
+    // mode' for snapshots does not work; button is a no-op."
+    // Root cause: isValidISO compared the parsed t (anchored to
+    // noon UTC) against Date.now() at moment-precision. For a
+    // user clicking the modal before noon UTC, today's default
+    // date parsed to today-noon-UTC which was IN THE FUTURE,
+    // returning false → Confirm permanently disabled → no-op.
+    // Fix: lexicographic date-string comparison against
+    // today's UTC date. Today is always valid.
+    vi.setSystemTime(new Date("2024-06-15T03:00:00Z")); // 3am UTC
+    const { rerender } = render(
+      <EnterTimeTravelModal open onClose={() => {}} />,
+    );
+    // Default input value is today (2024-06-15). Confirm must be
+    // enabled even though current wall clock is hours before noon.
+    const input = screen.getByLabelText(/Date to backdate to/i) as HTMLInputElement;
+    expect(input.value).toBe("2024-06-15");
+    expect(
+      (
+        screen.getByRole("button", { name: /Enter time-travel/i }) as HTMLButtonElement
+      ).disabled,
+    ).toBe(false);
+    rerender(<EnterTimeTravelModal open={false} onClose={() => {}} />);
+  });
 });
 
 describe("EnterTimeTravelModal — flow control", () => {

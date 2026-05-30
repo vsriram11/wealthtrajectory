@@ -92,11 +92,14 @@ consecutive cashflows. Useful for comparing your portfolio to a benchmark
 
 **Honest note on what this app computes:** WealthTrajectory records VALUE
 at each snapshot but does NOT record explicit deposits/withdrawals between
-snapshots. Without flow data, the chained-return product telescopes to
-plain CAGR (`V_end / V_start − 1`, annualized), so the "TWR" we surface
-is identical to CAGR. The label is intentional — when flow tracking is
-added in a future version, the TWR figure will diverge from CAGR by the
-contribution effect.
+snapshots — EXCEPT for real estate, where mortgage paydown is implicit in
+the `valueUSD` (equity) + `leverage` (gross-to-equity ratio) fields, and
+the app derives the implied capital-contribution stream. For stocks /
+bonds / cash / crypto, the chained-return product telescopes to plain
+CAGR (`V_end / V_start − 1`, annualized), so the "TWR" we surface for
+those classes is identical to CAGR. For real estate the per-property
+TWR (gross-price CAGR) genuinely diverges from MWR — see the Real Estate
+section below.
 
 ### Money-Weighted Return (MWR / IRR)
 The portfolio's return INCLUDING the effect of your cashflow timing —
@@ -106,11 +109,13 @@ Return: the discount rate that zeros the NPV of `{−deposits, +balance}`.
 MWR rewards adding money before a rally and penalizes adding before a
 downturn, even if the market performance was identical in both cases.
 
-**Honest note on what this app computes:** Same caveat as TWR — without
-recorded cashflows, MWR collapses to the same CAGR figure. The TWR vs.
-MWR distinction only becomes meaningful once per-flow data is captured;
-the current History view shows the CAGR they jointly collapse to,
-labeled as such.
+**Honest note on what this app computes:** Same caveat as TWR for
+stocks/bonds/cash/crypto — without recorded cashflows, MWR collapses
+to the same CAGR figure. For **real estate with a mortgage**, the app
+genuinely computes MWR (IRR) because the mortgage paydown trajectory
+is implicit in the equity + leverage fields and gives us the cashflow
+series. This is the canonical case where TWR ≠ MWR even without
+explicit transaction data: see the Real Estate section below.
 
 **Worked example of when they diverge** (for understanding the concept):
 Two investors each buy $10K of an index on day 1. Investor A holds.
@@ -122,6 +127,33 @@ MWR is HIGHER than A's because the timing of the extra $10K caught the
 rally. The TWR-vs-MWR gap is the value (or cost) of your contribution
 timing.
 
+### Real estate TWR vs. MWR (the canonical example)
+
+For a leveraged real estate position (mortgage > 0), TWR and MWR
+genuinely diverge — and we can compute both from snapshot data alone
+because the mortgage paydown is implicit in (equity × leverage = gross).
+
+**Worked example.** You buy a $500K house with $100K down ($400K
+mortgage, leverage = 5). 5 years later the house is worth $625K and
+you've paid down $50K of principal — equity is now $275K.
+
+  - **TWR (property)** = ($625K / $500K)^(1/5) − 1 ≈ **4.56%/yr**
+    — what the market did. This matches the local price index.
+
+  - **Equity CAGR** = ($275K / $100K)^(1/5) − 1 ≈ **22.4%/yr**
+    — MISLEADING. The "growth" partly reflects your own out-of-pocket
+    paydowns of $50K over 5 years; you can't actually earn 22.4% on
+    a property where the market only appreciated 4.6%.
+
+  - **MWR / IRR** ≈ **9-13%/yr** — the discount rate that makes the
+    NPV of your cashflows (down payment out, paydowns out, terminal
+    equity in) equal zero. Captures the real benefit of the
+    leveraged position without the spurious "equity CAGR" inflation.
+
+The History tab surfaces all three for every real-estate holding with
+a mortgage. For paid-off properties (leverage = 1, no paydown), all
+three collapse to the same CAGR.
+
 ### Max drawdown
 The largest peak-to-trough loss in a value series, expressed as a
 percentage of the peak. `max((peak_value − trough_value) / peak_value)`
@@ -129,6 +161,40 @@ across all (peak, later trough) pairs. A 30% max drawdown means the
 asset was once worth 30% less than its prior peak before recovering.
 Useful as a quick "how bad did it get?" risk measure that's independent
 of how the rest of the series looks.
+
+### AMT (Alternative Minimum Tax)
+A parallel federal income tax system that taxes a broader income base
+(AMTI) at a flatter 26%/28% rate, designed to prevent very high earners
+from zeroing out their federal income tax via preference items.
+
+**The mechanics (2025 numbers):**
+
+  1. **AMTI** = regular taxable income + AMT preferences (ISO bargain
+     element, private activity bond interest, certain depreciation
+     adjustments).
+  2. **Exemption** ($88,100 single / $137,000 MFJ / $68,500 MFS) is
+     subtracted from AMTI. Exemption phases out 25¢ per $1 of AMTI
+     above $626,350 single / $1,252,700 MFJ.
+  3. **AMTI excess** is taxed at **26%** up to a $239,100 breakpoint
+     (single/HoH/MFJ) and **28%** above. LTCG/QD portions of AMTI
+     keep their preferential 0/15/20% rates.
+  4. **TMT** (Tentative Minimum Tax) = total from step 3.
+  5. **AMT** = `max(0, TMT − regular_tax)`. You always owe at least TMT.
+
+Post-TCJA (2018+), AMT mostly only triggers for:
+  - **ISO bargain element**: exercising incentive stock options but
+    not selling in the same year. The exercise itself isn't a regular-
+    tax event, but AMT treats the spread (FMV − strike) as income.
+    The #1 real-world AMT trigger.
+  - **Private activity bond interest**: tax-exempt for regular tax,
+    added back for AMT.
+  - Pre-2018 itemized deduction add-backs (SALT, misc deductions)
+    are mostly capped/eliminated by TCJA, so this is rare now.
+
+The US Tax calculator on this app computes AMT including the 2025
+exemption + phase-out + brackets, and surfaces a "no AMT due — AMTI
+$X, exemption $Y" line when not triggered so users can see exactly
+where they stand.
 
 ### Inflation rate
 The user's assumed annual CPI rate, single source of truth for every

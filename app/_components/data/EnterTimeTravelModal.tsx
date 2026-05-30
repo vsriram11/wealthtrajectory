@@ -150,8 +150,15 @@ function isValidISO(s: string): boolean {
   if (!Number.isFinite(t)) return false;
   const roundtrip = new Date(t).toISOString().slice(0, 10);
   if (roundtrip !== s) return false;
-  // 3. Not in the future. The `max` attribute is a UI hint that
-  //    DevTools / keyboard entry can bypass — defense in depth.
-  if (t > Date.now()) return false;
+  // 3. Not in the future. CRITICAL: compare DATES not TIMESTAMPS —
+  //    the parsed t is anchored to noon UTC, and Date.now() is
+  //    wall clock. A user clicking before noon UTC would see
+  //    today's date parse to a future-noon, fail the gate, and
+  //    the Confirm button would silently stay disabled. Bug
+  //    surfaced by the user as "button is a no-op." Fix:
+  //    lexicographic date-string comparison against today's UTC
+  //    date. "Today" is always valid; "tomorrow" never is.
+  const todayUtc = new Date().toISOString().slice(0, 10);
+  if (s > todayUtc) return false;
   return true;
 }

@@ -13,6 +13,7 @@ import {
   type ClassReturnRow,
   type ClassSeries,
 } from "@/lib/portfolio/historicalReturns";
+import { summarizeAllRealEstate } from "@/lib/portfolio/realEstateReturns";
 import { formatPercent, formatUSD } from "@/lib/format";
 import {
   filterHousehold,
@@ -235,8 +236,118 @@ export function HistoryTab() {
 
       <PerClassTable rows={rows} buckets={buckets} />
       <TargetDriftCard snapshots={withHousehold} />
+      <RealEstateCard snapshots={withHousehold} />
       <Disclaimer />
     </section>
+  );
+}
+
+/**
+ * Real-estate per-property card — shows TWR (gross property
+ * CAGR), equity CAGR (often misleadingly high), and true IRR
+ * (money-weighted, accounting for mortgage paydown as ongoing
+ * capital contribution).
+ *
+ * Renders nothing when no real-estate holdings span the full
+ * snapshot window. When present, surfaces the TWR/MWR
+ * divergence that makes real estate the canonical real-world
+ * example of where these metrics differ — see Glossary for the
+ * conceptual story.
+ */
+function RealEstateCard({ snapshots }: { snapshots: Snapshot[] }) {
+  const rows = useMemo(() => summarizeAllRealEstate(snapshots), [snapshots]);
+  if (rows.length === 0) return null;
+
+  return (
+    <div className="rounded-2xl border border-border bg-bg-surface overflow-hidden">
+      <h2 className="px-4 pt-3 pb-1 text-xs font-medium uppercase tracking-wider text-text-muted">
+        Real estate returns
+      </h2>
+      <p className="px-4 pb-2 text-[11px] text-text-dim">
+        Property TWR (market) vs. equity IRR (your actual return,
+        including mortgage paydown).
+      </p>
+      <ul className="divide-y divide-border">
+        {rows.map((row) => (
+          <li key={row.holdingId} className="px-4 py-3">
+            <div className="flex items-baseline justify-between gap-2">
+              <span className="text-[13px] font-semibold">{row.name}</span>
+              <span className="num text-[12px] font-semibold">
+                {formatUSD(row.finalGross)} gross
+              </span>
+            </div>
+            <div className="mt-1 text-[11px] text-text-muted">
+              Equity {formatUSD(row.finalEquity)} ·{" "}
+              Mortgage {formatUSD(row.finalMortgage)} ·{" "}
+              Paid down {formatUSD(row.totalPaydown)}
+            </div>
+            <dl className="mt-2 grid grid-cols-3 gap-2 text-[11px]">
+              <div>
+                <dt className="text-text-dim uppercase tracking-wider">
+                  TWR (property)
+                </dt>
+                <dd
+                  className={`num font-semibold ${
+                    row.twrPctAnnual == null
+                      ? "text-text-muted"
+                      : row.twrPctAnnual >= 0
+                        ? "text-positive"
+                        : "text-negative"
+                  }`}
+                >
+                  {row.twrPctAnnual == null
+                    ? "—"
+                    : formatPercent(row.twrPctAnnual)}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-text-dim uppercase tracking-wider">
+                  IRR (you, MWR)
+                </dt>
+                <dd
+                  className={`num font-semibold ${
+                    row.irrPctAnnual == null
+                      ? "text-text-muted"
+                      : row.irrPctAnnual >= 0
+                        ? "text-positive"
+                        : "text-negative"
+                  }`}
+                >
+                  {row.irrPctAnnual == null
+                    ? "—"
+                    : formatPercent(row.irrPctAnnual)}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-text-dim uppercase tracking-wider">
+                  Equity CAGR*
+                </dt>
+                <dd
+                  className={`num font-semibold ${
+                    row.equityCAGRPctAnnual == null
+                      ? "text-text-muted"
+                      : row.equityCAGRPctAnnual >= 0
+                        ? "text-positive"
+                        : "text-negative"
+                  }`}
+                >
+                  {row.equityCAGRPctAnnual == null
+                    ? "—"
+                    : formatPercent(row.equityCAGRPctAnnual)}
+                </dd>
+              </div>
+            </dl>
+            {row.totalPaydown > 0 && (
+              <p className="mt-2 text-[10px] leading-snug text-text-dim">
+                *Equity CAGR ignores your paydown as capital
+                contribution and overstates return on leveraged
+                positions. IRR is the honest money-weighted answer.
+              </p>
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 

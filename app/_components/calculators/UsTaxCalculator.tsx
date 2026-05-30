@@ -88,6 +88,10 @@ export function UsTaxCalculator() {
   // null = use standard. The UI exposes a toggle + number field.
   const [useItemized, setUseItemized] = useState(false);
   const [itemizedDeductionUSD, setItemizedDeductionUSD] = useState<number>(0);
+  // AMT preference inputs — default 0 (rare; most users leave alone).
+  const [isoBargainElementUSD, setIsoBargainElementUSD] = useState<number>(0);
+  const [privateActivityBondInterestUSD, setPrivateActivityBondInterestUSD] =
+    useState<number>(0);
 
   const itemizedOrNull = useItemized ? itemizedDeductionUSD : null;
 
@@ -102,8 +106,18 @@ export function UsTaxCalculator() {
       income,
       retirementContribUSD,
       itemizedDeductionUSD: itemizedOrNull,
+      isoBargainElementUSD,
+      privateActivityBondInterestUSD,
     }),
-    [filingStatus, state, income, retirementContribUSD, itemizedOrNull],
+    [
+      filingStatus,
+      state,
+      income,
+      retirementContribUSD,
+      itemizedOrNull,
+      isoBargainElementUSD,
+      privateActivityBondInterestUSD,
+    ],
   );
 
   const result = useMemo(() => computeUsTax(inputs), [inputs]);
@@ -210,6 +224,20 @@ export function UsTaxCalculator() {
             onChange={setRetirementContribUSD}
             error={errors.retirementContribUSD}
             hint="Traditional 401(k) / IRA / HSA — reduces wages"
+          />
+          <NumField
+            label="ISO bargain element"
+            prefix="$"
+            value={isoBargainElementUSD}
+            onChange={setIsoBargainElementUSD}
+            hint="ISOs exercised but not sold this year (FMV − strike). The #1 AMT trigger."
+          />
+          <NumField
+            label="Private activity bond interest"
+            prefix="$"
+            value={privateActivityBondInterestUSD}
+            onChange={setPrivateActivityBondInterestUSD}
+            hint="Tax-exempt for regular tax, but adds back for AMT."
           />
           <div className="rounded-md border border-border bg-bg-surface px-3 py-2">
             <span className="block text-[10px] uppercase tracking-wider text-text-muted">
@@ -718,6 +746,26 @@ function taxComponents(result: ReturnType<typeof computeUsTax>): Array<{
       amount: result.federal.niitUSD,
       note: "On investment income above MAGI threshold",
       color: "bg-amber-400",
+    },
+    {
+      key: "amt",
+      label: "Alternative Minimum Tax (AMT)",
+      amount: result.federal.amtUSD,
+      // The note surfaces AMTI + exemption so a curious user
+      // can see WHY AMT is or isn't due. Shown even when
+      // amount=0 so the line stays visible (consistent with
+      // other zero-when-not-applicable lines like SE tax).
+      note:
+        result.federal.amtUSD > 0
+          ? `TMT $${Math.round(
+              result.federal.tmtUSD,
+            ).toLocaleString()} exceeds regular tax`
+          : `AMTI $${Math.round(
+              result.federal.amtiUSD,
+            ).toLocaleString()}, exemption $${Math.round(
+              result.federal.amtExemptionUSD,
+            ).toLocaleString()} — no AMT due`,
+      color: "bg-orange-400",
     },
     {
       key: "state",

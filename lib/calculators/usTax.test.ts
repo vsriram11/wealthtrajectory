@@ -26,6 +26,15 @@ const baseInputs = (overrides: Partial<UsTaxInputs> = {}): UsTaxInputs => ({
     ? { filingStatus: overrides.filingStatus }
     : {}),
   ...(overrides.state !== undefined ? { state: overrides.state } : {}),
+  // AMT preference inputs (back-compat optional, default 0).
+  ...(overrides.isoBargainElementUSD !== undefined
+    ? { isoBargainElementUSD: overrides.isoBargainElementUSD }
+    : {}),
+  ...(overrides.privateActivityBondInterestUSD !== undefined
+    ? {
+        privateActivityBondInterestUSD: overrides.privateActivityBondInterestUSD,
+      }
+    : {}),
 });
 
 describe("computeFederalTax — zero / boundary cases", () => {
@@ -739,5 +748,138 @@ describe("Round 7 audit regression — state tax engine fixes", () => {
         }
       }
     }
+  });
+});
+
+describe("computeFederalTax — AMT (Alternative Minimum Tax)", () => {
+  it("zero AMT for a middle-income single filer with no preference items (post-TCJA reality)", () => {
+    const r = computeFederalTax(
+      baseInputs({
+        income: { ...EMPTY_INCOME, wagesUSD: 100_000 },
+      }),
+    );
+    expect(r.amtUSD).toBe(0);
+    // AMTI = taxable ordinary + LTCG (= 100k - $15,750 std ded = ~$84,250).
+    expect(r.amtiUSD).toBeCloseTo(100_000 - STANDARD_DEDUCTION_2025.single, 0);
+    // Exemption at the full $88,100 (well below the phase-out threshold).
+    expect(r.amtExemptionUSD).toBe(88_100);
+    // TMT is 0 here because AMTI ($84,250) is below the exemption
+    // ($88,100) — AMTI excess is 0, no AMT due.
+    expect(r.tmtUSD).toBe(0);
+  });
+
+  it("zero AMT for a high-W2 single filer ($500k wages, no preferences)", () => {
+    // Even at $500k wages, regular tax >> TMT (no preference items
+    // → AMTI ≈ taxable, exemption mostly intact, TMT 26%/28% on a
+    // smallish base). Post-TCJA the SALT-cap-era AMT is rare here.
+    const r = computeFederalTax(
+      baseInputs({
+        income: { ...EMPTY_INCOME, wagesUSD: 500_000 },
+      }),
+    );
+    expect(r.amtUSD).toBe(0);
+  });
+
+  it("AMT triggers on ISO bargain element exposure (the #1 real-world trigger)", () => {
+    // Single filer, $150K wages + $400K ISO bargain element →
+    // AMTI ~= taxable + 400K, regular tax is computed only on
+    // the $150K wages (since ISO exercise without sale is NOT
+    // a regular-tax event), so TMT >> regular tax → real AMT.
+    const r = computeFederalTax(
+      baseInputs({
+        income: { ...EMPTY_INCOME, wagesUSD: 150_000 },
+        isoBargainElementUSD: 400_000,
+      }),
+    );
+    expect(r.amtUSD).toBeGreaterThan(0);
+    expect(r.amtiUSD).toBeGreaterThan(150_000 + 400_000 - 20_000);
+    // Total tax includes the AMT add-on.
+    expect(r.totalFederalTaxUSD).toBeGreaterThan(
+      r.ordinaryTaxUSD + r.ltcgTaxUSD + r.ficaSsUSD + r.ficaMedicareUSD,
+    );
+  });
+
+  it("AMT exemption phases out at high AMTI (very-high-income filer)", () => {
+    // MFJ couple with $2M of W2 + $500K ISO bargain → AMTI is
+    // well above the $1.252M phase-out threshold, exemption
+    // should be heavily reduced or zero.
+    const r = computeFederalTax(
+      baseInputs({
+        filingStatus: "mfj",
+        income: { ...EMPTY_INCOME, wagesUSD: 2_000_000 },
+        isoBargainElementUSD: 500_000,
+      }),
+    );
+    // Base MFJ exemption = $137,000. Phase-out starts at $1.252M.
+    // AMTI = ~$2M + $500K - std deduction = ~$2.47M (above
+    // threshold by ~$1.21M; phase-out reduces exemption by
+    // 25% of that ≈ $303K → exemption is fully zeroed).
+    expect(r.amtExemptionUSD).toBe(0);
+  });
+
+  it("private activity bond interest adds to AMTI even when tax-exempt for regular tax", () => {
+    // Tax-exempt PAB interest is the second-most-common AMT
+    // preference. Regular tax treats it as $0 income; AMT
+    // adds it back.
+    const baseline = computeFederalTax(
+      baseInputs({
+        income: { ...EMPTY_INCOME, wagesUSD: 200_000 },
+      }),
+    );
+    const withPAB = computeFederalTax(
+      baseInputs({
+        income: { ...EMPTY_INCOME, wagesUSD: 200_000 },
+        privateActivityBondInterestUSD: 100_000,
+      }),
+    );
+    // Regular tax doesn't change (PAB interest still tax-exempt
+    // for regular tax). AMTI does change.
+    expect(withPAB.ordinaryTaxUSD).toBe(baseline.ordinaryTaxUSD);
+    expect(withPAB.amtiUSD).toBeGreaterThan(baseline.amtiUSD);
+  });
+
+  it("AMT exposure on ISO exercise scales roughly with the bargain element size", () => {
+    // Property-style sanity check: as ISO bargain element grows,
+    // AMT exposure grows monotonically (or stays flat at 0).
+    const variants = [0, 100_000, 300_000, 500_000].map((iso) =>
+      computeFederalTax(
+        baseInputs({
+          income: { ...EMPTY_INCOME, wagesUSD: 200_000 },
+          isoBargainElementUSD: iso,
+        }),
+      ),
+    );
+    for (let i = 1; i < variants.length; i++) {
+      expect(variants[i].amtUSD).toBeGreaterThanOrEqual(
+        variants[i - 1].amtUSD,
+      );
+    }
+  });
+
+  it("LTCG portion of AMTI keeps preferential rate (no 26/28% on LTCG)", () => {
+    // Single filer: $50K wages + $200K LTCG (no preferences).
+    // Regular tax: ordinary on $50K - $15.75K std ded; LTCG at 15%.
+    // AMT: AMTI excess includes the LTCG, but LTCG taxed at 15%
+    // not 26/28%. With $200K LTCG, TMT(LTCG portion) ≈ $30K
+    // which roughly matches regular LTCG tax → no AMT.
+    const r = computeFederalTax(
+      baseInputs({
+        income: { ...EMPTY_INCOME, wagesUSD: 50_000, longTermCapGainsUSD: 200_000 },
+      }),
+    );
+    // Regular LTCG tax (most of LTCG at 15%) and TMT-LTCG (also
+    // 15%) match closely; AMT should be near zero.
+    expect(r.amtUSD).toBeLessThan(5000);
+  });
+
+  it("AMT inputs are back-compat optional — callers omitting them get isoBargainElement=0", () => {
+    // Existing callers (before the AMT feature) don't pass the
+    // new ISO / PAB fields. They must still produce a valid
+    // result with AMT = 0 and no NaN propagation.
+    const r = computeFederalTax(
+      baseInputs({ income: { ...EMPTY_INCOME, wagesUSD: 150_000 } }),
+    );
+    expect(r.amtUSD).toBe(0);
+    expect(Number.isFinite(r.totalFederalTaxUSD)).toBe(true);
   });
 });
