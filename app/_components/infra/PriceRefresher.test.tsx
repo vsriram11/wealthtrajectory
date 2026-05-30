@@ -127,6 +127,63 @@ describe("PriceRefresher — time-travel gate (user-reported UX fix)", () => {
     }
   });
 
+  it("records 'applied' outcome via recordTimeTravelPriceOutcome (status surfaced in banner)", async () => {
+    const recordSpy = vi.spyOn(
+      useAppStore.getState(),
+      "recordTimeTravelPriceOutcome",
+    );
+    useAppStore.setState({
+      timeTravelActive: true,
+      timeTravelDate: "2020-01-15",
+    });
+    render(<PriceRefresher />);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    // At least one "applied" outcome recorded for the holding's
+    // symbol. PriceRefresher surfaces these via the slice so the
+    // banner can render "X auto-filled, Y need manual entry."
+    expect(
+      recordSpy.mock.calls.some((c) => c[1] === "applied"),
+    ).toBe(true);
+    recordSpy.mockRestore();
+  });
+
+  it("records 'clamped' outcome when historical data is unavailable for the date (manual-entry surfacing)", async () => {
+    priceAtDetailedMock.mockReturnValueOnce({ price: 80, clamped: true });
+    const recordSpy = vi.spyOn(
+      useAppStore.getState(),
+      "recordTimeTravelPriceOutcome",
+    );
+    useAppStore.setState({
+      timeTravelActive: true,
+      timeTravelDate: "2005-01-01",
+    });
+    render(<PriceRefresher />);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(
+      recordSpy.mock.calls.some((c) => c[1] === "clamped"),
+    ).toBe(true);
+    expect(applyLivePriceMock).not.toHaveBeenCalled();
+    recordSpy.mockRestore();
+  });
+
+  it("records 'failed' outcome when getQuote returns null (upstream failure)", async () => {
+    getQuoteMock.mockResolvedValueOnce(null as never);
+    const recordSpy = vi.spyOn(
+      useAppStore.getState(),
+      "recordTimeTravelPriceOutcome",
+    );
+    useAppStore.setState({
+      timeTravelActive: true,
+      timeTravelDate: "2020-01-15",
+    });
+    render(<PriceRefresher />);
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(
+      recordSpy.mock.calls.some((c) => c[1] === "failed"),
+    ).toBe(true);
+    recordSpy.mockRestore();
+  });
+
   it("historical path SKIPS clamped results (round-5 audit BLOCK fix)", async () => {
     // When priceAtDetailed returns clamped: true (backdate older
     // than the available history window), the historical apply

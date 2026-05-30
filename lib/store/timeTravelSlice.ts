@@ -43,6 +43,40 @@ export type TimeTravelSliceState = {
   baselineHousehold: Household | null;
   /** Deep copy of assumptions at session entry. Null when inactive. */
   baselineAssumptions: Assumptions | null;
+  /**
+   * Status of the historical-price auto-fill, surfaced in the
+   * TimeTravelBanner so the user knows which holdings got
+   * auto-filled vs which need manual entry.
+   *
+   * Yahoo Finance / Finnhub historical fetch is best-effort —
+   * it can fail for many reasons:
+   *   - Symbol not covered by upstream APIs (private equity,
+   *     thinly-traded stocks, foreign tickers without ADRs)
+   *   - Date older than the available history window
+   *   - Upstream rate limits / outages
+   *   - Network failure
+   *
+   * Manual entry is the load-bearing path; auto-fill is a
+   * convenience layer on top. The status fields make the
+   * auto-fill outcome VISIBLE so users know whether to expect
+   * pre-populated values or to fill them in themselves.
+   */
+  timeTravelPriceStatus: {
+    /** Symbols that successfully received historical prices. */
+    appliedSymbols: string[];
+    /**
+     * Symbols where the fetch returned a result outside the
+     * available history window (clamped to the oldest / newest
+     * sample). The historical-price flow SKIPS these so we
+     * don't silently apply wrong prices.
+     */
+    clampedSymbols: string[];
+    /**
+     * Symbols where getQuote returned null OR a non-finite
+     * price (upstream failure, unavailable symbol, etc).
+     */
+    failedSymbols: string[];
+  };
 };
 
 export type TimeTravelSliceActions = {
@@ -63,6 +97,16 @@ export type TimeTravelSliceActions = {
    * then calls this to atomically wipe edits.
    */
   exitTimeTravelDiscard: () => void;
+  /**
+   * Record the outcome of a historical-price fetch attempt for
+   * a single symbol. Called by PriceRefresher's historical-mode
+   * effect. The TimeTravelBanner reads these flags to surface
+   * "auto-filled: 3 / needs manual: 5" status to the user.
+   */
+  recordTimeTravelPriceOutcome: (
+    symbol: string,
+    outcome: "applied" | "clamped" | "failed",
+  ) => void;
 };
 
 export const TIME_TRAVEL_SLICE_INITIAL: TimeTravelSliceState = {
@@ -70,6 +114,11 @@ export const TIME_TRAVEL_SLICE_INITIAL: TimeTravelSliceState = {
   timeTravelDate: null,
   baselineHousehold: null,
   baselineAssumptions: null,
+  timeTravelPriceStatus: {
+    appliedSymbols: [],
+    clampedSymbols: [],
+    failedSymbols: [],
+  },
 };
 
 /**
@@ -129,6 +178,13 @@ export function createTimeTravelSliceActions(
           timeTravelDate: date,
           baselineHousehold: s.household,
           baselineAssumptions: s.assumptions,
+          // Reset status on entry — historical-price flow will
+          // populate it as fetches complete.
+          timeTravelPriceStatus: {
+            appliedSymbols: [],
+            clampedSymbols: [],
+            failedSymbols: [],
+          },
         };
       }),
     exitTimeTravelDiscard: () =>
@@ -147,7 +203,38 @@ export function createTimeTravelSliceActions(
           baselineAssumptions: null,
           household: restoredHousehold,
           assumptions: restoredAssumptions,
+          // Clear the price-status bookkeeping too — it's
+          // session-scoped and shouldn't bleed across sessions.
+          timeTravelPriceStatus: {
+            appliedSymbols: [],
+            clampedSymbols: [],
+            failedSymbols: [],
+          },
         };
+      }),
+    recordTimeTravelPriceOutcome: (symbol, outcome) =>
+      set((s) => {
+        if (!s.timeTravelActive) return {};
+        const sym = symbol.toUpperCase();
+        const cur = s.timeTravelPriceStatus;
+        // De-dup: only add to the list for this outcome if the
+        // symbol isn't already there. A symbol can move BETWEEN
+        // lists (e.g. failed → applied on retry) so we remove
+        // from the other two lists first.
+        const without = (arr: string[]) => arr.filter((x) => x !== sym);
+        const next = {
+          appliedSymbols: without(cur.appliedSymbols),
+          clampedSymbols: without(cur.clampedSymbols),
+          failedSymbols: without(cur.failedSymbols),
+        };
+        next[
+          outcome === "applied"
+            ? "appliedSymbols"
+            : outcome === "clamped"
+              ? "clampedSymbols"
+              : "failedSymbols"
+        ].push(sym);
+        return { timeTravelPriceStatus: next };
       }),
   };
 }

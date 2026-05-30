@@ -38,6 +38,9 @@ export function PriceRefresher() {
   // values to whatever the user enters is the correct UX.
   const timeTravelActive = useAppStore((s) => s.timeTravelActive);
   const timeTravelDate = useAppStore((s) => s.timeTravelDate);
+  const recordTimeTravelPriceOutcome = useAppStore(
+    (s) => s.recordTimeTravelPriceOutcome,
+  );
 
   // Track per-holding identity (not just the unique symbol set) so
   // adding a SECOND VOO doesn't skip the refresh — the previous
@@ -148,23 +151,47 @@ export function PriceRefresher() {
         if (lastWasNetwork) await sleep(NETWORK_SPACING_MS);
         const t0 =
           typeof performance !== "undefined" ? performance.now() : Date.now();
-        const q = await getQuote(s);
+        // Pass range="max" so the upstream returns full available
+        // history (often 20+ years from Yahoo) — covers backdates
+        // older than 5 years. Cached server-side per Vercel
+        // instance.
+        const q = await getQuote(s, { range: "max" });
         const elapsed =
           (typeof performance !== "undefined"
             ? performance.now()
             : Date.now()) - t0;
         lastWasNetwork = elapsed > NETWORK_THRESHOLD_MS;
-        if (cancelled || !q) continue;
+        if (cancelled) continue;
         if (!useAppStore.getState().timeTravelActive) return;
+        // Record outcome regardless of branch so the
+        // TimeTravelBanner can surface a "needs manual entry"
+        // count for symbols that failed or fell outside the
+        // history window. User explicitly asked: "make sure the
+        // fallback of manual entry is clear from a UX and
+        // engineering standpoint." Auto-fill is best-effort;
+        // manual entry is the load-bearing path.
+        if (!q) {
+          recordTimeTravelPriceOutcome(s, "failed");
+          continue;
+        }
         const r = priceAtDetailed(q, targetMs);
-        // Skip clamped results — they're the silent fallback to the
-        // oldest sample in the 5y window. For backdates older than
-        // the available history, surfacing a clamp would be
-        // misleading. Round-5 audit BLOCK.
-        if (r === null || r.clamped) continue;
+        if (r === null) {
+          recordTimeTravelPriceOutcome(s, "failed");
+          continue;
+        }
+        if (r.clamped) {
+          // Out of available history window. Don't apply (would
+          // silently use the oldest available sample as if it
+          // were the target-date price). Mark for manual entry.
+          recordTimeTravelPriceOutcome(s, "clamped");
+          continue;
+        }
         if (r.price > 0) {
           applyLivePrice(s, r.price, targetMs, "historical");
           appliedSymbols.current.add(s);
+          recordTimeTravelPriceOutcome(s, "applied");
+        } else {
+          recordTimeTravelPriceOutcome(s, "failed");
         }
       }
     })();
@@ -172,7 +199,13 @@ export function PriceRefresher() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [timeTravelActive, timeTravelDate, holdingsKey, applyLivePrice]);
+  }, [
+    timeTravelActive,
+    timeTravelDate,
+    holdingsKey,
+    applyLivePrice,
+    recordTimeTravelPriceOutcome,
+  ]);
 
   return null;
 }

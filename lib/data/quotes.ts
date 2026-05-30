@@ -56,13 +56,45 @@ function isUsableQuote(q: Quote | null | undefined): q is Quote {
   return !!q && q.currentPrice > 0 && !q.unavailable;
 }
 
-export async function getQuote(symbolRaw: string): Promise<Quote | null> {
+export type GetQuoteOptions = {
+  /**
+   * "5y" (default) requests the standard 5-year daily history.
+   * "max" fetches the full available history (Yahoo: symbol
+   * inception, often 20-40+ years; Finnhub: 30y). Used by
+   * time-travel mode for backdates older than 5 years ago.
+   *
+   * Cache behavior: a "max" fetch overwrites the cached entry
+   * for that symbol (max is a strict superset of 5y, so all
+   * subsequent reads benefit). The cache key is unchanged.
+   */
+  range?: "5y" | "max";
+};
+
+export async function getQuote(
+  symbolRaw: string,
+  opts: GetQuoteOptions = {},
+): Promise<Quote | null> {
   const symbol = symbolRaw.trim().toUpperCase();
   if (!symbol) return null;
+  const wantMax = opts.range === "max";
+
+  // Cache hit acceptance: if caller wants "max" but the cached
+  // history covers only ~5y, we should refetch. Use the cached
+  // history span as the proxy for "what range did we last
+  // fetch." If the oldest point is < 6 years ago AND wantMax,
+  // bypass cache to upgrade to a wider window.
+  const SIX_YEARS_MS = 6 * 365 * 24 * 60 * 60 * 1000;
+  const cacheCoversMax = (q: Quote): boolean => {
+    if (!wantMax) return true;
+    if (q.history.length === 0) return false;
+    return Date.now() - q.history[0].t > SIX_YEARS_MS;
+  };
+
   const fromMem = memCache.get(symbol);
   if (
     isUsableQuote(fromMem) &&
-    Date.now() - fromMem.fetchedAt < TTL_MS
+    Date.now() - fromMem.fetchedAt < TTL_MS &&
+    cacheCoversMax(fromMem)
   ) {
     return fromMem;
   }
@@ -70,28 +102,30 @@ export async function getQuote(symbolRaw: string): Promise<Quote | null> {
   const cached = await readCache(symbol);
   if (
     isUsableQuote(cached) &&
-    Date.now() - cached.fetchedAt < TTL_MS
+    Date.now() - cached.fetchedAt < TTL_MS &&
+    cacheCoversMax(cached)
   ) {
     memCache.set(symbol, cached);
     return cached;
   }
 
-  if (inflight.has(symbol)) return inflight.get(symbol)!;
-  const promise = fetchFresh(symbol).finally(() => inflight.delete(symbol));
-  inflight.set(symbol, promise);
+  // Inflight dedup keyed by (symbol, range) — two callers
+  // requesting different ranges simultaneously shouldn't
+  // cross-pollute.
+  const inflightKey = wantMax ? `${symbol}:max` : symbol;
+  if (inflight.has(inflightKey)) return inflight.get(inflightKey)!;
+  const promise = fetchFresh(symbol, opts).finally(() =>
+    inflight.delete(inflightKey),
+  );
+  inflight.set(inflightKey, promise);
   const fresh = await promise;
   if (fresh) {
-    // Only persist a quote that actually contains a real price.
-    // Caching zero / unavailable would poison subsequent reads.
     if (isUsableQuote(fresh)) {
       memCache.set(symbol, fresh);
       void writeCache(symbol, fresh);
     }
     return fresh;
   }
-  // Last-resort: a cached quote we previously decided was stale. Still
-  // better than nothing for the caller to display, but we don't
-  // re-warm memCache with it.
   if (cached) return cached;
   return null;
 }
@@ -106,9 +140,13 @@ export async function getCachedQuote(symbolRaw: string): Promise<Quote | null> {
   return cached;
 }
 
-async function fetchFresh(symbol: string): Promise<Quote | null> {
+async function fetchFresh(
+  symbol: string,
+  opts: GetQuoteOptions = {},
+): Promise<Quote | null> {
   try {
-    const res = await fetch(`/api/quote/${encodeURIComponent(symbol)}`);
+    const qs = opts.range === "max" ? "?range=max" : "";
+    const res = await fetch(`/api/quote/${encodeURIComponent(symbol)}${qs}`);
     if (!res.ok) return null;
     const data = (await res.json()) as Omit<Quote, "fetchedAt"> & {
       asOf?: number;

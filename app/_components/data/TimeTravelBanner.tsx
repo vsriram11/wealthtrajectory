@@ -34,6 +34,11 @@ export function TimeTravelBanner() {
   const household = useAppStore((s) => s.household);
   const exitTimeTravelDiscard = useAppStore((s) => s.exitTimeTravelDiscard);
   const bumpSnapshotsRevision = useAppStore((s) => s.bumpSnapshotsRevision);
+  // Auto-fill status — surfaced inline so the user knows which
+  // holdings got historical prices vs which need manual entry.
+  // User explicitly asked: "make sure the fallback of manual
+  // entry is clear from a UX and engineering standpoint."
+  const priceStatus = useAppStore((s) => s.timeTravelPriceStatus);
 
   const [busy, setBusy] = useState(false);
   const [savedFlash, setSavedFlash] = useState(false);
@@ -198,6 +203,7 @@ export function TimeTravelBanner() {
             {date}
           </span>{" "}
           — live data is not being saved.
+          <PriceStatusLine priceStatus={priceStatus} />
         </div>
         <div className="flex items-center gap-1.5">
           {pendingOverwrite ? (
@@ -265,6 +271,77 @@ export function TimeTravelBanner() {
           )}
         </div>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Renders the historical-price auto-fill status. Hidden while
+ * the lists are all empty (initial mount; non-tickered household).
+ *
+ * Three counts:
+ *   - applied: holdings auto-filled to their historical price
+ *     from the backdate's closing price.
+ *   - manual: holdings where historical data is unavailable
+ *     (out of window, upstream failure, untickered) — the user
+ *     must enter the value manually. Bundled `clamped + failed`
+ *     because the UX is the same: edit it yourself.
+ *
+ * This is the load-bearing UX surface for the "manual entry is
+ * the fallback" semantic. Without it, the user would have no
+ * idea which holdings need editing — they'd see today's prices
+ * everywhere and assume the auto-fill worked silently.
+ */
+function PriceStatusLine({
+  priceStatus,
+}: {
+  priceStatus: {
+    appliedSymbols: string[];
+    clampedSymbols: string[];
+    failedSymbols: string[];
+  };
+}) {
+  const applied = priceStatus.appliedSymbols.length;
+  const needsManual =
+    priceStatus.clampedSymbols.length + priceStatus.failedSymbols.length;
+  if (applied === 0 && needsManual === 0) return null;
+  return (
+    <div className="mt-1 text-[11px] font-normal text-bg/90">
+      {applied > 0 && (
+        <span>
+          ✓ {applied} ticker{applied === 1 ? "" : "s"} auto-filled to{" "}
+          {priceStatus.appliedSymbols[0]
+            ? priceStatus.appliedSymbols.join(", ")
+            : ""}{" "}
+          historical close.
+        </span>
+      )}
+      {needsManual > 0 && (
+        <span className="ml-1 font-semibold">
+          {applied > 0 ? " " : ""}
+          ✏ Edit{" "}
+          {needsManual} holding{needsManual === 1 ? "" : "s"}{" "}
+          manually
+          {priceStatus.clampedSymbols.length > 0 && (
+            <span className="font-normal">
+              {" "}
+              (historical data unavailable for{" "}
+              {priceStatus.clampedSymbols.slice(0, 3).join(", ")}
+              {priceStatus.clampedSymbols.length > 3 ? "…" : ""})
+            </span>
+          )}
+          {priceStatus.failedSymbols.length > 0 &&
+            priceStatus.clampedSymbols.length === 0 && (
+              <span className="font-normal">
+                {" "}
+                (price lookup failed for{" "}
+                {priceStatus.failedSymbols.slice(0, 3).join(", ")}
+                {priceStatus.failedSymbols.length > 3 ? "…" : ""})
+              </span>
+            )}
+          .
+        </span>
+      )}
     </div>
   );
 }

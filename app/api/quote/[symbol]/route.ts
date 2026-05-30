@@ -60,18 +60,26 @@ function lruSet(symbol: string, value: ParsedQuote): void {
 
 type RouteParams = { params: Promise<{ symbol: string }> };
 
-export async function GET(_req: NextRequest, { params }: RouteParams) {
+export async function GET(req: NextRequest, { params }: RouteParams) {
   const { symbol: raw } = await params;
   const symbol = raw.toUpperCase().slice(0, 12);
   if (!/^[A-Z0-9.\-^]+$/.test(symbol)) {
     return json({ error: "invalid symbol" }, 400);
   }
 
-  let parsed = await tryFinnhub(symbol);
+  // Optional ?range=max query: fetch the maximum available
+  // history from upstream instead of the default 5 years. Used
+  // by the time-travel mode's historical-price flow when the
+  // user backdates to a date older than 5 years ago. The wider
+  // payload is ~3-10x larger but caches identically (per-symbol
+  // LRU + IDB), so subsequent requests pay nothing extra.
+  const range = req.nextUrl.searchParams.get("range") === "max" ? "max" : "5y";
+
+  let parsed = await tryFinnhub(symbol, range);
   let source = "finnhub";
 
   if (!parsed) {
-    parsed = await tryYahoo(symbol);
+    parsed = await tryYahoo(symbol, range);
     if (parsed) source = "yahoo";
   }
 
@@ -158,7 +166,10 @@ type ParsedQuote = {
   history: Array<{ t: number; p: number }>;
 };
 
-async function tryFinnhub(symbol: string): Promise<ParsedQuote | null> {
+async function tryFinnhub(
+  symbol: string,
+  range: "5y" | "max" = "5y",
+): Promise<ParsedQuote | null> {
   const key = process.env.FINNHUB_API_KEY;
   if (!key) return null;
   // Per-instance rate limit safety belt: pretend the call failed if
@@ -210,9 +221,17 @@ async function tryFinnhub(symbol: string): Promise<ParsedQuote | null> {
     if (canCallFinnhub()) {
       recordFinnhubCall();
       const now = Math.floor(Date.now() / 1000);
-      const fiveYrAgo = now - 5 * 365 * 24 * 60 * 60;
+      // Finnhub historical candles: 5y default; for range="max"
+      // we request 30y (Finnhub's free tier caps at varying
+      // depths per symbol, but 30y covers most public-equity
+      // inception dates that ordinary users care about).
+      const fromOffsetSec =
+        range === "max"
+          ? 30 * 365 * 24 * 60 * 60
+          : 5 * 365 * 24 * 60 * 60;
+      const fromTs = now - fromOffsetSec;
       const candleRes = await fetch(
-        `https://finnhub.io/api/v1/stock/candle?symbol=${enc}&resolution=D&from=${fiveYrAgo}&to=${now}&token=${key}`,
+        `https://finnhub.io/api/v1/stock/candle?symbol=${enc}&resolution=D&from=${fromTs}&to=${now}&token=${key}`,
         { next: { revalidate: 86400 } },
       );
       if (candleRes.ok) {
@@ -245,8 +264,15 @@ async function tryFinnhub(symbol: string): Promise<ParsedQuote | null> {
   };
 }
 
-async function tryYahoo(symbol: string): Promise<ParsedQuote | null> {
-  const path = `/v8/finance/chart/${encodeURIComponent(symbol)}?range=5y&interval=1d&includePrePost=false`;
+async function tryYahoo(
+  symbol: string,
+  range: "5y" | "max" = "5y",
+): Promise<ParsedQuote | null> {
+  // Yahoo's range=max goes back to symbol inception (often
+  // 20-40+ years for major equities). Default 5y for live
+  // refresh; max for time-travel sessions.
+  const yahooRange = range === "max" ? "max" : "5y";
+  const path = `/v8/finance/chart/${encodeURIComponent(symbol)}?range=${yahooRange}&interval=1d&includePrePost=false`;
   for (const host of HOSTS) {
     for (const ua of UA_VARIATIONS) {
       try {

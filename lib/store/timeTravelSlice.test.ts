@@ -201,6 +201,60 @@ describe("Time-travel slice — exitTimeTravelDiscard", () => {
   });
 });
 
+describe("Time-travel slice — recordTimeTravelPriceOutcome (manual-entry surfacing)", () => {
+  it("records applied / clamped / failed outcomes into the right buckets", () => {
+    const s = makeFakeStore({ mode: "real" });
+    const a = createTimeTravelSliceActions(s.set);
+    a.enterTimeTravel("2020-01-01");
+    a.recordTimeTravelPriceOutcome("VOO", "applied");
+    a.recordTimeTravelPriceOutcome("BTC-USD", "clamped");
+    a.recordTimeTravelPriceOutcome("PRIVATE", "failed");
+    expect(s.state.timeTravelPriceStatus.appliedSymbols).toEqual(["VOO"]);
+    expect(s.state.timeTravelPriceStatus.clampedSymbols).toEqual(["BTC-USD"]);
+    expect(s.state.timeTravelPriceStatus.failedSymbols).toEqual(["PRIVATE"]);
+  });
+
+  it("de-duplicates: a symbol that moves outcomes only appears in the latest bucket", () => {
+    const s = makeFakeStore({ mode: "real" });
+    const a = createTimeTravelSliceActions(s.set);
+    a.enterTimeTravel("2020-01-01");
+    a.recordTimeTravelPriceOutcome("VOO", "failed");
+    a.recordTimeTravelPriceOutcome("VOO", "applied"); // retry succeeds
+    expect(s.state.timeTravelPriceStatus.appliedSymbols).toEqual(["VOO"]);
+    expect(s.state.timeTravelPriceStatus.failedSymbols).toEqual([]);
+  });
+
+  it("clears status on enter (fresh session)", () => {
+    const s = makeFakeStore({ mode: "real" });
+    s.set(() => ({
+      timeTravelPriceStatus: {
+        appliedSymbols: ["STALE"],
+        clampedSymbols: [],
+        failedSymbols: [],
+      },
+    }));
+    const a = createTimeTravelSliceActions(s.set);
+    a.enterTimeTravel("2020-01-01");
+    expect(s.state.timeTravelPriceStatus.appliedSymbols).toEqual([]);
+  });
+
+  it("clears status on exit (no bleed across sessions)", () => {
+    const s = makeFakeStore({ mode: "real" });
+    const a = createTimeTravelSliceActions(s.set);
+    a.enterTimeTravel("2020-01-01");
+    a.recordTimeTravelPriceOutcome("VOO", "applied");
+    a.exitTimeTravelDiscard();
+    expect(s.state.timeTravelPriceStatus.appliedSymbols).toEqual([]);
+  });
+
+  it("no-ops when called outside an active session", () => {
+    const s = makeFakeStore({ mode: "real" });
+    const a = createTimeTravelSliceActions(s.set);
+    a.recordTimeTravelPriceOutcome("VOO", "applied");
+    expect(s.state.timeTravelPriceStatus.appliedSymbols).toEqual([]);
+  });
+});
+
 describe("Time-travel slice — mode behavior (user-reported no-op fix)", () => {
   it("allows enterTimeTravel regardless of mode (slice gate removed — UI gate is load-bearing)", () => {
     // The previous slice-level mode==="real" gate caused a
