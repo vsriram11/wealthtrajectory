@@ -30,10 +30,18 @@ on:
     - cron: "0 9 1 * *"
   workflow_dispatch:
 
-# Avoid two refresh runs racing each other.
+# Avoid two refresh runs racing each other. cancel-in-progress is
+# explicitly FALSE — a new run waits for the in-flight one to
+# finish rather than killing it. Mid-run kill would publish a
+# partial shard set without updating the manifest (the shards
+# upload before the manifest swap), but since we use VERSIONED
+# paths the inconsistency is bounded to "unused versioned files
+# linger in Blob storage until cleanup" — readers stay consistent
+# via the still-pointing-at-old-version manifest. Better to let
+# the run complete and wait.
 concurrency:
   group: refresh-quote-history
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   refresh:

@@ -123,6 +123,10 @@ async function getYahooSession(
 const STATIC_CACHE_TTL_MS = 60 * 60 * 1000; // 1h
 type ManifestCache = { manifest: HistoryManifest; fetchedAt: number };
 let manifestCache: ManifestCache | null = null;
+// Single-flight guard: concurrent requests to load the manifest
+// share one in-flight fetch instead of racing N parallel fetches
+// against the Blob CDN (Vercel-Blob counts these as billable ops).
+let manifestInflight: Promise<HistoryManifest | null> | null = null;
 
 async function loadManifest(): Promise<HistoryManifest | null> {
   const manifestUrl = process.env.NEXT_PUBLIC_QUOTE_HISTORY_MANIFEST;
@@ -133,27 +137,38 @@ async function loadManifest(): Promise<HistoryManifest | null> {
   ) {
     return manifestCache.manifest;
   }
-  try {
-    const res = await fetch(manifestUrl, {
-      next: { revalidate: 86400 },
-    });
-    if (!res.ok) return null;
-    const manifest = (await res.json()) as HistoryManifest;
-    if (
-      !manifest ||
-      !Array.isArray(manifest.shards) ||
-      manifest.numShards !== NUM_HISTORY_SHARDS
-    ) {
+  if (manifestInflight) return manifestInflight;
+  manifestInflight = (async () => {
+    try {
+      const res = await fetch(manifestUrl, {
+        next: { revalidate: 86400 },
+      });
+      if (!res.ok) return null;
+      const manifest = (await res.json()) as HistoryManifest;
+      if (
+        !manifest ||
+        !Array.isArray(manifest.shards) ||
+        manifest.numShards !== NUM_HISTORY_SHARDS ||
+        typeof manifest.generatedAt !== "number"
+      ) {
+        return null;
+      }
+      manifestCache = { manifest, fetchedAt: Date.now() };
+      return manifest;
+    } catch {
       return null;
+    } finally {
+      manifestInflight = null;
     }
-    manifestCache = { manifest, fetchedAt: Date.now() };
-    return manifest;
-  } catch {
-    return null;
-  }
+  })();
+  return manifestInflight;
 }
 
 const shardCache = new Map<number, { payload: ShardPayload; fetchedAt: number }>();
+// Per-shard single-flight guard — same logic as manifestInflight,
+// scoped per shard so unrelated shard requests can still proceed
+// concurrently.
+const shardInflight = new Map<number, Promise<ShardPayload | null>>();
 
 async function loadShard(
   manifest: HistoryManifest,
@@ -163,24 +178,97 @@ async function loadShard(
   if (cached && Date.now() - cached.fetchedAt < STATIC_CACHE_TTL_MS) {
     return cached.payload;
   }
+  const existing = shardInflight.get(shardIdx);
+  if (existing) return existing;
   const entry = manifest.shards.find((s) => s.shard === shardIdx);
   if (!entry) return null;
-  try {
-    const res = await fetch(entry.url, { next: { revalidate: 86400 } });
-    if (!res.ok) return null;
-    const payload = (await res.json()) as ShardPayload;
-    if (!payload || typeof payload.tickers !== "object") return null;
-    shardCache.set(shardIdx, { payload, fetchedAt: Date.now() });
-    return payload;
-  } catch {
-    return null;
-  }
+  const promise = (async () => {
+    try {
+      const res = await fetch(entry.url, { next: { revalidate: 86400 } });
+      if (!res.ok) return null;
+      const payload = (await res.json()) as ShardPayload;
+      if (
+        !payload ||
+        payload.tickers === null ||
+        typeof payload.tickers !== "object" ||
+        Array.isArray(payload.tickers) ||
+        typeof payload.generatedAt !== "number"
+      ) {
+        return null;
+      }
+      shardCache.set(shardIdx, { payload, fetchedAt: Date.now() });
+      return payload;
+    } catch {
+      return null;
+    } finally {
+      shardInflight.delete(shardIdx);
+    }
+  })();
+  shardInflight.set(shardIdx, promise);
+  return promise;
 }
+
+/**
+ * Fetch just the trailing window of daily prices from Yahoo to
+ * splice onto the static-cache baseline. The cache is refreshed
+ * monthly so the gap between last-cached-point and "now" is at
+ * most ~30 days; we fetch range=3mo to cover that window with
+ * headroom (in case the refresh is overdue or a particular ticker
+ * was missing from a prior shard).
+ *
+ * Returns null on any failure — caller falls through to "serve
+ * cache without trailing splice." Cache-without-trailing is still
+ * useful: the chart's history is correct up to ~30 days ago, and
+ * the headline NW just sits on the slightly-stale currentPrice
+ * until the next refresh.
+ */
+async function fetchTrailingFromYahoo(
+  symbol: string,
+): Promise<Array<{ t: number; p: number }> | null> {
+  const session = await getYahooSession(UA_VARIATIONS[0]);
+  const path = `/v8/finance/chart/${encodeURIComponent(symbol)}?range=3mo&interval=1d`;
+  for (const host of HOSTS) {
+    for (const ua of UA_VARIATIONS) {
+      try {
+        const headers = browserHeaders(ua);
+        if (session) headers.Cookie = session.cookie;
+        const res = await fetch(`https://${host}${path}`, {
+          headers,
+          next: { revalidate: 3600 }, // 1h edge cache on the trailing window
+        });
+        if (!res.ok) continue;
+        const json = (await res.json()) as YahooChart;
+        const result = json.chart?.result?.[0];
+        if (!result) continue;
+        const ts = result.timestamp ?? [];
+        const closes = result.indicators?.adjclose?.[0]?.adjclose ?? [];
+        if (ts.length === 0 || closes.length === 0) continue;
+        const out: Array<{ t: number; p: number }> = [];
+        for (let i = 0; i < ts.length; i++) {
+          const p = closes[i];
+          if (typeof p === "number" && Number.isFinite(p) && p > 0) {
+            out.push({ t: ts[i] * 1000, p });
+          }
+        }
+        if (out.length > 0) return out;
+      } catch {
+        continue;
+      }
+    }
+  }
+  return null;
+}
+
+type StaticCacheHit = {
+  quote: ParsedQuote;
+  shardGeneratedAt: number;
+  trailingSpliced: boolean;
+};
 
 async function tryStaticCache(
   symbol: string,
   range: "5y" | "max",
-): Promise<ParsedQuote | null> {
+): Promise<StaticCacheHit | null> {
   const manifest = await loadManifest();
   if (!manifest) return null;
   const shardIdx = shardForSymbol(symbol);
@@ -188,23 +276,64 @@ async function tryStaticCache(
   if (!shard) return null;
   const history = shard.tickers[symbol];
   if (!history || history.length === 0) return null;
+
+  // Splice fresh trailing prices onto the cached baseline. The
+  // shard was generated up to ~30 days ago (monthly cron); the
+  // trailing fetch from Yahoo covers the gap so the chart's right
+  // edge and the headline NW are current. If the trailing fetch
+  // fails (Yahoo rate limit, network), we still return the cached
+  // baseline — better than falling all the way through to a fully
+  // dynamic fetch that probably ALSO fails.
+  let merged: Array<{ t: number; p: number }>;
+  let mergedCurrent: number | null;
+  const trailing = await fetchTrailingFromYahoo(symbol);
+  if (trailing && trailing.length > 0) {
+    // Dedupe by UTC day, not exact timestamp. Yahoo can shift a
+    // given trading day's epoch slightly across endpoints/ranges,
+    // and we'd see duplicate same-day points if we filtered by
+    // exact equality. Drop any cached point whose UTC day matches
+    // ANY trailing point's UTC day; append the entire trailing
+    // window.
+    const trailingDays = new Set(
+      trailing.map((p) => Math.floor(p.t / 86_400_000)),
+    );
+    merged = history
+      .filter(([t]) => !trailingDays.has(Math.floor(t / 86_400_000)))
+      .map(([t, p]) => ({ t, p }))
+      .concat(trailing);
+    mergedCurrent = trailing[trailing.length - 1].p;
+  } else {
+    // Trailing fetch failed. We can still return the cached
+    // history (useful for the chart) but MUST NOT claim the last
+    // shard point as the current price — it could be 30+ days
+    // stale. Set currentPrice to null so the client falls back
+    // to its own live-price refresh path; the chart still gets
+    // the historical baseline.
+    merged = history.map(([t, p]) => ({ t, p }));
+    mergedCurrent = null;
+  }
+
   // Clamp to the requested range.
   const now = Date.now();
   const cutoff =
     range === "max" ? 0 : now - 5 * 365 * 24 * 60 * 60 * 1000;
-  const clamped = history
-    .filter(([t]) => t >= cutoff)
-    .map(([t, p]) => ({ t, p }));
+  const clamped = merged.filter((p) => p.t >= cutoff);
   if (clamped.length === 0) return null;
-  const currentPrice = clamped[clamped.length - 1].p;
   return {
-    symbol,
-    currentPrice,
-    currency: "USD",
-    name: null,
-    history: clamped,
+    quote: {
+      symbol,
+      currentPrice: mergedCurrent,
+      currency: "USD",
+      name: null,
+      history: clamped,
+    },
+    shardGeneratedAt: shard.generatedAt,
+    trailingSpliced: !!trailing && trailing.length > 0,
   };
 }
+
+const STATIC_CACHE_MAX_STALENESS_MS = 35 * 24 * 60 * 60 * 1000; // ~5 weeks
+
 
 // ── Module-level state (persists across requests within a warm Vercel
 // function instance; resets on cold start). Two structures:
@@ -259,7 +388,12 @@ type RouteParams = { params: Promise<{ symbol: string }> };
 
 export async function GET(req: NextRequest, { params }: RouteParams) {
   const { symbol: raw } = await params;
-  const symbol = raw.toUpperCase().slice(0, 12);
+  // Normalize: uppercase + dot→dash (Yahoo accepts both, but the
+  // static cache shards key tickers in dash form to match Nasdaq's
+  // canonical representation — without this rewrite, BRK.B
+  // requests hash to a different shard than BRK-B is stored under
+  // and silently miss the static cache).
+  const symbol = raw.toUpperCase().replace(/\./g, "-").slice(0, 12);
   if (!/^[A-Z0-9.\-^]+$/.test(symbol)) {
     return json({ error: "invalid symbol" }, 400);
   }
@@ -282,13 +416,49 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
   // entirely. A miss (long-tail tickers, brand-new symbols) falls
   // through to the Yahoo+Finnhub path as before.
   const cached = await tryStaticCache(symbol, range);
-  if (cached) {
-    lruSet(symbol, cached);
-    return json({
-      ...cached,
-      cachedFromStatic: true,
-      fetchedAt: Date.now(),
-    });
+  // Defense-in-depth: if the shard is older than 5 weeks, the
+  // monthly cron missed AND the cache is too stale to trust the
+  // trading-day boundaries. Fall through to the dynamic path
+  // rather than serve obviously-old data.
+  const cacheTooStale =
+    cached &&
+    Date.now() - cached.shardGeneratedAt > STATIC_CACHE_MAX_STALENESS_MS;
+  if (cached && !cacheTooStale) {
+    // DON'T poison the LRU when trailing failed — currentPrice is
+    // null in that case and the LRU fallback path serves it as
+    // "lru-fallback" which would propagate the null indefinitely.
+    if (cached.trailingSpliced) lruSet(symbol, cached.quote);
+    return json(
+      {
+        ...cached.quote,
+        cachedFromStatic: true,
+        // Surfaces staleness to the client: how old is the shard
+        // we served from? UI can warn if shardGeneratedAt is too
+        // old (e.g., > 35 days = monthly cron missed a run).
+        shardGeneratedAt: cached.shardGeneratedAt,
+        trailingSpliced: cached.trailingSpliced,
+        fetchedAt: Date.now(),
+      },
+      200,
+      {
+        // Vercel edge cache: serve repeat requests for the same
+        // symbol from the edge — collapsing thousands of function
+        // invocations into ~one per ticker per cache window.
+        //
+        // Trailing-spliced (fresh tail + current price): 5 min
+        // edge cache, 1 hour stale-while-revalidate. Trailing-
+        // failed (currentPrice null, history may be stale at the
+        // tail): 30 sec edge cache, 5 min stale-while-revalidate
+        // so we retry the trailing fetch sooner instead of
+        // burning a long window serving the null price.
+        "Cache-Control": cached.trailingSpliced
+          ? "public, s-maxage=300, stale-while-revalidate=3600"
+          : "public, s-maxage=30, stale-while-revalidate=300",
+        // CDN-tagged so a force-refresh can invalidate per-symbol
+        // (Vercel `revalidateTag` API).
+        "Cache-Tag": `quote:${symbol}`,
+      },
+    );
   }
 
   // Track upstream diagnostic reasons so the response payload
@@ -383,6 +553,7 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
         // data, just the ticker's market price.
         "Cache-Control":
           "public, s-maxage=86400, stale-while-revalidate=604800",
+        "Cache-Tag": `quote:${symbol}`,
       },
     );
   }

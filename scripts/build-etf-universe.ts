@@ -193,9 +193,13 @@ async function main() {
     }B)`,
   );
 
-  // Stage 4: merge with always-include set.
-  const merged = new Set<string>(top);
-  for (const t of ALWAYS_INCLUDE) merged.add(t);
+  // Stage 4: merge with always-include set. Normalize each
+  // entry through the same dot→dash rewrite the Nasdaq path
+  // uses (so e.g. BRK.B + BRK-B don't both appear as separate
+  // tickers and confuse the shard hash).
+  const normalize = (t: string) => t.trim().toUpperCase().replace(/\./g, "-");
+  const merged = new Set<string>(top.map(normalize));
+  for (const t of ALWAYS_INCLUDE) merged.add(normalize(t));
   const finalList = [...merged].sort();
   console.log(
     `Final universe: ${finalList.length} tickers (top ${TOP_N} by AUM ∪ ${ALWAYS_INCLUDE.length} always-include)`,
