@@ -53,7 +53,12 @@ export type HoldingsActions = {
     priceUSD: number,
     opts?: { manual?: boolean },
   ) => void;
-  applyLivePrice: (symbol: string, priceUSD: number, pricedAt: number) => void;
+  applyLivePrice: (
+    symbol: string,
+    priceUSD: number,
+    pricedAt: number,
+    mode?: "live" | "historical",
+  ) => void;
   convertHoldingToLive: (
     holdingId: HoldingId,
     livePrice: number,
@@ -172,8 +177,8 @@ export function createHoldingsActions(
         updateHoldingPrice(s, id, priceUSD, opts?.manual ?? true, Date.now()),
       ),
 
-    applyLivePrice: (symbol, priceUSD, pricedAt) =>
-      set((s) => applyLivePriceTo(s, symbol, priceUSD, pricedAt)),
+    applyLivePrice: (symbol, priceUSD, pricedAt, mode) =>
+      set((s) => applyLivePriceTo(s, symbol, priceUSD, pricedAt, mode)),
 
     convertHoldingToLive: (id, livePrice, pricedAt) =>
       set((s) =>

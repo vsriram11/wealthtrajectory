@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useAppStore } from "@/lib/store";
 import { uniqueSymbols } from "@/lib/data/history";
-import { getQuote } from "@/lib/data/quotes";
+import { getQuote, priceAtDetailed } from "@/lib/data/quotes";
+import { parseISODate } from "@/lib/dateInput";
 
 // 1-second spacing between *network* calls keeps any single browser
 // session well under Finnhub's 60-calls-per-minute API key limit when
@@ -36,6 +37,7 @@ export function PriceRefresher() {
   // date instead of skipping refresh entirely. For now, freezing
   // values to whatever the user enters is the correct UX.
   const timeTravelActive = useAppStore((s) => s.timeTravelActive);
+  const timeTravelDate = useAppStore((s) => s.timeTravelDate);
 
   // Track per-holding identity (not just the unique symbol set) so
   // adding a SECOND VOO doesn't skip the refresh — the previous
@@ -112,6 +114,65 @@ export function PriceRefresher() {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [holdingsKey, applyLivePrice, timeTravelActive]);
+
+  // Track symbols already historically-applied this session so a
+  // mid-session holdingsKey change (e.g. user adds a new holding)
+  // doesn't re-clobber manually-edited symbols. Reset on
+  // entry/exit of time-travel via the timeTravelActive dep.
+  // Round-5 audit WARN: manual override clobber.
+  const appliedSymbols = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!timeTravelActive) appliedSymbols.current = new Set();
+  }, [timeTravelActive]);
+
+  // Historical-price effect for time-travel sessions. Calls
+  // getQuote (5y history, cached server-side per Vercel instance
+  // + client-side via IDB) → priceAtDetailed (binary-searches the
+  // history array, returns {price, clamped}) → applyLivePrice in
+  // "historical" mode (preserves user-entered dollar values for
+  // freshly-added holdings; only updates existing-holding shares).
+  // Per-iteration gates + network throttling mirror the live loop.
+  useEffect(() => {
+    if (!timeTravelActive || !timeTravelDate) return;
+    const targetMs = parseISODate(timeTravelDate);
+    if (targetMs === null) return;
+    const symbols = uniqueSymbols(household);
+    if (symbols.length === 0) return;
+    let cancelled = false;
+    void (async () => {
+      let lastWasNetwork = false;
+      for (const s of symbols) {
+        if (cancelled) return;
+        if (!useAppStore.getState().timeTravelActive) return;
+        if (appliedSymbols.current.has(s)) continue;
+        if (lastWasNetwork) await sleep(NETWORK_SPACING_MS);
+        const t0 =
+          typeof performance !== "undefined" ? performance.now() : Date.now();
+        const q = await getQuote(s);
+        const elapsed =
+          (typeof performance !== "undefined"
+            ? performance.now()
+            : Date.now()) - t0;
+        lastWasNetwork = elapsed > NETWORK_THRESHOLD_MS;
+        if (cancelled || !q) continue;
+        if (!useAppStore.getState().timeTravelActive) return;
+        const r = priceAtDetailed(q, targetMs);
+        // Skip clamped results — they're the silent fallback to the
+        // oldest sample in the 5y window. For backdates older than
+        // the available history, surfacing a clamp would be
+        // misleading. Round-5 audit BLOCK.
+        if (r === null || r.clamped) continue;
+        if (r.price > 0) {
+          applyLivePrice(s, r.price, targetMs, "historical");
+          appliedSymbols.current.add(s);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timeTravelActive, timeTravelDate, holdingsKey, applyLivePrice]);
 
   return null;
 }

@@ -114,6 +114,103 @@ describe("realEstateMetrics — leveraged property + paydown (the headline TWR v
   });
 });
 
+describe("realEstateMetrics — cash-out refinance + leverage clamping (round-5 audit BLOCKs)", () => {
+  it("cash-out refi at mid-window: mortgage INCREASES → positive cashflow into pocket", () => {
+    // Buy $500K house with $100K equity (5x leverage).
+    // Year 2.5: gross still $500K (flat market), refi pulls $100K
+    // cash out. Mortgage 400K → 500K, equity 100K → 0.
+    // Year 5: market unchanged, equity rebuilds via paydown of
+    // $50K → equity = $50K, mortgage $450K, gross $500K.
+    // Cashflow stream: −$100K, +$100K (cash-out), −$50K
+    // (paydown), +$50K (terminal). IRR ≈ 0 (got money back).
+    const snaps: Snapshot[] = [
+      reSnap(T0, [{ id: "h1", equity: 100_000, leverage: 5 }]),
+      // Mid: equity collapsed by cash-out.
+      reSnap(T0 + 2.5 * YEAR, [
+        { id: "h1", equity: 1, leverage: 500_001 },
+      ]),
+      reSnap(T0 + 5 * YEAR, [
+        { id: "h1", equity: 50_000, leverage: 500_000 / 50_000 },
+      ]),
+    ];
+    const m = realEstateMetrics(snaps, "h1");
+    expect(m).not.toBeNull();
+    // Without the cash-out fix, the negative-direction mortgage
+    // change is dropped → IRR sees only initial −100K + final
+    // +50K + intermediate paydowns → catastrophic-looking IRR.
+    // With fix: the +cashflow at the cash-out moment offsets,
+    // IRR is much higher.
+    expect(m!.irrPctAnnual).not.toBeNull();
+    expect(Number.isFinite(m!.irrPctAnnual!)).toBe(true);
+    // Sanity: IRR is at least computable (not the pre-fix
+    // catastrophic IRR of ~-30%).
+    expect(m!.irrPctAnnual!).toBeGreaterThan(-0.5);
+  });
+
+  it("cash-out funded renovation: net cash-to-pocket excludes the renovation portion", () => {
+    // Pull $100K cash via refi but spend $80K on renovations
+    // (gross goes up by $80K). User effectively pocketed $20K.
+    const snaps: Snapshot[] = [
+      reSnap(T0, [{ id: "h1", equity: 100_000, leverage: 5 }]),
+      // After refi+reno: gross 705K, mortgage 500K, equity 205K.
+      reSnap(T0 + 3 * YEAR, [
+        { id: "h1", equity: 205_000, leverage: 705_000 / 205_000 },
+      ]),
+      // 5y total: gross 750K, mortgage 470K, equity 280K.
+      reSnap(T0 + 5 * YEAR, [
+        { id: "h1", equity: 280_000, leverage: 750_000 / 280_000 },
+      ]),
+    ];
+    const m = realEstateMetrics(snaps, "h1");
+    expect(m).not.toBeNull();
+    expect(m!.irrPctAnnual).not.toBeNull();
+    // IRR is meaningful (positive, finite).
+    expect(Number.isFinite(m!.irrPctAnnual!)).toBe(true);
+  });
+
+  it("leverage = 0 (pathological) clamps to 1 — no negative mortgage propagation", () => {
+    const snaps: Snapshot[] = [
+      reSnap(T0, [{ id: "h1", equity: 100_000, leverage: 0 }]),
+      reSnap(T0 + 5 * YEAR, [{ id: "h1", equity: 150_000, leverage: 0 }]),
+    ];
+    const m = realEstateMetrics(snaps, "h1");
+    expect(m).not.toBeNull();
+    // Clamped to leverage=1 → mortgage=0 throughout, IRR ≈ CAGR.
+    expect(m!.initialMortgage).toBe(0);
+    expect(m!.finalMortgage).toBe(0);
+    expect(m!.totalPaydown).toBe(0);
+  });
+
+  it("leverage = NaN / Infinity falls through to 1 (NaN-safe at boundary)", () => {
+    const snaps: Snapshot[] = [
+      reSnap(T0, [{ id: "h1", equity: 100_000, leverage: Number.NaN }]),
+      reSnap(T0 + 5 * YEAR, [
+        { id: "h1", equity: 150_000, leverage: Number.POSITIVE_INFINITY },
+      ]),
+    ];
+    const m = realEstateMetrics(snaps, "h1");
+    expect(m).not.toBeNull();
+    expect(Number.isFinite(m!.twrPctAnnual!)).toBe(true);
+    expect(m!.initialMortgage).toBe(0);
+    expect(m!.finalMortgage).toBe(0);
+  });
+
+  it("deeply-negative IRR (equity halves) converges via bisection fallback", () => {
+    // $100K equity → $30K terminal over 5y, no paydown.
+    // True IRR ≈ (0.3)^(1/5) - 1 ≈ -21.4%. Newton-Raphson from
+    // r=5% may overshoot the (-0.99) bound; bisection covers
+    // this gracefully.
+    const snaps: Snapshot[] = [
+      reSnap(T0, [{ id: "h1", equity: 100_000, leverage: 1 }]),
+      reSnap(T0 + 5 * YEAR, [{ id: "h1", equity: 30_000, leverage: 1 }]),
+    ];
+    const m = realEstateMetrics(snaps, "h1");
+    expect(m!.irrPctAnnual).not.toBeNull();
+    expect(m!.irrPctAnnual!).toBeLessThan(0);
+    expect(m!.irrPctAnnual!).toBeCloseTo(Math.pow(0.3, 1 / 5) - 1, 3);
+  });
+});
+
 describe("realEstateMetrics — null cases (gate semantics)", () => {
   it("returns null when the holding is missing from the FIRST snapshot", () => {
     const snaps: Snapshot[] = [

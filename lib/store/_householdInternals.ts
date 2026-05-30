@@ -135,12 +135,24 @@ export function updateHoldingPrice<Ctx extends { household: Household }>(
  *
  * Manual-priced holdings are skipped — they don't subscribe to
  * live quotes.
+ *
+ * `mode`:
+ *   - "live" (default): the production refresh path. First-fetch
+ *     recomputes shares from the entered dollar value.
+ *   - "historical": time-travel apply. SKIPS the first-fetch
+ *     share-recompute — for a freshly-added holding during a
+ *     backdated session, the user's entered dollar value should
+ *     NOT be divided by the historical price (that would give
+ *     nonsense shares like "$5000 / $300 = 16.67 shares" when
+ *     the user intended just to record "$5000 in VOO on date D").
+ *     Round-5 audit BLOCK.
  */
 export function applyLivePriceTo<Ctx extends { household: Household }>(
   state: Ctx,
   symbol: string,
   price: number,
   pricedAt: number,
+  mode: "live" | "historical" = "live",
 ): { household: Household } {
   const upperSymbol = symbol.toUpperCase();
   return {
@@ -153,6 +165,18 @@ export function applyLivePriceTo<Ctx extends { household: Household }>(
           if (h.isManualPrice) return h;
           if (h.symbol.toUpperCase() !== upperSymbol) return h;
           const firstFetch = h.lastPricedAt == null;
+          // Historical mode: don't recompute shares for a fresh
+          // holding (user's entered dollar value is authoritative).
+          // Existing holdings (lastPricedAt != null) still see the
+          // historical price applied to their share count.
+          if (mode === "historical" && firstFetch) {
+            return {
+              ...h,
+              lastPriceUSD: price,
+              lastPricedAt: pricedAt,
+              // valueUSD + shares untouched.
+            };
+          }
           const shares =
             firstFetch && !h.enteredAsShares ? h.valueUSD / price : h.shares;
           return {

@@ -423,9 +423,11 @@ export function UsTaxCalculator() {
         <div className="border-t border-border px-4 py-3 text-[11px] leading-relaxed text-text-dim">
           <ul className="list-disc space-y-1 pl-4">
             <li>
-              <strong className="text-text">AMT</strong> (Alternative
-              Minimum Tax) — relevant for some high earners with large
-              ISO exercises or specific deduction patterns.
+              <strong className="text-text">AMT</strong> — modeled with
+              2025 exemption + phase-out + 26/28% brackets and Form
+              6251 Part III LTCG stacking. Does not model: NOL
+              adjustments, depreciation/depletion preferences, or
+              foreign-tax-credit AMT interactions.
             </li>
             <li>
               <strong className="text-text">QBI deduction</strong>{" "}

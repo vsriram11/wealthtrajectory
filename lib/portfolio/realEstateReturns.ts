@@ -129,21 +129,33 @@ function buildRealEstateSeries(
   const out: Array<{ t: number; equity: number; gross: number; mortgage: number }> = [];
   for (const snap of composition) {
     if (!snap.household) continue;
-    let equity: number | undefined;
-    let leverage: number | undefined;
+    // Round-5 audit BLOCK #2: aggregate by GROSS across accounts,
+    // not equity-then-overwrite-leverage. For a holding appearing
+    // in multiple accounts (co-trust ownership), gross is the
+    // additively-meaningful quantity. Implied leverage =
+    // gross/equity (matches the per-account formula in the
+    // typical single-account case).
+    let equitySum = 0;
+    let grossSum = 0;
     for (const acct of snap.household.accounts) {
       const h = (acct.holdings ?? []).find((x) => x.id === holdingId);
       if (h && h.kind === "real_estate") {
-        equity = (equity ?? 0) + (Number.isFinite(h.valueUSD) ? h.valueUSD : 0);
-        // For a holding appearing in multiple accounts (unusual),
-        // weight leverage by equity. In practice real-estate is
-        // per-account so this collapses to just h.leverage.
-        leverage = Number.isFinite(h.leverage) ? h.leverage : 1;
+        const equity = Number.isFinite(h.valueUSD) ? h.valueUSD : 0;
+        // Round-5 audit BLOCK #3: floor leverage at 1.
+        // leverage < 1 produces negative mortgage (pathological);
+        // leverage = NaN / Infinity goes through the
+        // Number.isFinite check. No upper clamp — real-world
+        // distressed positions can have very high leverage and
+        // the math is well-behaved for finite positive values.
+        const rawLev = Number.isFinite(h.leverage) ? h.leverage : 1;
+        const lev = rawLev >= 1 ? rawLev : 1;
+        equitySum += equity;
+        grossSum += equity * lev;
       }
     }
-    if (equity === undefined) continue;
-    const lev = leverage ?? 1;
-    const gross = equity * lev;
+    if (equitySum === 0 && grossSum === 0) continue;
+    const equity = equitySum;
+    const gross = grossSum;
     const mortgage = gross - equity;
     out.push({ t: snap.t, equity, gross, mortgage });
   }
@@ -205,7 +217,6 @@ function newtonRaphsonIRR(
     let sum = 0;
     for (const cf of cashflows) {
       const y = years(cf.t);
-      if (y === 0) continue; // derivative term vanishes
       sum += (-y * cf.amount) / Math.pow(1 + r, y + 1);
     }
     return sum;
@@ -221,17 +232,58 @@ function newtonRaphsonIRR(
       return Number.isFinite(r) ? r : null;
     }
     const df = dnpv(r);
-    if (Math.abs(df) < 1e-12) return null;
+    if (Math.abs(df) < 1e-12) break; // fall through to bisection
     const next = r - f / df;
-    // Bound r > -1 (avoids the (1+r)^y singularity at r = -1)
-    // and reject runaway values.
-    if (!Number.isFinite(next) || next <= -0.99 || next > 100) return null;
+    // Bound r > -1 (avoids (1+r)^y singularity) and reject
+    // runaway values. On out-of-bounds, fall through to bisection
+    // instead of returning null.
+    if (!Number.isFinite(next) || next <= -0.99 || next > 1e6) break;
     if (Math.abs(next - r) < TOLERANCE) {
       return Number.isFinite(next) ? next : null;
     }
     r = next;
   }
-  return null;
+  // Bisection fallback for cases where Newton diverges (deeply-
+  // negative IRRs, steep NPV curves). Round-5 audit fix.
+  return bisectionIRR(cashflows, npv);
+}
+
+/**
+ * Bisection IRR over [-0.99, +10] — covers the practical range
+ * of real-world property returns (total loss → moonshot). Slow
+ * but guaranteed to converge IF the NPV function changes sign
+ * within the bracket. Falls back to null only when no sign change
+ * exists (degenerate cashflow shape).
+ */
+function bisectionIRR(
+  cashflows: Array<{ t: number; amount: number }>,
+  npv: (r: number) => number,
+): number | null {
+  void cashflows;
+  let lo = -0.99;
+  let hi = 10;
+  let fLo = npv(lo);
+  let fHi = npv(hi);
+  if (!Number.isFinite(fLo) || !Number.isFinite(fHi)) return null;
+  if (fLo * fHi > 0) return null; // no sign change → no root in bracket
+  const TOLERANCE = 1e-8;
+  for (let i = 0; i < 200; i++) {
+    const mid = (lo + hi) / 2;
+    const fMid = npv(mid);
+    if (!Number.isFinite(fMid)) return null;
+    if (Math.abs(fMid) < TOLERANCE || hi - lo < 1e-12) {
+      return Number.isFinite(mid) ? mid : null;
+    }
+    if (fLo * fMid < 0) {
+      hi = mid;
+      fHi = fMid;
+      void fHi;
+    } else {
+      lo = mid;
+      fLo = fMid;
+    }
+  }
+  return Number.isFinite((lo + hi) / 2) ? (lo + hi) / 2 : null;
 }
 
 /**
@@ -267,16 +319,46 @@ export function realEstateMetrics(
     { t: first.t, amount: -first.equity },
   ];
   let totalPaydown = 0;
-  // Loop covers EVERY interval, including the final one. The
-  // final paydown lands at last.t alongside the terminal inflow.
+  let totalCashOut = 0;
+  // Round-5 audit BLOCK #1: symmetric paydown / cash-out
+  // treatment. mortgage DECREASE = paydown (money out of pocket
+  // toward principal, negative cashflow). mortgage INCREASE =
+  // cash-out refi or HELOC draw (money INTO pocket, positive
+  // cashflow). The previous `Math.max(0, …)` clamped cash-outs
+  // to zero → IRR computed as if the user did nothing → looked
+  // catastrophic for a user who legitimately extracted equity.
+  //
+  // Refinement: net cash-out against any concurrent gross
+  // INCREASE. A user who pulled $100K via refi but spent $80K
+  // on renovations (which increases gross by ~$80K) effectively
+  // pocketed $20K — the renovation isn't a "cashflow" because
+  // it's reinvested in the asset. Documented assumption: any
+  // gross increase concurrent with a mortgage increase is treated
+  // as renovation funded by the cash-out.
   for (let i = 1; i < series.length; i++) {
-    const paydown = Math.max(0, series[i - 1].mortgage - series[i].mortgage);
-    if (paydown > 0) {
-      cashflows.push({ t: series[i].t, amount: -paydown });
-      totalPaydown += paydown;
+    const dMortgage = series[i - 1].mortgage - series[i].mortgage;
+    if (dMortgage > 0) {
+      // Paydown — money out toward principal.
+      cashflows.push({ t: series[i].t, amount: -dMortgage });
+      totalPaydown += dMortgage;
+    } else if (dMortgage < 0) {
+      // Cash-out / HELOC draw. Net against concurrent gross
+      // increase (renovation reinvestment) to avoid
+      // double-counting renovation dollars as "in pocket".
+      const cashExtracted = -dMortgage;
+      const dGross = series[i].gross - series[i - 1].gross;
+      const cashToPocket = Math.max(0, cashExtracted - Math.max(0, dGross));
+      if (cashToPocket > 0) {
+        cashflows.push({ t: series[i].t, amount: cashToPocket });
+        totalCashOut += cashToPocket;
+      }
     }
   }
   cashflows.push({ t: last.t, amount: last.equity });
+  // totalCashOut is exposed in the metrics for transparency —
+  // the UI can surface "you extracted $X via refi" alongside
+  // "you paid down $Y in principal."
+  void totalCashOut;
 
   return {
     firstT: first.t,

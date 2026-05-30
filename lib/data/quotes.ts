@@ -177,11 +177,37 @@ export async function primeCache(quote: Quote): Promise<void> {
   await writeCache(symbol, quote);
 }
 
-export function priceAt(quote: Quote, atMs: number): number | null {
+/**
+ * Result discriminator so callers can distinguish "exact" vs
+ * "clamped to nearest endpoint" — important for backdated lookups
+ * where clamping to the 5-year-old earliest sample would silently
+ * lie about prices from 6+ years ago. Round-5 audit BLOCK: the
+ * previous return-just-a-number signature gave callers no way to
+ * know they got the oldest-sample clamp.
+ */
+export type PriceAtResult = {
+  price: number;
+  /** True when atMs fell outside [h[0].t, h[N-1].t]. */
+  clamped: boolean;
+};
+
+/**
+ * Binary-search the history array for the closing price at or
+ * before atMs. Returns the price + a `clamped` flag indicating
+ * whether atMs was outside the available history window.
+ *
+ * Callers wanting strict "data unavailable for this date" semantics
+ * should treat `clamped === true` as null.
+ */
+export function priceAtDetailed(
+  quote: Quote,
+  atMs: number,
+): PriceAtResult | null {
   const h = quote.history;
   if (h.length === 0) return null;
-  if (atMs <= h[0].t) return h[0].p;
-  if (atMs >= h[h.length - 1].t) return h[h.length - 1].p;
+  if (atMs <= h[0].t) return { price: h[0].p, clamped: true };
+  if (atMs >= h[h.length - 1].t)
+    return { price: h[h.length - 1].p, clamped: true };
   let lo = 0;
   let hi = h.length - 1;
   while (lo + 1 < hi) {
@@ -189,5 +215,16 @@ export function priceAt(quote: Quote, atMs: number): number | null {
     if (h[mid].t <= atMs) lo = mid;
     else hi = mid;
   }
-  return h[lo].p;
+  return { price: h[lo].p, clamped: false };
+}
+
+/**
+ * Back-compat wrapper for legacy callers. Returns just the price,
+ * including clamp cases. New code should use priceAtDetailed when
+ * the clamp distinction matters (historical-price application for
+ * time-travel sessions).
+ */
+export function priceAt(quote: Quote, atMs: number): number | null {
+  const r = priceAtDetailed(quote, atMs);
+  return r === null ? null : r.price;
 }

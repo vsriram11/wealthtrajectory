@@ -35,6 +35,12 @@ const baseInputs = (overrides: Partial<UsTaxInputs> = {}): UsTaxInputs => ({
         privateActivityBondInterestUSD: overrides.privateActivityBondInterestUSD,
       }
     : {}),
+  ...(overrides.stateAndLocalTaxItemizedUSD !== undefined
+    ? { stateAndLocalTaxItemizedUSD: overrides.stateAndLocalTaxItemizedUSD }
+    : {}),
+  ...(overrides.priorYearAMTCreditUSD !== undefined
+    ? { priorYearAMTCreditUSD: overrides.priorYearAMTCreditUSD }
+    : {}),
 });
 
 describe("computeFederalTax — zero / boundary cases", () => {
@@ -870,6 +876,91 @@ describe("computeFederalTax — AMT (Alternative Minimum Tax)", () => {
     // Regular LTCG tax (most of LTCG at 15%) and TMT-LTCG (also
     // 15%) match closely; AMT should be near zero.
     expect(r.amtUSD).toBeLessThan(5000);
+  });
+
+  it("SALT add-back for itemizers (round-5 audit BLOCK)", () => {
+    // High earner in CA/NY using itemized deduction including
+    // SALT capped at $10K. AMT engine must add back the $10K to
+    // AMTI per Form 6251 line 2a.
+    const baseline = computeFederalTax(
+      baseInputs({
+        income: { ...EMPTY_INCOME, wagesUSD: 400_000 },
+        itemizedDeductionUSD: 60_000, // high itemized (mortgage + SALT)
+      }),
+    );
+    const withSALT = computeFederalTax(
+      baseInputs({
+        income: { ...EMPTY_INCOME, wagesUSD: 400_000 },
+        itemizedDeductionUSD: 60_000,
+        stateAndLocalTaxItemizedUSD: 10_000,
+      }),
+    );
+    // AMTI should be exactly $10K higher with the add-back.
+    expect(withSALT.amtiUSD - baseline.amtiUSD).toBeCloseTo(10_000, 0);
+  });
+
+  it("SALT add-back capped at $10K even when input exceeds (TCJA cap)", () => {
+    const r = computeFederalTax(
+      baseInputs({
+        income: { ...EMPTY_INCOME, wagesUSD: 400_000 },
+        itemizedDeductionUSD: 60_000,
+        stateAndLocalTaxItemizedUSD: 50_000, // way over cap
+      }),
+    );
+    const baseline = computeFederalTax(
+      baseInputs({
+        income: { ...EMPTY_INCOME, wagesUSD: 400_000 },
+        itemizedDeductionUSD: 60_000,
+      }),
+    );
+    expect(r.amtiUSD - baseline.amtiUSD).toBeCloseTo(10_000, 0); // capped
+  });
+
+  it("SALT add-back ignored when using standard deduction (no SALT was deducted)", () => {
+    const r = computeFederalTax(
+      baseInputs({
+        income: { ...EMPTY_INCOME, wagesUSD: 400_000 },
+        // itemizedDeductionUSD: undefined → standard deduction
+        stateAndLocalTaxItemizedUSD: 10_000, // ignored
+      }),
+    );
+    const baseline = computeFederalTax(
+      baseInputs({
+        income: { ...EMPTY_INCOME, wagesUSD: 400_000 },
+      }),
+    );
+    expect(r.amtiUSD).toBe(baseline.amtiUSD);
+  });
+
+  it("prior-year AMT credit reduces regular tax up to the AMT headroom (Form 8801)", () => {
+    // User had AMT exposure last year, paid $20K AMT, gets it
+    // as a credit this year. This year: no AMT triggers, regular
+    // tax has ~$15K headroom above TMT → credit reduces regular
+    // tax by $15K (the rest carries forward).
+    const r = computeFederalTax(
+      baseInputs({
+        income: { ...EMPTY_INCOME, wagesUSD: 200_000 },
+        priorYearAMTCreditUSD: 20_000,
+      }),
+    );
+    expect(r.amtUSD).toBe(0); // no AMT this year
+    // Credit applied, up to headroom.
+    expect(r.amtCreditUsedUSD).toBeGreaterThan(0);
+    expect(r.amtCreditUsedUSD).toBeLessThanOrEqual(20_000);
+  });
+
+  it("prior-year AMT credit unused when AMT is owed (no headroom)", () => {
+    // ISO trigger creates AMT exposure this year → no headroom →
+    // credit fully carries forward.
+    const r = computeFederalTax(
+      baseInputs({
+        income: { ...EMPTY_INCOME, wagesUSD: 200_000 },
+        isoBargainElementUSD: 300_000,
+        priorYearAMTCreditUSD: 50_000,
+      }),
+    );
+    expect(r.amtUSD).toBeGreaterThan(0);
+    expect(r.amtCreditUsedUSD).toBe(0); // no headroom
   });
 
   it("AMT inputs are back-compat optional — callers omitting them get isoBargainElement=0", () => {

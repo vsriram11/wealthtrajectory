@@ -15,11 +15,12 @@
  *     LTCG fills brackets STARTING from where ordinary income left
  *     off).
  *   - AMT (Alternative Minimum Tax) with the 2025 exemption +
- *     phase-out + 26/28% brackets. LTCG portion of AMTI retains
- *     preferential rates (simplified to flat 15% in this engine —
- *     accurate for the 0/15 LTCG zone; off by ~$1k for high
- *     earners in the 20% LTCG bracket). Triggers most commonly
- *     from ISO bargain element exposure.
+ *     phase-out + 26/28% brackets. LTCG portion of AMTI uses the
+ *     full 0/15/20% bracket schedule stacked above the ordinary
+ *     AMTI excess (Form 6251 Part III). Triggers most commonly
+ *     from ISO bargain element exposure. SALT add-back for
+ *     itemizers and prior-year AMT credit (Form 8801) are both
+ *     supported as optional inputs (default 0).
  *   - FICA: 6.2% Social Security up to the 2025 wage base ($176,100)
  *     and 1.45% Medicare on all wages.
  *   - Additional Medicare 0.9% above filing-status thresholds.
@@ -104,6 +105,26 @@ export type UsTaxInputs = {
    * material when present.
    */
   privateActivityBondInterestUSD?: number;
+  /**
+   * State + local income tax portion of the itemized deduction
+   * (Form 6251 line 2a add-back). Capped at $10,000 by TCJA but
+   * still material for CA/NY/NJ high earners — a $10K SALT
+   * add-back at the 28% AMT rate is $2.8K of additional tax.
+   * Only relevant when `itemizedDeductionUSD != null` (the user
+   * is itemizing); ignored otherwise. Audit round-5 BLOCK.
+   */
+  stateAndLocalTaxItemizedUSD?: number;
+  /**
+   * Prior-year Minimum Tax Credit (Form 8801) carried into this
+   * year. Refundable credit equal to the AMT you paid in earlier
+   * years from "timing" preferences (mostly ISO exercise). When
+   * present, the credit reduces regular tax — bounded by the
+   * difference (regular − TMT) so the credit can't reduce regular
+   * tax below TMT (i.e., you still pay at least TMT). Audit
+   * round-5 WARN — material for ISO holders in the year after
+   * exercise.
+   */
+  priorYearAMTCreditUSD?: number;
 };
 
 export type BracketBreakdownRow = {
@@ -153,6 +174,13 @@ export type FederalResult = {
   amtiUSD: number;
   /** AMT exemption after phase-out (informational). */
   amtExemptionUSD: number;
+  /**
+   * Prior-year AMT credit (Form 8801) actually applied this year.
+   * Bounded by `max(0, regular - TMT)` headroom; carries forward
+   * when AMT > 0 (no headroom). Always 0 when input
+   * `priorYearAMTCreditUSD` is 0/unset.
+   */
+  amtCreditUsedUSD: number;
   totalFederalTaxUSD: number;
   effectiveRateOverall: number;
   marginalRateOrdinary: number;
@@ -476,11 +504,14 @@ function computeAMT(args: {
   regularTaxUSD: number;
   isoBargainElementUSD: number;
   privateActivityBondInterestUSD: number;
+  saltAddBackUSD: number;
+  priorYearAMTCreditUSD: number;
 }): {
   amtUSD: number;
   tmtUSD: number;
   amtiUSD: number;
   amtExemptionUSD: number;
+  amtCreditUsedUSD: number;
 } {
   const {
     filingStatus,
@@ -489,16 +520,21 @@ function computeAMT(args: {
     regularTaxUSD,
     isoBargainElementUSD,
     privateActivityBondInterestUSD,
+    saltAddBackUSD,
+    priorYearAMTCreditUSD,
   } = args;
 
   // AMTI starting point — taxable income + AMT preference add-backs.
   // The standard deduction is implicitly retained (AMT no longer
-  // disallows it post-TCJA, contrary to pre-2018 rules).
+  // disallows it post-TCJA). For itemizers, the SALT deduction
+  // must be added back (Form 6251 line 2a) — capped at $10K by
+  // TCJA so the add-back never exceeds that. Round-5 audit BLOCK.
   const amti =
     taxableOrdinaryIncomeUSD +
     taxableLtcgUSD +
     nonneg(isoBargainElementUSD) +
-    nonneg(privateActivityBondInterestUSD);
+    nonneg(privateActivityBondInterestUSD) +
+    Math.min(10_000, nonneg(saltAddBackUSD));
 
   // Phase-out: exemption reduces 25¢ per $1 of AMTI above threshold.
   const baseExemption = AMT_EXEMPTION_2025[filingStatus];
@@ -549,15 +585,24 @@ function computeAMT(args: {
   ).tax;
 
   const tmt = tmtOrdinary + tmtLtcg;
-  // AMT = excess of TMT over regular tax. Regular tax for this
-  // comparison excludes FICA, SE tax, and NIIT — only income tax.
+  // AMT = excess of TMT over regular tax (income tax only — FICA,
+  // SE, NIIT excluded). Computed against the pre-credit regular
+  // tax per Form 6251 line 9.
   const amt = Math.max(0, tmt - regularTaxUSD);
+
+  // Prior-year MTC (Form 8801): reduces regular tax by `headroom
+  // = max(0, regular - TMT)` capped at the available credit
+  // balance. When AMT > 0, headroom is 0 → no credit used this
+  // year (full carryforward).
+  const headroom = Math.max(0, regularTaxUSD - tmt);
+  const amtCreditUsed = Math.min(nonneg(priorYearAMTCreditUSD), headroom);
 
   return {
     amtUSD: amt,
     tmtUSD: tmt,
     amtiUSD: amti,
     amtExemptionUSD: amtExemption,
+    amtCreditUsedUSD: amtCreditUsed,
   };
 }
 
@@ -667,6 +712,13 @@ export function computeFederalTax(inputs: UsTaxInputs): FederalResult {
   // income-tax portion of regular tax for the comparison; FICA,
   // SE, and NIIT are NOT in scope for the AMT comparison.
   const regularIncomeTax = ord.tax + ltcgTax.tax;
+  // SALT add-back only applies when itemizing AND the itemized
+  // total was actually used (itemizedHonored from line 663
+  // already encodes this). When standard deduction wins, no SALT
+  // was deducted → no add-back. Capped at $10K by TCJA.
+  const saltAddBack = itemizedHonored
+    ? Math.min(10_000, nonneg(inputs.stateAndLocalTaxItemizedUSD ?? 0))
+    : 0;
   const amtResult = computeAMT({
     filingStatus,
     agi,
@@ -677,7 +729,17 @@ export function computeFederalTax(inputs: UsTaxInputs): FederalResult {
     privateActivityBondInterestUSD: nonneg(
       inputs.privateActivityBondInterestUSD ?? 0,
     ),
+    saltAddBackUSD: saltAddBack,
+    priorYearAMTCreditUSD: nonneg(inputs.priorYearAMTCreditUSD ?? 0),
   });
+
+  // Prior-year AMT credit (Form 8801): reduces regular tax,
+  // bounded by AMT headroom (`max(0, regular - TMT)`). When AMT
+  // > 0, headroom is 0 → credit fully carries forward.
+  // computeAMT already capped the usable portion in
+  // amtCreditUsedUSD. Apply it as a reduction to regular income
+  // tax here.
+  void regularIncomeTax;
 
   const totalFederalTax =
     ord.tax +
@@ -687,7 +749,8 @@ export function computeFederalTax(inputs: UsTaxInputs): FederalResult {
     fica.addMedicare +
     seTax +
     niit +
-    amtResult.amtUSD;
+    amtResult.amtUSD -
+    amtResult.amtCreditUsedUSD;
 
   const effectiveRateOverall =
     totalGrossIncome > 0 ? totalFederalTax / totalGrossIncome : 0;
@@ -723,6 +786,7 @@ export function computeFederalTax(inputs: UsTaxInputs): FederalResult {
     tmtUSD: amtResult.tmtUSD,
     amtiUSD: amtResult.amtiUSD,
     amtExemptionUSD: amtResult.amtExemptionUSD,
+    amtCreditUsedUSD: amtResult.amtCreditUsedUSD,
     totalFederalTaxUSD: totalFederalTax,
     effectiveRateOverall,
     marginalRateOrdinary,

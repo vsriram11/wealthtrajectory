@@ -9,6 +9,7 @@ import {
 } from "@/lib/insights/goals";
 import { NumberField } from "@/app/_components/ui/NumberField";
 import { formatUSD } from "@/lib/format";
+import { parseISODate } from "@/lib/dateInput";
 
 /**
  * Multi-goal tracker for non-Independence goals — house down payment, kid's
@@ -264,8 +265,13 @@ function GoalEditPanel({
           value={dateStr}
           onChange={(e) =>
             onChange({
+              // Use parseISODate (noon-UTC anchor + round-trip
+              // validation) — protects against silent
+              // normalization of invalid dates (2024-02-31 → Mar 2)
+              // and TZ drift on save→reload round-trips. Audit
+              // round-4 WARN.
               targetDate: e.target.value
-                ? new Date(e.target.value).getTime()
+                ? (parseISODate(e.target.value) ?? null)
                 : null,
             })
           }
@@ -415,7 +421,7 @@ function NewGoalForm({
             currentUSD,
             monthlyContributionUSD: monthly,
             category,
-            targetDate: dateStr ? new Date(dateStr).getTime() : null,
+            targetDate: dateStr ? (parseISODate(dateStr) ?? null) : null,
           })
         }
         className="w-full rounded-md bg-accent px-3 py-2 text-sm font-semibold text-bg disabled:opacity-40 active:opacity-80"
