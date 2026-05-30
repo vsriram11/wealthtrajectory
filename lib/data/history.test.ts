@@ -458,16 +458,21 @@ describe("overlaySnapshots", () => {
     expect(out[3].netWorthUSD).toBe(2000); // live anchor pinned
   });
 
-  it("anchors a time-travel snapshot at shares × snap.lastPriceUSD instead of recorded NW (user-reported jump fix)", () => {
-    // The bug: time-travel save preserves valueUSD (today's
-    // price × shares) while updating lastPriceUSD to the
-    // historical close at the chosen snapshot date. The recorded
-    // snap.netWorthUSD therefore reflects today's prices on a
-    // past-dated row. Using it as the chart anchor produces a
-    // visible vertical jump from the back-projected pre-snapshot
-    // region (which uses past prices). Fix: anchor at
-    // shares × lastPriceUSD so the snap value reflects its
-    // actual stored DATE's prices.
+  it("anchors a time-travel snapshot at compose(snap.t) when quotes are supplied (no boundary jump)", () => {
+    // User-reported visible bug: time-travel save preserves
+    // valueUSD (today's prices × shares) while attempting to
+    // update lastPriceUSD to the historical close. When the
+    // historical fetch FAILS (Yahoo 401 / rate-limit), both
+    // lastPriceUSD AND valueUSD reflect today's prices — yet the
+    // snap is dated in the past. Using recorded snap.NW as the
+    // chart anchor creates a vertical jump against the pre-snap
+    // back-projection.
+    //
+    // Fix: anchor via compose(snap.household, quotes, snap.t).
+    // This uses LIVE quotes' historical price at snap.t — the
+    // same math the pre-snap reconstruction uses — guaranteeing
+    // the boundary lines up regardless of whether the snap's
+    // lastPriceUSD was successfully pinned.
     const live: Household = {
       id: "hh",
       members: [{ id: "m1", displayName: "Tester" } as never],
@@ -479,21 +484,20 @@ describe("overlaySnapshots", () => {
           ownerId: "m1" as never,
           monthlyContributionUSD: 0,
           holdings: [
-            // Equity: live valueUSD reflects today's price; snap
-            // has historical lastPriceUSD pinned to the past date.
             {
               kind: "equity",
               id: "VOO_ID" as never,
               symbol: "VOO",
               shares: 100,
-              // Snap's lastPriceUSD = historical close.
-              lastPriceUSD: 450,
+              // lastPriceUSD = TODAY's price (historical fetch
+              // failed during time-travel save — simulating the
+              // user-reported Yahoo rate-limit scenario).
+              lastPriceUSD: 500,
               lastPricedAt: 200,
               isManualPrice: false,
               enteredAsShares: false,
               acquiredAt: null,
-              // Snap's valueUSD: TODAY's value preserved through
-              // time-travel save (R1 fix).
+              // valueUSD = TODAY's value (preserved per R1 fix).
               valueUSD: 50_000,
               expectedRealCAGR: 0.07,
               leverage: 1,
@@ -505,9 +509,6 @@ describe("overlaySnapshots", () => {
       ],
       liabilities: [],
     };
-    // Time-travel snap at t=200 with recorded NW = $50k (today's
-    // values pinned). But effective Dec-30 value is
-    // shares=100 × lastPriceUSD=$450 = $45k.
     const tt: Snapshot = {
       t: 200,
       netWorthUSD: 50_000,
@@ -519,12 +520,58 @@ describe("overlaySnapshots", () => {
       { t: 300, netWorthUSD: 0 },
       { t: 400, netWorthUSD: 0 },
     ];
-    const out = overlaySnapshots(baseSeries, [tt]);
-    // Anchor at t=200 must be effective NW ($45k), NOT
-    // recorded NW ($50k). Without the fix, the chart would
-    // anchor at $50k and create a $5k visible discontinuity
-    // against any back-projected region.
+    // Quotes have VOO at $450 at snap.t (historical close).
+    const quotes: Record<string, Quote | null> = {
+      VOO: {
+        symbol: "VOO",
+        name: "VOO",
+        currency: "USD",
+        currentPrice: 500,
+        fetchedAt: 400,
+        history: [
+          { t: 100, p: 440 },
+          { t: 200, p: 450 },
+          { t: 400, p: 500 },
+        ],
+      },
+    };
+    const out = overlaySnapshots(
+      baseSeries,
+      [tt],
+      undefined,
+      undefined,
+      quotes,
+      500,
+    );
+    // Anchor at t=200 uses quote-driven price: shares × $450
+    // = $45k. Recorded snap.NW ($50k, today's prices pinned)
+    // is correctly ignored.
     expect(out[1].netWorthUSD).toBe(45_000);
+  });
+
+  it("falls back to recorded snap.netWorthUSD when no quotes are supplied (back-compat)", () => {
+    // Without quotes the anchor falls back to the recorded NW
+    // — same as the pre-fix behavior. This preserves all the
+    // existing overlay tests that don't pass quotes.
+    const live: Household = {
+      id: "hh",
+      members: [{ id: "m1", displayName: "Tester" } as never],
+      accounts: [],
+      liabilities: [],
+    };
+    const tt: Snapshot = {
+      t: 200,
+      netWorthUSD: 1234,
+      household: live,
+    };
+    const out = overlaySnapshots(
+      [
+        { t: 100, netWorthUSD: 0 },
+        { t: 200, netWorthUSD: 0 },
+      ],
+      [tt],
+    );
+    expect(out[1].netWorthUSD).toBe(1234);
   });
 });
 

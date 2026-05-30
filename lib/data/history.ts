@@ -333,14 +333,12 @@ export function reconstructHistory(
         newlyAddedIds,
         newlyAddedLiabilityIds,
       ) + newlyAddedFlatUSD;
-    // Compute the snapshot's effective anchor NW: shares ×
-    // snap.lastPriceUSD-based effective NW + any backdated live
-    // holdings missing from the snapshot. This MUST mirror
-    // overlaySnapshots' anchor computation so the smoothed pre-
-    // snap boundary actually meets the chart anchor (using
-    // s.netWorthUSD here while overlay uses effectiveSnapNW would
-    // produce a residual jump = time-travel-price-vs-live delta).
-    let snapAnchorNW = effectiveSnapNW(firstSnap);
+    // Compute the snapshot's effective anchor NW using the SAME
+    // compose math as the pre-snap region, so the smoothed
+    // boundary genuinely meets the chart anchor. This MUST mirror
+    // overlaySnapshots' anchor computation; a mismatch here
+    // produces a residual visible jump.
+    let snapAnchorNW = effectiveSnapNW(firstSnap, quotes, now);
     const snapIds = new Set<string>();
     for (const acct of firstSnap.household.accounts) {
       for (const h of acct.holdings ?? []) snapIds.add(h.id);
@@ -509,62 +507,39 @@ function earliestQuoteTimestamp(quotes: Record<string, Quote | null>): number | 
  * Compute a snapshot's "effective" chart anchor NW.
  *
  * The stored `snap.netWorthUSD` was computed via
- * `householdNetWorth` at SAVE TIME — sum of valueUSDs minus
- * liabilities. For ordinary auto-snaps, valueUSD reflects today's
- * prices (which IS the save time), so the stored NW is correct
- * for charting purposes.
+ * `householdNetWorth` at SAVE TIME (sum of valueUSDs minus
+ * liabilities). It's correct AS RECORDED but wrong as a chart
+ * anchor: the pre-snap region back-projects equity to past
+ * prices via the LIVE quote history, but the recorded snap.NW
+ * reflects today's prices (or whatever prices were live at save
+ * time — for time-travel saves, that's today, not snap.t).
  *
- * For TIME-TRAVEL snaps it's different. During a time-travel
- * session the historical-price fetch updates each holding's
- * `lastPriceUSD` to the historical close at the chosen date but
- * leaves `valueUSD` alive — i.e. `valueUSD` reflects MAY 2026
- * prices on a DEC 2025-dated row. The chart anchor then sits at
- * "today's portfolio value pinned to a past date," creating a
- * vertical discontinuity against the back-projected pre-snapshot
- * region (which uses Dec 2025 prices via CAGR/quote interpolation).
+ * For continuity at the snap boundary, the anchor must use the
+ * SAME math as the pre-snap region. We call `composeNetWorthAt`
+ * with snap.household at snap.t against the LIVE quotes — quotes
+ * are the canonical source of historical prices, and they're
+ * available whether or not the time-travel historical-price
+ * fetch succeeded for the snap row.
  *
- * Fix: recompute the chart anchor using `shares × lastPriceUSD`
- * for live-priceable holdings — the actual snapshot-date prices.
- * For cash / real_estate / private_stock / other (kinds that
- * don't fluctuate with market data) we keep `valueUSD`. For
- * manual-priced live-priceable holdings, the lastPriceUSD IS the
- * user-set price (which equals the value path), so `valueUSD`
- * also works.
+ * Cash / real_estate / private_stock / other use snap.valueUSD
+ * (those kinds don't fluctuate with market data; sumCash inside
+ * compose handles them). Live-priceable kinds use the quote's
+ * price-at-t (or CAGR back-projection if the quote is missing).
+ *
+ * This makes the snap anchor INDEPENDENT of whether the
+ * historical-price fetch succeeded — eliminating the
+ * Yahoo-rate-limit-induced visible jump the user reported.
  */
-function effectiveSnapNW(snap: Snapshot): number {
+function effectiveSnapNW(
+  snap: Snapshot,
+  quotes: Record<string, Quote | null> | undefined,
+  now: number,
+): number {
   if (!snap.household) return snap.netWorthUSD;
-  let nw = 0;
-  for (const acct of snap.household.accounts) {
-    for (const h of acct.holdings) {
-      if (
-        h.kind === "cash" ||
-        h.kind === "real_estate" ||
-        h.kind === "private_stock" ||
-        h.kind === "other"
-      ) {
-        nw += h.valueUSD;
-        continue;
-      }
-      // Live-priceable kinds.
-      if (h.isManualPrice) {
-        nw += h.valueUSD;
-        continue;
-      }
-      if (
-        Number.isFinite(h.lastPriceUSD) &&
-        h.lastPriceUSD > 0 &&
-        Number.isFinite(h.shares)
-      ) {
-        nw += h.shares * h.lastPriceUSD;
-      } else {
-        nw += h.valueUSD;
-      }
-    }
-  }
-  for (const l of snap.household.liabilities) {
-    nw -= l.balanceUSD;
-  }
-  return nw;
+  // No quotes available: fall back to the recorded NW (best we
+  // can do without market data — same as the pre-fix behavior).
+  if (!quotes) return snap.netWorthUSD;
+  return composeNetWorthAt(snap.household, quotes, snap.t, now);
 }
 
 /**
@@ -611,6 +586,21 @@ export function overlaySnapshots(
    * entered it. R-deep audit user-reported bug.
    */
   liveHousehold?: Household,
+  /**
+   * Optional live quote data. When supplied, the snap anchor's
+   * effective NW is recomputed via `composeNetWorthAt(snap, t)`
+   * using quote-driven prices at snap.t. This makes the anchor
+   * use the SAME math as the pre-snap reconstruction, eliminating
+   * the boundary discontinuity regardless of whether the
+   * time-travel historical-price fetch succeeded (Yahoo
+   * rate-limit failures were leaving snap.lastPriceUSD pinned at
+   * today's price, making the snap anchor reflect today's
+   * portfolio value on a past date — and the pre-snap region was
+   * back-projecting to past prices via quotes, so they didn't
+   * meet at the boundary).
+   */
+  quotes?: Record<string, Quote | null>,
+  now?: number,
 ): HistoryPoint[] {
   // Round-1 audit MED: don't drop legitimate zero/negative-NW
   // snapshots here. A user underwater (high mortgage, low assets)
@@ -663,14 +653,15 @@ export function overlaySnapshots(
       }
       return extra;
     }
+    const effectiveNow = now ?? Date.now();
     const anchors: Anchor[] = sorted.map((s) => ({
       t: s.t,
-      // Use effective NW (shares × snap.lastPriceUSD for
-      // live-priceable holdings) instead of the recorded
-      // `s.netWorthUSD` — for time-travel snaps, the recorded
-      // value was computed with TODAY's valueUSDs pinned to a
-      // PAST date, which creates a chart discontinuity.
-      netWorthUSD: effectiveSnapNW(s) + adjustForBackdated(s),
+      // Use the snap's effective NW computed via the SAME math as
+      // the pre-snap reconstruction (compose at snap.t against
+      // live quotes), so the boundary lines up regardless of
+      // whether the time-travel historical-price fetch succeeded
+      // when the snap was saved.
+      netWorthUSD: effectiveSnapNW(s, quotes, effectiveNow) + adjustForBackdated(s),
     }));
     // Add the live anchor. Two cases:
     //   1. There's no snapshot at the last-bucket t: append the

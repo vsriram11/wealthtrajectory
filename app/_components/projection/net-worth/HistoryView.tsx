@@ -167,6 +167,16 @@ export function HistoryView({
         // May 2026, but older auto-snapshots from Aug/Oct 2025
         // don't — making the chart's Aug-Dec region understate.
         household,
+        // Quotes + now: the snap anchor is computed via the SAME
+        // compose math as the pre-snap reconstruction so the
+        // boundary lines up. Without quotes, the anchor falls back
+        // to the recorded snap.netWorthUSD which was computed at
+        // SAVE TIME (today's prices for time-travel saves), making
+        // the chart anchor sit at today's value on a past date and
+        // creating a visible vertical jump against the
+        // back-projected pre-snap region.
+        quotes,
+        undefined,
       ),
     [household, quotes, range, filteredSnapshots, netWorth],
   );
