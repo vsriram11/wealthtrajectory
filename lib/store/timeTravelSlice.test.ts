@@ -257,6 +257,114 @@ describe("Time-travel slice — recordTimeTravelPriceOutcome (manual-entry surfa
   });
 });
 
+describe("Time-travel slice — enterTimeTravelEditingSnapshot (re-edit existing snapshots)", () => {
+  // USER GAP: "once you say save snapshot no way to further time
+  // travel edit that snapshot. There should be an edit time
+  // travel button for existing time travel snapshots."
+  // This action loads a snapshot's household + assumptions into
+  // the live store, captures the user's CURRENT live state as
+  // the baseline, and sets editingSnapshotT so the banner's Save
+  // flow overwrites the existing row instead of asking the user
+  // to confirm overwrite.
+
+  const SNAP_HH: Household = {
+    id: "snapshot-hh",
+    members: [{ id: "snap-m1", displayName: "From snapshot" } as never],
+    accounts: [],
+    liabilities: [],
+  };
+  const SNAP_T = Date.UTC(2023, 5, 15, 12);
+
+  it("loads the snapshot's household into the live store + captures baseline", () => {
+    const s = makeFakeStore({ mode: "real" });
+    const liveHouseholdBefore = s.state.household;
+    const a = createTimeTravelSliceActions(s.set);
+    a.enterTimeTravelEditingSnapshot({
+      t: SNAP_T,
+      household: SNAP_HH,
+      date: "2023-06-15",
+    });
+    expect(s.state.timeTravelActive).toBe(true);
+    expect(s.state.timeTravelDate).toBe("2023-06-15");
+    expect(s.state.editingSnapshotT).toBe(SNAP_T);
+    // Live household is now the snapshot's household.
+    expect(s.state.household).toBe(SNAP_HH);
+    // Baseline preserved the user's pre-edit state for Exit.
+    expect(s.state.baselineHousehold).toBe(liveHouseholdBefore);
+  });
+
+  it("optionally loads snapshot's assumptions when provided", () => {
+    const s = makeFakeStore({ mode: "real" });
+    const liveAssumptionsBefore = s.state.assumptions;
+    const snapAssumptions = {
+      ...liveAssumptionsBefore,
+      withdrawalRate: 0.035,
+    };
+    const a = createTimeTravelSliceActions(s.set);
+    a.enterTimeTravelEditingSnapshot({
+      t: SNAP_T,
+      household: SNAP_HH,
+      assumptions: snapAssumptions,
+      date: "2023-06-15",
+    });
+    expect(s.state.assumptions.withdrawalRate).toBe(0.035);
+    expect(s.state.baselineAssumptions).toBe(liveAssumptionsBefore);
+  });
+
+  it("keeps live assumptions when snapshot has no assumptions field", () => {
+    const s = makeFakeStore({ mode: "real" });
+    const liveAssumptionsBefore = s.state.assumptions;
+    const a = createTimeTravelSliceActions(s.set);
+    a.enterTimeTravelEditingSnapshot({
+      t: SNAP_T,
+      household: SNAP_HH,
+      assumptions: null,
+      date: "2023-06-15",
+    });
+    expect(s.state.assumptions).toBe(liveAssumptionsBefore);
+  });
+
+  it("refuses re-entry while already active (defense in depth)", () => {
+    const s = makeFakeStore({ mode: "real" });
+    const a = createTimeTravelSliceActions(s.set);
+    a.enterTimeTravel("2022-01-01");
+    a.enterTimeTravelEditingSnapshot({
+      t: SNAP_T,
+      household: SNAP_HH,
+      date: "2023-06-15",
+    });
+    // Date unchanged from original entry.
+    expect(s.state.timeTravelDate).toBe("2022-01-01");
+    expect(s.state.editingSnapshotT).toBeNull();
+  });
+
+  it("Exit restores the baseline + clears editingSnapshotT", () => {
+    const s = makeFakeStore({ mode: "real" });
+    const liveHHBefore = s.state.household;
+    const liveAssumpBefore = s.state.assumptions;
+    const a = createTimeTravelSliceActions(s.set);
+    a.enterTimeTravelEditingSnapshot({
+      t: SNAP_T,
+      household: SNAP_HH,
+      date: "2023-06-15",
+    });
+    a.exitTimeTravelDiscard();
+    expect(s.state.timeTravelActive).toBe(false);
+    expect(s.state.editingSnapshotT).toBeNull();
+    expect(s.state.household).toBe(liveHHBefore);
+    expect(s.state.assumptions).toBe(liveAssumpBefore);
+  });
+
+  it("editingSnapshotT is cleared by a fresh enterTimeTravel (regular entry)", () => {
+    const s = makeFakeStore({ mode: "real" });
+    // Simulate residual state from a prior session.
+    s.set(() => ({ editingSnapshotT: 12345 }));
+    const a = createTimeTravelSliceActions(s.set);
+    a.enterTimeTravel("2024-01-01");
+    expect(s.state.editingSnapshotT).toBeNull();
+  });
+});
+
 describe("Time-travel slice — mode behavior (user-reported no-op fix)", () => {
   it("allows enterTimeTravel regardless of mode (slice gate removed — UI gate is load-bearing)", () => {
     // The previous slice-level mode==="real" gate caused a

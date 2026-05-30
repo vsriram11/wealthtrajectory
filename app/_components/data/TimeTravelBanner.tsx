@@ -31,6 +31,12 @@ import { householdNetWorth } from "@/lib/types";
 export function TimeTravelBanner() {
   const active = useAppStore((s) => s.timeTravelActive);
   const date = useAppStore((s) => s.timeTravelDate);
+  // When set, the session was entered to EDIT an existing
+  // snapshot at this primary key. Skips the collision-prompt
+  // dialog on Save (user explicitly chose to overwrite) and
+  // adjusts the banner copy from "BACKDATING" → "EDITING
+  // SNAPSHOT" so the user knows what they're doing.
+  const editingSnapshotT = useAppStore((s) => s.editingSnapshotT);
   const household = useAppStore((s) => s.household);
   const exitTimeTravelDiscard = useAppStore((s) => s.exitTimeTravelDiscard);
   const bumpSnapshotsRevision = useAppStore((s) => s.bumpSnapshotsRevision);
@@ -111,18 +117,19 @@ export function TimeTravelBanner() {
   if (!active || !date) return null;
 
   const handleSave = async (overwrite = false) => {
-    const t = parseISO(date);
+    // When editing an existing snapshot, use its primary key
+    // directly — bypass the parsed-from-string `t` (which would
+    // anchor to noon UTC of the snapshot's display date,
+    // potentially mismatching the original `t` if the snapshot
+    // was originally taken at a non-noon timestamp). Also skip
+    // the collision-prompt: the user explicitly chose to
+    // overwrite this row.
+    const t = editingSnapshotT ?? parseISO(date);
     if (!Number.isFinite(t)) return;
+    const isEditingExisting = editingSnapshotT != null;
     setBusy(true);
     try {
-      // Collision check: refuse to silently overwrite an
-      // existing snapshot at the chosen `t`. The user is
-      // backdating to (say) 2024-05-01 noon UTC — if the
-      // monthly auto-snapshotter ALREADY wrote at that exact
-      // anchor, or the user previously saved a manual row
-      // there, we'd silently destroy it via Dexie `put`. Show
-      // a confirmation prompt instead.
-      if (!overwrite) {
+      if (!overwrite && !isEditingExisting) {
         const rows = await loadSnapshots();
         const existing = rows.find((r) => r.t === t);
         if (existing) {
@@ -198,7 +205,7 @@ export function TimeTravelBanner() {
       <div className="mx-auto flex max-w-md flex-wrap items-center justify-between gap-2">
         <div className="min-w-0 flex-1 text-[12px] font-semibold leading-snug">
           <span aria-hidden>⚠ </span>
-          BACKDATING for{" "}
+          {editingSnapshotT != null ? "EDITING SNAPSHOT" : "BACKDATING"} for{" "}
           <span className="num underline decoration-bg/40 underline-offset-2">
             {date}
           </span>{" "}
@@ -254,9 +261,17 @@ export function TimeTravelBanner() {
                 onClick={() => void handleSave()}
                 disabled={busy}
                 className="rounded-md bg-bg px-3 py-1 text-[11px] font-semibold text-accent disabled:opacity-40 active:opacity-80"
-                aria-label="Save the current state as a backdated snapshot and exit time-travel mode"
+                aria-label={
+                  editingSnapshotT != null
+                    ? "Save changes to the existing snapshot and exit time-travel mode"
+                    : "Save the current state as a backdated snapshot and exit time-travel mode"
+                }
               >
-                {busy ? "Saving…" : "Save snapshot"}
+                {busy
+                  ? "Saving…"
+                  : editingSnapshotT != null
+                    ? "Save changes"
+                    : "Save snapshot"}
               </button>
               <button
                 type="button"

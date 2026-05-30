@@ -44,6 +44,14 @@ import { EnterTimeTravelModal } from "./EnterTimeTravelModal";
 export function SnapshotsManager() {
   const household = useAppStore((s) => s.household);
   const mode = useAppStore((s) => s.mode);
+  // Snapshot edit-in-time-travel wiring. Action loads the
+  // snapshot's household into the live store + sets
+  // editingSnapshotT so the banner's Save flow overwrites the
+  // row directly (no collision dialog). User-reported gap.
+  const enterTimeTravelEditingSnapshot = useAppStore(
+    (s) => s.enterTimeTravelEditingSnapshot,
+  );
+  const timeTravelActive = useAppStore((s) => s.timeTravelActive);
   // R1-D3 audit CRITICAL fix: snapshots live in IDB, so CloudSyncer's
   // slice-reference diff is structurally blind to snapshot
   // mutations. Bump this counter after every successful write so
@@ -778,6 +786,34 @@ export function SnapshotsManager() {
                           </div>
                         </div>
                         <div className="flex items-center gap-1.5">
+                          {/* Edit in time-travel mode — only for
+                              composition-bearing snapshots (no
+                              point editing the holdings of a
+                              lightweight NW-only row). Disabled
+                              while ALREADY in time-travel
+                              (slice refuses re-entry too — UI
+                              gate matches). */}
+                          {s.household && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (!s.household) return;
+                                enterTimeTravelEditingSnapshot({
+                                  t: s.t,
+                                  household: s.household,
+                                  assumptions:
+                                    s.appState?.assumptions ?? null,
+                                  date: formatISODate(s.t),
+                                });
+                              }}
+                              disabled={busy || timeTravelActive}
+                              className="rounded border border-amber-300/40 bg-amber-300/10 px-2.5 py-1.5 text-[11px] text-amber-300 disabled:opacity-40 active:opacity-70"
+                              aria-label={`Re-enter time-travel mode to edit the holdings on the snapshot from ${formatDate(s.t)}`}
+                              title="Re-enter time-travel to edit this snapshot's holdings"
+                            >
+                              Time-travel edit
+                            </button>
+                          )}
                           <button
                             ref={(el) => {
                               if (el) editButtonRefs.current.set(s.t, el);
@@ -787,7 +823,7 @@ export function SnapshotsManager() {
                             onClick={() => handleStartEdit(s)}
                             disabled={busy}
                             className="rounded border border-border-strong bg-bg-elevated px-2.5 py-1.5 text-[11px] text-text-muted disabled:opacity-40 active:opacity-70 hover:text-text"
-                            aria-label={`Edit snapshot from ${formatDate(s.t)}, ${formatUSD(s.netWorthUSD)}`}
+                            aria-label={`Edit snapshot scalar fields (date, NW, label) from ${formatDate(s.t)}, ${formatUSD(s.netWorthUSD)}`}
                           >
                             Edit
                           </button>
@@ -850,6 +886,16 @@ function parseISO(s: string): number {
 
 function formatDate(t: number): string {
   return new Date(t).toLocaleDateString();
+}
+
+/**
+ * Convert a snapshot's primary key (timestamp ms) back into a
+ * YYYY-MM-DD ISO string for the time-travel banner's display.
+ * Anchored to UTC so the round-trip through parseISO (noon UTC)
+ * + new Date(t).toISOString() reproduces the same string.
+ */
+function formatISODate(t: number): string {
+  return new Date(t).toISOString().slice(0, 10);
 }
 
 /**

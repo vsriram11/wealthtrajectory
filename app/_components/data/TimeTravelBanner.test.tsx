@@ -69,6 +69,7 @@ function resetStore() {
     timeTravelDate: null,
     baselineHousehold: null,
     baselineAssumptions: null,
+    editingSnapshotT: null,
     snapshotsRevision: 0,
   });
 }
@@ -247,6 +248,71 @@ describe("TimeTravelBanner", () => {
       for (let i = 0; i < 8; i++) await Promise.resolve();
     });
     expect(recordSnapshotMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("EditingSnapshotT: bypasses collision dialog and overwrites the existing row directly (user-reported)", async () => {
+    // When the user entered via "Time-travel edit" on an existing
+    // snapshot, the banner SKIPS the collision prompt (they
+    // explicitly chose to overwrite) and saves directly to the
+    // snapshot's primary key.
+    loadSnapshotsMock.mockResolvedValue([
+      {
+        t: Date.UTC(2023, 5, 15, 12),
+        netWorthUSD: 100_000,
+        source: "manual",
+        label: "Original",
+      },
+    ] as never);
+    act(() => {
+      // Simulate entering via enterTimeTravelEditingSnapshot:
+      // editingSnapshotT is set to the snapshot's primary key.
+      useAppStore.setState({
+        timeTravelActive: true,
+        timeTravelDate: "2023-06-15",
+        editingSnapshotT: Date.UTC(2023, 5, 15, 12),
+        baselineHousehold: useAppStore.getState().household,
+        baselineAssumptions: useAppStore.getState().assumptions,
+      });
+    });
+    render(<TimeTravelBanner />);
+    const saveBtn = screen.getByRole("button", {
+      name: /Save changes to the existing snapshot/i,
+    });
+    await act(async () => {
+      fireEvent.click(saveBtn);
+      for (let i = 0; i < 8; i++) await Promise.resolve();
+    });
+    // Recorded once — straight overwrite, no collision prompt.
+    expect(recordSnapshotMock).toHaveBeenCalledTimes(1);
+    const arg = recordSnapshotMock.mock.calls[0][0] as { t: number };
+    // Uses the existing snapshot's primary key (editingSnapshotT)
+    // — NOT the parsed-from-string date.
+    expect(arg.t).toBe(Date.UTC(2023, 5, 15, 12));
+    // Session exited.
+    expect(useAppStore.getState().timeTravelActive).toBe(false);
+  });
+
+  it("EditingSnapshotT: button label changes to 'Save changes' (UX cue)", () => {
+    act(() => {
+      useAppStore.setState({
+        timeTravelActive: true,
+        timeTravelDate: "2023-06-15",
+        editingSnapshotT: Date.UTC(2023, 5, 15, 12),
+        baselineHousehold: useAppStore.getState().household,
+        baselineAssumptions: useAppStore.getState().assumptions,
+      });
+    });
+    render(<TimeTravelBanner />);
+    expect(
+      screen.queryByRole("button", { name: /Save the current state/i }),
+    ).toBeNull();
+    expect(
+      screen.getByRole("button", {
+        name: /Save changes to the existing snapshot/i,
+      }),
+    ).toBeTruthy();
+    // Banner copy is "EDITING SNAPSHOT" not "BACKDATING".
+    expect(screen.getByText(/EDITING SNAPSHOT/i)).toBeTruthy();
   });
 
   it("Collision: 'Keep existing' cancels without writing and stays in session", async () => {

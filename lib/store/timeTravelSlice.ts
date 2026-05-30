@@ -265,6 +265,7 @@ export function createTimeTravelSliceActions(
           timeTravelDate: null,
           baselineHousehold: null,
           baselineAssumptions: null,
+          editingSnapshotT: null,
           household: restoredHousehold,
           assumptions: restoredAssumptions,
           // Clear the price-status bookkeeping too — it's
