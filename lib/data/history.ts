@@ -141,17 +141,39 @@ export function reconstructHistory(
   now = Date.now(),
   snapshots: Snapshot[] = [],
 ): HistoryPoint[] {
-  const start = rangeStartMs(range, now);
-  if (start === 0) {
-    const earliest = earliestQuoteTimestamp(quotes);
-    if (earliest != null) {
-      return reconstructHistory(
-        household,
-        quotes,
-        "5Y",
-        now,
-        snapshots,
-      ).filter((p) => p.t >= earliest);
+  let start = rangeStartMs(range, now);
+  if (range === "ALL") {
+    // R7 audit: the ALL range previously recursed into "5Y" and
+    // filtered to the earliest QUOTE timestamp. Two bugs there:
+    //   (a) when no quotes existed (all-manual household), the
+    //       recursion was skipped and `start` stayed at 0 (Unix
+    //       epoch) — chart became a nonsensical 1970-onward sweep.
+    //   (b) when quotes existed older than 5y, the chart silently
+    //       capped at 5y but still labeled itself "ALL".
+    //
+    // Fix: derive the earliest meaningful start from BOTH the
+    // quote earliest AND the oldest snapshot t; take the older of
+    // the two. Fall back to 5y if neither exists.
+    const earliestQuote = earliestQuoteTimestamp(quotes);
+    const oldestSnapT = snapshots.reduce<number | null>(
+      (acc, s) =>
+        Number.isFinite(s.t) && (acc === null || s.t < acc) ? s.t : acc,
+      null,
+    );
+    let derivedStart: number | null = null;
+    if (earliestQuote != null && oldestSnapT != null) {
+      derivedStart = Math.min(earliestQuote, oldestSnapT);
+    } else if (earliestQuote != null) {
+      derivedStart = earliestQuote;
+    } else if (oldestSnapT != null) {
+      derivedStart = oldestSnapT;
+    }
+    if (derivedStart != null && derivedStart > 0 && derivedStart < now) {
+      start = derivedStart;
+    } else {
+      // No quotes, no snapshots — fall back to 5y so the chart
+      // still renders something instead of an epoch sweep.
+      start = rangeStartMs("5Y", now);
     }
   }
 
@@ -202,14 +224,31 @@ export function reconstructHistory(
   // that snapshot's window, not flat-lined).
   let newlyAddedFlatUSD = 0;
   const newlyAddedIds = new Set<string>();
+  // Liability parallel to newlyAddedIds (R8 audit): liabilities
+  // have no `acquiredAt` field on the type, so we can't ask the
+  // user when the debt began. Without a guard, a mortgage the
+  // user records TODAY would subtract from every past bucket —
+  // making historical NW look artificially negative through dates
+  // that pre-date the debt. Heuristic: any liability present in
+  // the LIVE household but ABSENT from every rich snapshot is
+  // treated as "newly recorded today" → excluded from the past
+  // subtraction. (For pre-snapshot buckets where composition
+  // falls back to live, composeNetWorthAt consults this set; for
+  // snapshot-composition buckets, the snapshot's own liabilities
+  // are used by default, so no extra filtering needed.)
+  const newlyAddedLiabilityIds = new Set<string>();
   if (richSnapshots.length > 0) {
     const oldestSnapshotT = richSnapshots[0].t;
     const idsInSnapshotHistory = new Set<string>();
+    const liabilityIdsInSnapshotHistory = new Set<string>();
     for (const snap of richSnapshots) {
       for (const acct of snap.household.accounts) {
         for (const h of acct.holdings ?? []) {
           idsInSnapshotHistory.add(h.id);
         }
+      }
+      for (const liability of snap.household.liabilities ?? []) {
+        liabilityIdsInSnapshotHistory.add(liability.id);
       }
     }
     for (const acct of household.accounts) {
@@ -239,6 +278,11 @@ export function reconstructHistory(
         }
       }
     }
+    for (const liability of household.liabilities ?? []) {
+      if (!liabilityIdsInSnapshotHistory.has(liability.id)) {
+        newlyAddedLiabilityIds.add(liability.id);
+      }
+    }
   }
 
   const days = Math.max(2, Math.ceil((now - start) / MS_PER_DAY));
@@ -248,8 +292,19 @@ export function reconstructHistory(
     const compSnap = pickCompositionSnapshot(richSnapshots, t);
     const composition = compSnap?.household ?? household;
     const nw =
-      composeNetWorthAt(composition, quotes, t, now, newlyAddedIds) +
-      newlyAddedFlatUSD;
+      composeNetWorthAt(
+        composition,
+        quotes,
+        t,
+        now,
+        newlyAddedIds,
+        // Liability exclusion only applies when the composition is
+        // the LIVE household (pre-first-snapshot buckets). When
+        // composition is a snapshot's household, that snapshot's
+        // own liabilities are the authoritative record of debt at
+        // that time — nothing to filter.
+        compSnap ? new Set<string>() : newlyAddedLiabilityIds,
+      ) + newlyAddedFlatUSD;
     out.push({ t, netWorthUSD: nw });
   }
   return out;
@@ -282,10 +337,21 @@ function composeNetWorthAt(
    * back-projected via CAGR (inventing growth that didn't happen).
    */
   newlyAddedIds: Set<string> = new Set(),
+  /**
+   * R8 audit: IDs of liabilities present in the LIVE household
+   * but absent from every snapshot — "newly recorded today."
+   * Excluded from the historical subtraction since a debt
+   * recorded today shouldn't pull down past-bucket NW. Only
+   * meaningful when the caller passes the live household as
+   * `household` (pre-first-snapshot region); for snapshot-
+   * composition buckets, the snapshot's own liabilities are
+   * authoritative and the caller passes an empty set here.
+   */
+  newlyAddedLiabilityIds: Set<string> = new Set(),
 ): number {
   const cashTotal = sumCash(household);
   const liabilitiesTotal = household.liabilities.reduce(
-    (s, l) => s + l.balanceUSD,
+    (s, l) => (newlyAddedLiabilityIds.has(l.id) ? s : s + l.balanceUSD),
     0,
   );
   let nw = cashTotal - liabilitiesTotal;

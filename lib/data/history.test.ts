@@ -766,4 +766,71 @@ describe("reconstructHistory — newly-added holdings (user-reported fake-gain f
     // Year-ago value is back-projected (lower due to CAGR).
     expect(out[0].netWorthUSD).toBeLessThan(100_000);
   });
+
+  it("newly-added liability does NOT subtract from past buckets (R8 audit fix)", () => {
+    // User adds a liability TODAY (e.g. records a mortgage they
+    // just opened). The chart's historical buckets must not be
+    // pulled down by this debt — it didn't exist back then. A
+    // liability present in the LIVE household but absent from
+    // every snapshot is treated as "newly recorded today" and
+    // excluded from the past subtraction.
+    const householdBefore: Household = {
+      id: "hh",
+      members: [{ id: "m1", displayName: "Tester" } as never],
+      accounts: [
+        {
+          id: "a1",
+          displayName: "Cash",
+          category: "CHECKING",
+          ownerId: "m1" as never,
+          monthlyContributionUSD: 0,
+          holdings: [
+            {
+              kind: "cash",
+              id: "c1" as never,
+              valueUSD: 200_000,
+              expectedRealCAGR: 0,
+            } as never,
+          ],
+        },
+      ],
+      liabilities: [],
+    };
+    const householdLive: Household = {
+      ...householdBefore,
+      // Mortgage added TODAY but not in any snapshot.
+      liabilities: [
+        {
+          id: "L_NEW" as never,
+          ownerId: "m1" as never,
+          name: "Mortgage",
+          balanceUSD: 500_000,
+          aprPct: 6,
+        } as never,
+      ],
+    };
+    const snapshots: Snapshot[] = [
+      {
+        t: T_YEAR_AGO,
+        netWorthUSD: 200_000,
+        household: householdBefore,
+      },
+    ];
+    // Use a 5Y range so the chart covers a window starting BEFORE
+    // T_YEAR_AGO — that gives us pre-first-snapshot buckets to
+    // validate. (1Y range starts ~exactly at T_YEAR_AGO so every
+    // bucket is at-or-after the snapshot, never falling into the
+    // live-composition branch.)
+    const out = reconstructHistory(householdLive, {}, "5Y", T_NOW, snapshots);
+    // The very first bucket pre-dates every snapshot — composition
+    // falls back to the LIVE household, but the newly-added
+    // liability MUST be excluded. Without the fix, the first
+    // bucket would subtract $500k → -$300k. With the fix, the
+    // mortgage drops out and the bucket reflects assets only.
+    expect(out[0].netWorthUSD).toBeGreaterThanOrEqual(0);
+    // Sanity: at the snapshot anchor (~T_YEAR_AGO), the chart uses
+    // the snapshot's composition (which has no liabilities) → $200k.
+    const yearAgoIdx = out.findIndex((p) => p.t >= T_YEAR_AGO);
+    expect(out[yearAgoIdx].netWorthUSD).toBe(200_000);
+  });
 });

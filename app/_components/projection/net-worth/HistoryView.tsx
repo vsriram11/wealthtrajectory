@@ -413,8 +413,8 @@ function CompositionAtPoint({
       </div>
       <div className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 text-[10px] text-text-dim">
         <span>
-          Composition on{" "}
-          {snap ? new Date(snap.t).toLocaleDateString() : "live"}
+          Composition as of {new Date(t).toLocaleDateString()}
+          {snap ? null : " (live)"}
         </span>
         {segments.map((s, i) => (
           <span key={i} className="flex items-center gap-1">
