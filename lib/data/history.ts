@@ -307,6 +307,64 @@ export function reconstructHistory(
       ) + newlyAddedFlatUSD;
     out.push({ t, netWorthUSD: nw });
   }
+
+  // Smooth the pre-first-snapshot region so it meets the first
+  // snapshot's anchor without a visible discontinuity. The
+  // back-projection (CAGR estimate) and the snapshot's recorded
+  // NW are computed differently and don't naturally agree at the
+  // boundary: the user sees a vertical jump up/down at the first
+  // snapshot's date that has nothing to do with actual portfolio
+  // movement (it's the chart's estimation error becoming visible).
+  //
+  // Fix: compute the reconstructed value AT the first snapshot's
+  // t, compute the snapshot's anchor NW (with the same backdated-
+  // holding augmentation overlaySnapshots will apply), additive-
+  // correct every pre-first-snapshot bucket by their difference.
+  // The CAGR-shape of the curve is preserved; only the absolute
+  // level shifts so the boundary lines up.
+  if (richSnapshots.length > 0) {
+    const firstSnap = richSnapshots[0];
+    const reconstructedAtBoundary =
+      composeNetWorthAt(
+        household,
+        quotes,
+        firstSnap.t,
+        now,
+        newlyAddedIds,
+        newlyAddedLiabilityIds,
+      ) + newlyAddedFlatUSD;
+    // Compute the snapshot's effective anchor NW: recorded NW +
+    // any backdated live holdings missing from the snapshot
+    // (mirrors overlaySnapshots' adjustForBackdated).
+    let snapAnchorNW = firstSnap.netWorthUSD;
+    const snapIds = new Set<string>();
+    for (const acct of firstSnap.household.accounts) {
+      for (const h of acct.holdings ?? []) snapIds.add(h.id);
+    }
+    for (const acct of household.accounts) {
+      for (const h of acct.holdings ?? []) {
+        if (snapIds.has(h.id)) continue;
+        const acquiredAt =
+          "acquiredAt" in h
+            ? (h.acquiredAt as number | null | undefined)
+            : null;
+        if (acquiredAt == null || acquiredAt > firstSnap.t) continue;
+        if (!Number.isFinite(h.valueUSD) || h.valueUSD <= 0) continue;
+        snapAnchorNW += h.valueUSD;
+      }
+    }
+    const correction = snapAnchorNW - reconstructedAtBoundary;
+    if (Number.isFinite(correction) && Math.abs(correction) > 0.01) {
+      for (let i = 0; i < out.length; i++) {
+        if (out[i].t < firstSnap.t) {
+          out[i] = {
+            t: out[i].t,
+            netWorthUSD: out[i].netWorthUSD + correction,
+          };
+        }
+      }
+    }
+  }
   return out;
 }
 

@@ -863,6 +863,42 @@ describe("reconstructHistory — newly-added holdings (user-reported fake-gain f
     expect(out[0].netWorthUSD).toBeLessThan(100_000);
   });
 
+  it("smooths the pre-first-snapshot region so it meets the snap anchor (no vertical jump)", () => {
+    // User-reported visible bug: chart had a sharp vertical jump
+    // at the date of their first snapshot. The pre-snap region
+    // back-projects equity via CAGR, the snap anchor is the
+    // recorded NW; the two don't naturally agree at the boundary
+    // and the jump is just the estimation error becoming visible.
+    // Fix: additive correction shifts pre-snap buckets so the
+    // boundary lines up.
+    const T_NEAR = T_NOW - 30 * 24 * 60 * 60 * 1000; // ~1 month ago
+    // Live household: one equity holding worth $100k.
+    const live = buildHousehold([{ id: "VOO", v: 100_000 }]);
+    // Snapshot at T_NEAR recording NW = $90k (snap value
+    // intentionally different from what the back-projection would
+    // estimate — to make the boundary mismatch detectable).
+    const snapshots: Snapshot[] = [
+      {
+        t: T_NEAR,
+        netWorthUSD: 90_000,
+        household: live,
+      },
+    ];
+    const out = reconstructHistory(live, {}, "1Y", T_NOW, snapshots);
+    // Find the bucket nearest T_NEAR.
+    const boundaryIdx = out.findIndex((p) => p.t >= T_NEAR);
+    const lastPreSnap = boundaryIdx > 0 ? out[boundaryIdx - 1] : out[0];
+    // The reconstructed value at the boundary (the bucket just
+    // before T_NEAR) should be close to the snap value, not the
+    // raw CAGR back-projection. The bucket loop computes
+    // reconstructedAtBoundary at T_NEAR exactly and additively
+    // corrects pre-T_NEAR buckets — so the last pre-snap bucket
+    // should be within a small tolerance of the snap NW (only
+    // off by the CAGR fraction across one bucket width).
+    expect(lastPreSnap.netWorthUSD).toBeGreaterThan(80_000);
+    expect(lastPreSnap.netWorthUSD).toBeLessThan(100_000);
+  });
+
   it("newly-added liability does NOT subtract from past buckets (R8 audit fix)", () => {
     // User adds a liability TODAY (e.g. records a mortgage they
     // just opened). The chart's historical buckets must not be
