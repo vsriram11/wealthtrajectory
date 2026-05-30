@@ -46,26 +46,50 @@ describe("Time-travel slice — enterTimeTravel", () => {
     expect(s.state.baselineAssumptions).not.toBeNull();
   });
 
-  it("baseline is a DEEP COPY, not a reference (no aliasing)", () => {
+  it("baseline is a REFERENCE to the current household (user-reported structuredClone crash fix)", () => {
+    // Contract change: baselineHousehold is now a PLAIN
+    // REFERENCE to the current household at entry-time, NOT a
+    // deep clone. A user hit "Maximum call stack size exceeded"
+    // on structuredClone(household) for their real data.
+    //
+    // The reference-only approach is correct because the
+    // project convention (CLAUDE.md §2 "Store action setters
+    // produce fresh references") guarantees Zustand actions
+    // create NEW arrays/objects rather than mutating in place.
+    // So when the user edits during time-travel, the edited
+    // path gets new refs; the original household reference
+    // (stored as baseline) is untouched.
+    const s = makeFakeStore();
+    const a = createTimeTravelSliceActions(s.set);
+    const householdAtEntry = s.state.household;
+    const assumptionsAtEntry = s.state.assumptions;
+    a.enterTimeTravel("2022-01-01");
+    // Baseline IS the entry-time reference.
+    expect(s.state.baselineHousehold).toBe(householdAtEntry);
+    expect(s.state.baselineAssumptions).toBe(assumptionsAtEntry);
+  });
+
+  it("baseline survives subsequent fresh-reference store mutations (the invariant the reference-only approach relies on)", () => {
+    // Simulate the real-world flow: user enters time-travel,
+    // THEN edits the household (via a normal Zustand action
+    // that creates a new household reference per the project
+    // convention). The baseline must STILL point at the
+    // pre-entry state — because Zustand actions don't mutate
+    // in place, only assign new refs.
     const s = makeFakeStore();
     const a = createTimeTravelSliceActions(s.set);
     a.enterTimeTravel("2022-01-01");
-    // Mutate the live household — baseline must NOT reflect the change.
-    const liveAccount = s.state.household.accounts[0];
-    expect(liveAccount).toBeDefined();
-    const baseline = s.state.baselineHousehold!;
-    // Reference identity check on the top-level Household + nested
-    // arrays (the catastrophic alias would share array references).
-    expect(baseline).not.toBe(s.state.household);
-    expect(baseline.accounts).not.toBe(s.state.household.accounts);
-    expect(baseline.members).not.toBe(s.state.household.members);
-    expect(baseline.liabilities).not.toBe(s.state.household.liabilities);
-    // Spot-check a nested object — Account is also a deep copy.
-    if (baseline.accounts.length > 0) {
-      expect(baseline.accounts[0]).not.toBe(s.state.household.accounts[0]);
-    }
-    // Baseline assumptions decoupled too.
-    expect(s.state.baselineAssumptions).not.toBe(s.state.assumptions);
+    const baselineRef = s.state.baselineHousehold!;
+    // Simulate a "fresh reference" mutation (the Zustand
+    // convention): assign a brand-new household object.
+    s.set(() => ({
+      household: { ...s.state.household, id: "mutated" as never },
+    }));
+    // Live household reflects the change.
+    expect(s.state.household.id).toBe("mutated");
+    // Baseline is untouched — still points at the original.
+    expect(s.state.baselineHousehold).toBe(baselineRef);
+    expect(s.state.baselineHousehold!.id).not.toBe("mutated");
   });
 
   it("refuses re-entry while already active (defense in depth)", () => {

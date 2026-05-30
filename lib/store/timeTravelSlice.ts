@@ -102,21 +102,33 @@ export function createTimeTravelSliceActions(
         // are in flight. The UI gates the entry button on
         // `timeTravelActive`; this is defense in depth.
         if (s.timeTravelActive) return {};
-        // NOTE: previously gated on `s.mode === "real"` as
-        // defense-in-depth. Removed because USER REPORTED the
-        // confirmation button was a silent no-op — root cause was
-        // mode state not yet propagated to the slice (or a stale
-        // snapshot of mode in the Zustand callback). The
-        // SnapshotsManager UI gate (`if (mode !== "real") return
-        // null;`) is the load-bearing protection — without that
-        // gate active, the modal can't even open. Defense-in-
-        // depth was strictly worse than the user-visible bug it
-        // caused, so it's removed.
+        // BASELINE = REFERENCE, NOT DEEP CLONE.
+        //
+        // Previously: `structuredClone(s.household)` and
+        // `structuredClone(s.assumptions)`. A USER hit "Maximum
+        // call stack size exceeded" on the structuredClone of
+        // their real household — probably due to deep nesting
+        // in scenarios / per-member assumptions / a future
+        // Proxy that structuredClone can't unwrap, or a Safari
+        // bug on iOS.
+        //
+        // The deep clone was overkill: the project convention
+        // (CLAUDE.md §2 "Store action setters produce fresh
+        // references") guarantees every Zustand action creates
+        // a NEW array/object instead of mutating in place. So
+        // when the user edits a holding during time-travel, the
+        // edited account/holding gets a NEW reference; the
+        // OTHER accounts/holdings and the original household
+        // reference are untouched. Storing `s.household` as the
+        // baseline reference + restoring it on exit is exactly
+        // as correct as the deep-clone version, AND works
+        // around whatever was making structuredClone recurse
+        // infinitely on this user's data.
         return {
           timeTravelActive: true,
           timeTravelDate: date,
-          baselineHousehold: structuredClone(s.household),
-          baselineAssumptions: structuredClone(s.assumptions),
+          baselineHousehold: s.household,
+          baselineAssumptions: s.assumptions,
         };
       }),
     exitTimeTravelDiscard: () =>
