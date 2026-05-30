@@ -179,6 +179,29 @@ export type MonteCarloInputs = {
       years: number;
       assumedInflationRate: number;
     };
+    /**
+     * Cash-bucket priority: when true, retirement-year
+     * withdrawals come from CASH FIRST (drained up to what's
+     * available) before spilling proportionally to non-cash
+     * classes. Models the "cash reserve" / "bond tent" SORR
+     * mitigation discussed in Pfau / Kitces literature.
+     *
+     * Orthogonal to the rebalance policy:
+     *   - `rebalance: "annual"` + this flag: cash gets refilled
+     *     at each year-start snap → ongoing SORR shield
+     *     (Kitces "refilling reserve" interpretation).
+     *   - `rebalance: "none"` + this flag: cash is NEVER refilled
+     *     by rebalance → depleting SORR shield, finite protection
+     *     for the early-retirement danger zone (Pfau "depleting
+     *     reserve" interpretation; user's intuition that bucket
+     *     "should just use up cash and never refill").
+     *
+     * In accumulation, this flag has no effect (no withdrawals
+     * to redirect). In retirement, cash-first applies whether
+     * the prior year was up or down — the bucket exists to be
+     * spent in retirement, not solely as a down-year guardrail.
+     */
+    cashBucketPriority?: boolean;
   };
   /**
    * Optional pre-retirement contribution. Modeled as positive
@@ -270,40 +293,46 @@ export type MonteCarloInputs = {
  *               ignored under this policy (no rebalance = no
  *               glide-target snap).
  */
-export type RebalancePolicy = "annual" | "none" | "bucket";
+/**
+ * The rebalance policy for the MC simulator. See `SimulationOptions`
+ * for the 2D matrix with `spending.cashBucketPriority`.
+ *
+ * HISTORY: until 2026-05 this union included a `"bucket"` value that
+ * collapsed "refilling reserve" + "down-year cash-first" into one
+ * policy and produced minimal observable signal vs "annual". The
+ * value was never persisted in any release lineage (UI state is
+ * useState-only — see `HistoricalMonteCarloCard.tsx:188-204`), so
+ * the union shrink required no migration. If a future feature
+ * persists `RebalancePolicy` to disk, a runtime guard MUST be added
+ * at the engine boundary to reject unknown strings (the current
+ * `?? "annual"` only handles nullish — see the whitelist
+ * normalization at the dispatch site).
+ */
+export type RebalancePolicy = "annual" | "none";
 
 export type SimulationOptions = {
   /** Historical dataset to draw from. Defaults to HISTORICAL_REAL_RETURNS. */
   dataset?: readonly AnnualRealReturns[];
   /**
-   * Rebalancing policy.
-   *   - "annual" (default): snap to target weights each year. Standard
-   *     retirement-survival convention (Trinity Study, cfiresim, …).
-   *   - "none": set-and-forget. Initial weights at year 0, then the
-   *     portfolio drifts based on differential class returns.
-   *   - "bucket": cash-bucket strategy (Kitces "bond tent" / Pfau
-   *     two-bucket). Same as "annual" EXCEPT in retirement years
-   *     where the prior year's stock return was negative — in those
-   *     years the simulator (a) skips the year-start snap so the
-   *     equity slice can recover unsold, and (b) takes the year's
-   *     withdrawal from the cash bucket first, only spilling to
-   *     other classes when cash runs dry. Next up-year's annual
-   *     snap automatically refills the cash bucket from appreciated
-   *     equity. The user must configure a non-zero cash slice for
-   *     this to matter; with zero cash the policy degrades silently
-   *     to standard annual rebalance with proportional draw.
+   * Rebalancing policy. Decides whether class balances snap to
+   * the target weights at each year-start.
+   *   - "annual" (default): snap to target weights each year.
+   *     Standard retirement-survival convention (Trinity Study,
+   *     cfiresim, …).
+   *   - "none": set-and-forget. Initial weights at year 0, then
+   *     the portfolio drifts based on differential class returns.
    *
-   *     Interaction with glidePath: in a down-followup year the
-   *     bucket policy SKIPS the annual snap — which means the
-   *     per-age glide-path target is NOT applied that year. The
-   *     portfolio holds the previous year's composition. Over a
-   *     multi-year drawdown this can stall glide-path migration
-   *     for multiple consecutive years before the next up-year's
-   *     snap catches the portfolio up to the age-resolved target.
-   *     This is intended: the WHOLE POINT of bucket is "don't
-   *     rebalance into a falling market." A user who wants strict
-   *     glide-path adherence regardless of returns should use the
-   *     "annual" policy.
+   * Cash-bucket priority is now ORTHOGONAL — see
+   * `spending.cashBucketPriority`. The 2×2 matrix:
+   *   - annual + no-bucket: Trinity baseline
+   *   - annual + bucket: refilling cash reserve (Kitces interp)
+   *   - none + no-bucket: drift, proportional draw
+   *   - none + bucket: depleting cash reserve (Pfau interp; the
+   *     SORR shield finite to the early-retirement years)
+   *
+   * (Older `"bucket"` rebalance policy collapsed two distinct
+   * strategies and produced minimal observable difference vs
+   * Annual — replaced by the 2D model.)
    */
   rebalance?: RebalancePolicy;
 };
@@ -467,12 +496,9 @@ export function simulatePath(
   // simulator then uses a zero-filled stocks2x stream.
   let stocks2xReturns: number[];
   let pathId: string;
-  // Note: `options` is reserved for the dataset hook used by tests
-  // that swap in a synthetic return series. Other options used to
-  // live here (the old `rebalance` flag — see SimulationOptions
-  // doc) but were no-ops, so the parameter is currently
-  // unconsumed inside the loop. Kept in the signature for the
-  // dataset hook and future expansion.
+  // Note: `options` carries the rebalance policy (consumed at line
+  // ~502 below) plus a dataset hook used by tests that swap in a
+  // synthetic return series.
   let options: SimulationOptions;
   if (typeof stocks2xReturnsOrPathId === "string") {
     // Old 5-stream signature: (..., realEstate, pathId, options?)
@@ -485,7 +511,15 @@ export function simulatePath(
     pathId = (pathIdOrOptions as string) ?? "";
     options = optionsArg;
   }
-  const rebalancePolicy: RebalancePolicy = options.rebalance ?? "annual";
+  // Whitelist the rebalance policy at the engine boundary. TypeScript
+  // pins the union at compile time, but a runtime untrusted-string
+  // (e.g. legacy persisted state, future user import, dev tools
+  // tampering) would slip past `?? "annual"` and fall through both
+  // branches below — silently behaving like a third undocumented
+  // mode. Explicit whitelist + the exhaustive `else` block at the
+  // dispatch site locks the contract.
+  const rebalancePolicy: RebalancePolicy =
+    options.rebalance === "none" ? "none" : "annual";
   const yearsPre = inputs.yearsUntilRetirement ?? 0;
   const yearsRet = inputs.retirementHorizonYears;
   const totalYears = yearsPre + yearsRet;
@@ -547,34 +581,33 @@ export function simulatePath(
   let lB = nw * initialWeights.wL;
 
   for (let y = 0; y < totalYears; y++) {
-    // "bucket" mode behaves like "annual" except in retirement
-    // years following a market drop, where the snap is skipped so
-    // the equity slice can recover unsold AND the withdrawal is
-    // taken from the cash bucket first. Compute the per-year
-    // decision once so the snap branch + withdrawal branch agree.
+    // Cash-bucket priority is ORTHOGONAL to the rebalance policy:
+    // rebalance decides whether to SNAP each year; the bucket flag
+    // decides whether retirement-year WITHDRAWAL comes from cash
+    // first. See `RebalancePolicy` and `cashBucketPriority` docs
+    // for the full 2D model; brief summary:
+    //   - annual + no-bucket: Trinity baseline.
+    //   - annual + bucket:    "refilling" shield. CAVEAT: at
+    //     year-end MC snapshot resolution, this cell produces
+    //     IDENTICAL nw to annual+no-bucket because the next
+    //     year-start snap restores cash share. The within-year
+    //     cash-first sourcing matters for liquidity/tax timing
+    //     (not modeled here), not for survival rate. Tests
+    //     pin the observational equivalence (`toBeCloseTo`).
+    //   - none + no-bucket:   set-and-forget drift, proportional draw.
+    //   - none + bucket:      "depleting" shield. Cash never refills →
+    //     monotonic depletion → finite SORR protection. THIS is
+    //     the cell where MC shows divergence from baseline.
     //
-    // Trigger gate alignment with the variable-haircut feature:
-    // `y >= yearsPre` (first retirement year is eligible) AND
-    // `y > 0` (we need a prior-year stock return to read).
-    // CRUCIAL: this means a user who retires RIGHT AFTER a
-    // -30% accumulation-year crash IS protected by the bucket
-    // strategy in year 0 of retirement — the exact SORR window
-    // the strategy is designed for. An earlier off-by-one used
-    // `y > yearsPre` and silently excluded that case.
-    const bucketFiresThisYear =
-      rebalancePolicy === "bucket" &&
-      y >= yearsPre &&
-      y > 0 &&
-      (stockReturns[y - 1] ?? 0) < 0;
+    // Gate: `y >= yearsPre` (first retirement year eligible). A
+    // user who retires right after an accumulation-year crash IS
+    // protected by the bucket in year 0 of retirement.
+    const cashBucketActive =
+      inputs.spending?.cashBucketPriority === true && y >= yearsPre;
 
-    if (
-      rebalancePolicy === "annual" ||
-      (rebalancePolicy === "bucket" && !bucketFiresThisYear)
-    ) {
-      // Annual rebalance-to-target. Each year we snap to the target
-      // weights (static from `inputs.allocation`, or per-age from
-      // the glide path when configured) BEFORE applying that year's
-      // returns. Standard retirement-survival convention.
+    if (rebalancePolicy === "annual") {
+      // Annual rebalance-to-target. Snap to weights BEFORE returns.
+      // Standard retirement-survival convention.
       const { wS, wB, wC, wG, wR, wL } = weightsForYear(y);
       sB = nw * wS;
       bB = nw * wB;
@@ -582,9 +615,15 @@ export function simulatePath(
       gB = nw * wG;
       rB = nw * wR;
       lB = nw * wL;
+    } else if (rebalancePolicy === "none") {
+      // `none` mode: balances persist from the previous iteration. No snap.
+    } else {
+      // Exhaustiveness pin: TS will complain at compile time if a
+      // future contributor extends `RebalancePolicy` without adding
+      // a branch here. Cheap insurance against silent fall-through.
+      const _exhaustive: never = rebalancePolicy;
+      void _exhaustive;
     }
-    // For "none" mode AND "bucket" mode in a down-year-followup
-    // year, balances persist from the previous iteration. No snap.
 
     // Apply this year's real returns.
     const rs = stockReturns[y] ?? 0;
@@ -684,20 +723,27 @@ export function simulatePath(
     const cfWithGrowth = cf * (1 + rImplied / 2);
     nw = nwAfterReturns + cfWithGrowth;
 
-    if (bucketFiresThisYear) {
-      // Cash-bucket strategy: in a year following a market drop,
-      // the year's withdrawal comes out of the cash bucket first;
-      // any remainder spills proportionally across the OTHER
-      // classes. Net effect: equity stays unsold through the
-      // recovery year, materially reducing locked-in losses on
-      // the SORR-vulnerable early-retirement crash.
+    if (cashBucketActive) {
+      // Cash-bucket-priority withdrawal: in retirement years (with
+      // the flag enabled), the year's withdrawal comes out of the
+      // cash bucket FIRST; any remainder spills proportionally
+      // across the OTHER classes. Equity stays unsold through
+      // crashes, materially reducing locked-in losses on the
+      // SORR-vulnerable early-retirement window.
       //
-      // Income (positive cf component) is layered back through the
-      // standard proportional distribution — income isn't a
-      // "withdrawal" the user is choosing where to source from,
-      // it's an inflow that should land where new contributions
-      // would (i.e. spread by current weights). Net = -withdraw +
-      // income; we split that into the two pieces.
+      // Whether this is the REFILLING (Kitces) or DEPLETING (Pfau)
+      // SORR shield depends on the rebalance policy: with
+      // `annual`, the next year-start snap refills cash from
+      // appreciated equity (ongoing protection); with `none`, the
+      // cash bucket monotonically depletes (finite protection for
+      // the first ~5-10 years, then falls through).
+      //
+      // Income (positive cf) is layered back via the standard
+      // proportional distribution — income isn't a "withdrawal"
+      // the user is choosing where to source from. NEGATIVE income
+      // (partial-coast distribution) routes through the same
+      // cash-first → spill logic so the bucket shields equity from
+      // BOTH the planned spend AND any negative-income overlay.
       //
       // The mid-year growth adjustment applies to BOTH the
       // withdrawal and the income at the same blended rate the
@@ -724,12 +770,21 @@ export function simulatePath(
       // where new contributions would). The two operations use
       // different denominators on purpose.
       const nonCashTotal = sB + bB + gB + rB + lB;
-      if (drawRemaining > 0 && nonCashTotal > 0) {
-        sB -= drawRemaining * (sB / nonCashTotal);
-        bB -= drawRemaining * (bB / nonCashTotal);
-        gB -= drawRemaining * (gB / nonCashTotal);
-        rB -= drawRemaining * (rB / nonCashTotal);
-        lB -= drawRemaining * (lB / nonCashTotal);
+      if (drawRemaining > 0) {
+        if (nonCashTotal > 0) {
+          sB -= drawRemaining * (sB / nonCashTotal);
+          bB -= drawRemaining * (bB / nonCashTotal);
+          gB -= drawRemaining * (gB / nonCashTotal);
+          rB -= drawRemaining * (rB / nonCashTotal);
+          lB -= drawRemaining * (lB / nonCashTotal);
+        } else {
+          // No non-cash class to spill into. The unmet draw is a
+          // real obligation — push it into cash as a deficit so
+          // the trailing nw<=0 detector fires and we don't silently
+          // pretend the household withdrew less than they did.
+          // (Income, if any, will partially offset this below.)
+          cB -= drawRemaining;
+        }
       }
       // Clamp non-cash classes BEFORE the income redistribution so
       // the proportionality math (`sB / totalNow`) sees only non-
@@ -745,7 +800,13 @@ export function simulatePath(
       if (lB < 0) lB = 0;
       if (incomeAtMidYear > 0) {
         // Positive income: distribute to ALL classes by current
-        // weights.
+        // weights. Edge case: if the portfolio is drained (totalNow
+        // <= 0) — either because withdrawal exhausted everything or
+        // an unmet-withdrawal deficit pushed cash negative — drop
+        // the proportional math (denominator is zero or wrong sign)
+        // and land the income directly in cash. Matches a real
+        // household receiving a paycheck into checking when the
+        // brokerage is empty.
         const totalNow = sB + bB + cB + gB + rB + lB;
         if (totalNow > 0) {
           sB += incomeAtMidYear * (sB / totalNow);
@@ -754,6 +815,8 @@ export function simulatePath(
           gB += incomeAtMidYear * (gB / totalNow);
           rB += incomeAtMidYear * (rB / totalNow);
           lB += incomeAtMidYear * (lB / totalNow);
+        } else {
+          cB += incomeAtMidYear;
         }
       } else if (incomeAtMidYear < 0) {
         // NEGATIVE income (partial-coast distribution, sabbatical
@@ -771,12 +834,20 @@ export function simulatePath(
         cB = Math.max(0, cB) - distFromCash;
         const distRemaining = distributionAmount - distFromCash;
         const nonCashAfter = sB + bB + gB + rB + lB;
-        if (distRemaining > 0 && nonCashAfter > 0) {
-          sB -= distRemaining * (sB / nonCashAfter);
-          bB -= distRemaining * (bB / nonCashAfter);
-          gB -= distRemaining * (gB / nonCashAfter);
-          rB -= distRemaining * (rB / nonCashAfter);
-          lB -= distRemaining * (lB / nonCashAfter);
+        if (distRemaining > 0) {
+          if (nonCashAfter > 0) {
+            sB -= distRemaining * (sB / nonCashAfter);
+            bB -= distRemaining * (bB / nonCashAfter);
+            gB -= distRemaining * (gB / nonCashAfter);
+            rB -= distRemaining * (rB / nonCashAfter);
+            lB -= distRemaining * (lB / nonCashAfter);
+          } else {
+            // Symmetric to the withdrawal-deficit case above: no
+            // non-cash to drain, so the unmet negative-income
+            // obligation pushes cash into deficit. The trailing
+            // nw<=0 detector will fire.
+            cB -= distRemaining;
+          }
         }
       }
       // Final clamp after the negative-income spillover (which
@@ -804,16 +875,13 @@ export function simulatePath(
         rB = 0;
         lB = 0;
       }
-    } else if (rebalancePolicy === "none" || rebalancePolicy === "bucket") {
-      // Both modes maintain per-class balances across years.
-      // - "none": balances drift purely from differential class
-      //   returns. Cash flow is distributed proportionally to
-      //   current weights so cf itself doesn't force a rebalance.
-      // - "bucket" (snap-year case — prior was up OR y=0): the
-      //   year-start snap above set balances to target weights;
-      //   here we just keep them consistent with the new total
-      //   nw after cf, since the NEXT year may skip the snap and
-      //   needs real per-class numbers to read from.
+    } else if (rebalancePolicy === "none") {
+      // "none" mode without cash-bucket priority: cash flow is
+      // distributed proportionally to current (post-return) bucket
+      // weights so cf itself doesn't force a rebalance. The drift
+      // across years comes purely from differential class returns;
+      // this step just keeps the per-class balances consistent
+      // with the new total nw.
       if (nwAfterReturns > 0 && nw > 0) {
         const factor = nw / nwAfterReturns;
         sB *= factor;
@@ -831,9 +899,9 @@ export function simulatePath(
         lB = 0;
       }
     }
-    // "annual" mode doesn't need to update per-class balances —
-    // they'll be re-snapped to target weights × nw at the top of
-    // the next iteration.
+    // "annual" mode without cash-bucket priority doesn't need to
+    // update per-class balances — they'll be re-snapped to target
+    // weights × nw at the top of the next iteration.
 
     if (nw <= 0) {
       nw = 0;

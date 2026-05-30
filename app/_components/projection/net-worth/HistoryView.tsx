@@ -60,6 +60,8 @@ export function HistoryView({
   netWorth,
   memberId,
   empty,
+  scenarioName,
+  scenarioAdjustedNetWorth,
 }: {
   household: Household;
   netWorth: number;
@@ -68,6 +70,11 @@ export function HistoryView({
    *  headline stay member-consistent. */
   memberId: string | null;
   empty: boolean;
+  /** Active scenario name, or null when on the base. Surfaces the
+   *  mismatch between the dashboard headline (scenario-adjusted) and
+   *  the chart's today-pin (base — matches past snapshots). */
+  scenarioName?: string | null;
+  scenarioAdjustedNetWorth?: number;
 }) {
   const symbols = useMemo(() => uniqueSymbols(household), [household]);
   const [quotes, setQuotes] = useState<Record<string, Quote | null>>({});
@@ -75,6 +82,12 @@ export function HistoryView({
   const [loading, setLoading] = useState(false);
   const [range, setRange] = useState<HistoryRange>("1Y");
   const [hovered, setHovered] = useState<HistoryPoint | null>(null);
+  // Audit fix (round-3 BLOCK #2): subscribe to snapshotsRevision
+  // so the NW history view re-fetches on snapshot mutations
+  // (Add, Edit, Delete via SnapshotsManager; Save from
+  // TimeTravelBanner; auto-snapshotter writes). Without the
+  // dep, this view showed stale data until next mount.
+  const snapshotsRevision = useAppStore((s) => s.snapshotsRevision);
 
   useEffect(() => {
     let cancelled = false;
@@ -84,7 +97,7 @@ export function HistoryView({
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [snapshotsRevision]);
 
   // setLoading(true) below is the canonical "start an async data
   // load" pattern. The React 19 idiomatic alternative is Suspense
@@ -146,6 +159,24 @@ export function HistoryView({
         // card (and so a stale snapshot or out-of-date quote history
         // can't drop the right edge to ~$0).
         netWorth,
+        // Live household for the backdated-holding augmentation:
+        // snapshots recorded BEFORE the user added a backdated
+        // holding get their anchor NW bumped up to include the
+        // holding (per acquiredAt). User-reported bug: time-travel
+        // snapshot at Dec 2025 contains a private stock added in
+        // May 2026, but older auto-snapshots from Aug/Oct 2025
+        // don't — making the chart's Aug-Dec region understate.
+        household,
+        // Quotes + now: the snap anchor is computed via the SAME
+        // compose math as the pre-snap reconstruction so the
+        // boundary lines up. Without quotes, the anchor falls back
+        // to the recorded snap.netWorthUSD which was computed at
+        // SAVE TIME (today's prices for time-travel saves), making
+        // the chart anchor sit at today's value on a past date and
+        // creating a visible vertical jump against the
+        // back-projected pre-snap region.
+        quotes,
+        undefined,
       ),
     [household, quotes, range, filteredSnapshots, netWorth],
   );
@@ -171,8 +202,29 @@ export function HistoryView({
     );
   }
 
+  // Round-6 audit HIGH: when a scenario is active AND it materially
+  // shifts NW, the chart's today-pin (base) will disagree with the
+  // dashboard headline (scenario). Surface that so the user
+  // understands the chart shows actual recorded state, not the
+  // active scenario.
+  const showScenarioMismatchNotice =
+    scenarioName != null &&
+    typeof scenarioAdjustedNetWorth === "number" &&
+    Math.abs(scenarioAdjustedNetWorth - netWorth) >= 1;
+
   return (
     <>
+      {showScenarioMismatchNotice && (
+        <div
+          className="mt-3 rounded-md border border-amber-300/40 bg-amber-300/5 px-2 py-1.5 text-[10px] text-amber-300"
+          role="status"
+        >
+          History chart shows <em>actual</em> recorded state (today-pin{" "}
+          {formatUSD(netWorth)}). The headline NW above includes the
+          active scenario <em>{scenarioName}</em> projection (
+          {formatUSD(scenarioAdjustedNetWorth)}).
+        </div>
+      )}
       <div className="mt-3 flex items-center justify-between">
         <div className="num text-base font-semibold text-text">
           {formatUSD(hovered ? hovered.netWorthUSD : netWorth)}
@@ -202,7 +254,16 @@ export function HistoryView({
         when I went all-in on stocks" / "this is when I bought the
         house" without having to dig into the snapshot manager.
       */}
-      {hovered && <CompositionAtPoint t={hovered.t} snapshots={snapshots} />}
+      {/* Round-1 (snapshot audit) HIGH: pass `filteredSnapshots`
+          (not raw `snapshots`) so the composition pie matches the
+          line above when a member chip is active. */}
+      {hovered && (
+        <CompositionAtPoint
+          t={hovered.t}
+          snapshots={filteredSnapshots}
+          household={household}
+        />
+      )}
 
       <div className="mt-2">
         <HistoryChart
@@ -268,9 +329,19 @@ export function HistoryView({
 function CompositionAtPoint({
   t,
   snapshots,
+  household,
 }: {
   t: number;
   snapshots: Snapshot[];
+  /**
+   * The LIVE household. Used to merge in backdated holdings whose
+   * `acquiredAt` predates the latest at-or-before snapshot but that
+   * are missing from EVERY past snapshot (newly added today).
+   * Without this merge, NW total includes the holding (history.ts
+   * does this via newlyAddedFlatUSD) but the composition pill
+   * excludes it — the chart numbers wouldn't reconcile.
+   */
+  household: Household;
 }) {
   // Find the rich snapshot at-or-before t (if any).
   const rich = snapshots
@@ -283,7 +354,6 @@ function CompositionAtPoint({
       break;
     }
   }
-  if (!snap) return null;
 
   const totalsByKind: Record<string, number> = {
     equity: 0,
@@ -296,11 +366,60 @@ function CompositionAtPoint({
     other: 0,
   };
   let snapshotNetWorth = 0;
-  for (const account of snap.household.accounts) {
+  // Track the IDs included from the base composition so the
+  // backdated-merge loop below can avoid double-counting.
+  const baseIds = new Set<string>();
+
+  // Base composition = the snap's household (if a snap covers t)
+  // or the LIVE household (pre-first-snap region). Without the
+  // live fallback, hovering on any bucket BEFORE the first snap
+  // produced an empty pill — the user saw nothing for pre-Dec 30
+  // dates even though their backdated holdings claim to have
+  // existed then.
+  const baseHousehold = snap?.household ?? household;
+  for (const account of baseHousehold.accounts) {
     for (const holding of account.holdings) {
+      // For pre-snap buckets (baseHousehold = live), filter by
+      // acquiredAt: don't include holdings the user hadn't
+      // acquired yet at this point in time. For snap-composition
+      // buckets, the snap is authoritative — every holding in it
+      // is valid at the snap's t by definition.
+      if (!snap) {
+        const acquiredAt =
+          "acquiredAt" in holding
+            ? (holding.acquiredAt as number | null | undefined)
+            : null;
+        // Holdings without acquiredAt (cash / "other" / etc.)
+        // are treated as always-held; user has no way to set an
+        // acquisition date on those.
+        if (acquiredAt != null && acquiredAt > t) continue;
+      }
       totalsByKind[holding.kind] =
         (totalsByKind[holding.kind] ?? 0) + holding.valueUSD;
       snapshotNetWorth += holding.valueUSD;
+      baseIds.add(holding.id);
+    }
+  }
+
+  // Merge backdated holdings from the LIVE household that are
+  // missing from the base composition (e.g. snap was recorded
+  // BEFORE the user added a holding with acquiredAt predating
+  // the snap). Avoids the asymmetry where NW total via
+  // newlyAddedFlatUSD includes the holding but the pill excludes
+  // it.
+  for (const acct of household.accounts) {
+    for (const h of acct.holdings ?? []) {
+      if (baseIds.has(h.id)) continue;
+      const acquiredAt =
+        "acquiredAt" in h ? (h.acquiredAt as number | null | undefined) : null;
+      // The holding must claim to have existed at-or-before the
+      // bucket's t. A holding added today with acquiredAt=null
+      // (no historical claim) only appears at today's bucket
+      // (the live-NW pin) and shouldn't pollute past compositions.
+      if (acquiredAt == null || acquiredAt > t) continue;
+      if (!Number.isFinite(h.valueUSD) || h.valueUSD <= 0) continue;
+      totalsByKind[h.kind] = (totalsByKind[h.kind] ?? 0) + h.valueUSD;
+      snapshotNetWorth += h.valueUSD;
     }
   }
   if (snapshotNetWorth <= 0) return null;
@@ -327,7 +446,10 @@ function CompositionAtPoint({
         ))}
       </div>
       <div className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 text-[10px] text-text-dim">
-        <span>Composition on {new Date(snap.t).toLocaleDateString()}</span>
+        <span>
+          Composition as of {new Date(t).toLocaleDateString()}
+          {snap ? null : " (live)"}
+        </span>
         {segments.map((s, i) => (
           <span key={i} className="flex items-center gap-1">
             <span

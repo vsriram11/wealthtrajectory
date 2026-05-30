@@ -135,12 +135,24 @@ export function updateHoldingPrice<Ctx extends { household: Household }>(
  *
  * Manual-priced holdings are skipped — they don't subscribe to
  * live quotes.
+ *
+ * `mode`:
+ *   - "live" (default): the production refresh path. First-fetch
+ *     recomputes shares from the entered dollar value.
+ *   - "historical": time-travel apply. SKIPS the first-fetch
+ *     share-recompute — for a freshly-added holding during a
+ *     backdated session, the user's entered dollar value should
+ *     NOT be divided by the historical price (that would give
+ *     nonsense shares like "$5000 / $300 = 16.67 shares" when
+ *     the user intended just to record "$5000 in VOO on date D").
+ *     Round-5 audit BLOCK.
  */
 export function applyLivePriceTo<Ctx extends { household: Household }>(
   state: Ctx,
   symbol: string,
   price: number,
   pricedAt: number,
+  mode: "live" | "historical" = "live",
 ): { household: Household } {
   const upperSymbol = symbol.toUpperCase();
   return {
@@ -153,6 +165,26 @@ export function applyLivePriceTo<Ctx extends { household: Household }>(
           if (h.isManualPrice) return h;
           if (h.symbol.toUpperCase() !== upperSymbol) return h;
           const firstFetch = h.lastPricedAt == null;
+          // Historical mode: NEVER recompute valueUSD from
+          // existing shares × historical price. The shares were
+          // computed at TODAY's price → multiplying by past
+          // price yields garbage (audit R1 C2). Only update
+          // the lastPriceUSD + lastPricedAt fields so the UI
+          // can show "Last refreshed at <date>" without
+          // corrupting the user's dollar values.
+          //
+          // For the firstFetch case, same rule: user's
+          // entered dollar value is authoritative; don't divide
+          // by historical price to derive shares either (that
+          // would yield garbage shares).
+          if (mode === "historical") {
+            return {
+              ...h,
+              lastPriceUSD: price,
+              lastPricedAt: pricedAt,
+              // valueUSD + shares untouched.
+            };
+          }
           const shares =
             firstFetch && !h.enteredAsShares ? h.valueUSD / price : h.shares;
           return {

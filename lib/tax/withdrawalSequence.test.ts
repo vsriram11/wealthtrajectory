@@ -56,7 +56,10 @@ describe("withdrawalSequence", () => {
     ]);
     const seq = withdrawalSequence(hh, 60_000);
     const order = seq.rows.map((r) => r.bucket);
-    expect(order).toEqual(["taxable", "pre_tax", "roth", "hsa"]);
+    // Round-5 audit: education bucket added (priority 5) so 529 +
+    // Trump Account positions show up but stay last and ineligible
+    // for drawdown.
+    expect(order).toEqual(["taxable", "pre_tax", "roth", "hsa", "education"]);
   });
 
   it("aggregates within bucket (401k + Trad IRA both pre-tax)", () => {
@@ -116,5 +119,45 @@ describe("withdrawalSequence", () => {
     const seq = withdrawalSequence(hh, 60_000);
     const taxable = seq.rows.find((r) => r.bucket === "taxable")!;
     expect(taxable.totalUSD).toBe(135_000);
+  });
+
+  describe("Round 5 audit: education bucket separation", () => {
+    it("FIVE_29 routes to 'education' bucket, NOT roth (regression)", () => {
+      // Round-5 audit CRITICAL fix: 529 accounts previously
+      // collapsed into Roth, silently inflating tax-free retirement
+      // runway by the 529 balance. Now its own bucket so the card
+      // shows + excludes it.
+      const hh = household([
+        account("a1", "ROTH_IRA", "Roth IRA", 100_000),
+        account("a2", "FIVE_29", "Kid's 529", 200_000),
+      ]);
+      const seq = withdrawalSequence(hh, 60_000);
+      const roth = seq.rows.find((r) => r.bucket === "roth")!;
+      const edu = seq.rows.find((r) => r.bucket === "education")!;
+      expect(roth.totalUSD).toBe(100_000);
+      expect(edu.totalUSD).toBe(200_000);
+    });
+
+    it("TRUMP_ACCOUNT routes to 'education' bucket too", () => {
+      const hh = household([
+        account("a1", "TRUMP_ACCOUNT", "Newborn Trump Acct", 50_000),
+      ]);
+      const seq = withdrawalSequence(hh, 60_000);
+      const edu = seq.rows.find((r) => r.bucket === "education")!;
+      expect(edu.totalUSD).toBe(50_000);
+    });
+
+    it("education bucket has lowest priority (renders last)", () => {
+      const hh = household([
+        account("a1", "BROKERAGE", "Brokerage", 100_000),
+        account("a2", "FIVE_29", "529", 50_000),
+        account("a3", "HSA", "HSA", 25_000),
+      ]);
+      const seq = withdrawalSequence(hh, 60_000);
+      // Should be ordered: taxable (1), pretax (2 - empty),
+      // roth (3 - empty), hsa (4), education (5).
+      const order = seq.rows.map((r) => r.bucket);
+      expect(order.indexOf("education")).toBe(order.length - 1);
+    });
   });
 });

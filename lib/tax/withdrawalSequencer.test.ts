@@ -48,18 +48,21 @@ describe("runWithdrawalSequence — sequencing", () => {
         years: 3,
       }),
     );
-    // Year 0: taxable=100k, gross needed = 60k/0.8 = 75k. taxable
-    // covers 75k (only 100k there). So taxable drains to 25k, pretax
-    // untouched.
-    expect(r.rows[0].withdrawalsByBucket.taxable).toBeCloseTo(75_000, 0);
+    // Round-5 audit fix: taxable bucket is now taxed at LTCG rate
+    // (= ordinaryRate × 0.5 = 10% with rate 0.2), not the full
+    // ordinary rate. So gross needed = 60k / 0.9 = 66.67k from
+    // taxable. The bucket has 100k, so it covers; pretax untouched.
+    expect(r.rows[0].withdrawalsByBucket.taxable).toBeCloseTo(66_666.67, 0);
     expect(r.rows[0].withdrawalsByBucket.pretax).toBe(0);
-    expect(r.rows[0].endingBalances.taxable).toBeCloseTo(25_000, 0);
+    expect(r.rows[0].endingBalances.taxable).toBeCloseTo(33_333.33, 0);
 
-    // Year 1: taxable=25k, gross 75k. Taxable covers 25k, pretax covers 50k.
-    expect(r.rows[1].withdrawalsByBucket.taxable).toBeCloseTo(25_000, 0);
-    expect(r.rows[1].withdrawalsByBucket.pretax).toBeCloseTo(50_000, 0);
+    // Year 1: taxable=33.33k available. LTCG-grossed need = 66.67k;
+    // taxable can only deliver 33.33k (netting 30k after 10% LTCG).
+    // Remaining net = 30k from pretax at ordinary 20% → gross 37.5k.
+    expect(r.rows[1].withdrawalsByBucket.taxable).toBeCloseTo(33_333.33, 0);
+    expect(r.rows[1].withdrawalsByBucket.pretax).toBeCloseTo(37_500, 0);
 
-    // Year 2: taxable=0, gross 75k. All from pretax.
+    // Year 2: taxable=0. All net 60k from pretax → gross 75k.
     expect(r.rows[2].withdrawalsByBucket.taxable).toBe(0);
     expect(r.rows[2].withdrawalsByBucket.pretax).toBeCloseTo(75_000, 0);
   });
@@ -250,7 +253,195 @@ describe("runWithdrawalSequence — tax math", () => {
         startingAge: 60,
       }),
     );
-    // gross/year = 40k/0.8 = 50k; tax/year = 50k × 0.2 = 10k
-    expect(r.totalTaxesPaidUSD).toBeCloseTo(50_000, -2);
+    // Round-5 audit: taxable at LTCG 10% (= 0.2 × 0.5), pretax at
+    // ordinary 20%. Starting balances: $500k taxable + $500k pretax.
+    // Year 1-5: $40k net spend each. Taxable drained first.
+    // Year 1: $40k/0.9 = $44.44k from taxable → $4.44k LTCG tax.
+    // After 5 years, taxable depletes (500/44.44 ≈ 11 yrs but we
+    // only run 5), so all 5 years come from taxable. Total tax ≈
+    // $44.44k × 5 × 0.1 = $22.22k.
+    expect(r.totalTaxesPaidUSD).toBeCloseTo(22_222, -2);
+  });
+});
+
+describe("runWithdrawalSequence — Round 5 audit fixes", () => {
+  it("RMD uses PRIOR-YEAR-END (start-of-year) balance per IRS Pub 590-B", () => {
+    // Round-5 LOW fix: prior code used grown.pretax / divisor,
+    // over-stating RMD by one year of growth. Pin the correct
+    // base.
+    const r = runWithdrawalSequence(
+      baseInputs({
+        startingBalances: { taxable: 0, pretax: 1_000_000, roth: 0, hsa: 0 },
+        realCAGRByBucket: { taxable: 0, pretax: 0.1, roth: 0, hsa: 0 }, // 10% growth
+        startingAge: 73,
+        years: 1,
+        annualRealSpendUSD: 0, // ignore spend; just check RMD
+      }),
+    );
+    // IRS: RMD = prior-year-end FMV / divisor (age 73 = 26.5).
+    // Prior-year-end = startingBalance = $1M (NOT the grown $1.1M).
+    // Correct RMD = $1M / 26.5 = $37,735.85
+    expect(r.rows[0].rmdAmountUSD).toBeCloseTo(37_735.85, 0);
+  });
+
+  it("longTermCapGainsRate parameter applies to taxable bucket separately from ordinary", () => {
+    // Round-5 HIGH fix: prior code applied retirementTaxRate
+    // (ordinary) to taxable bucket too. New: separate ltcgRate
+    // parameter (default = ordinary × 0.5).
+    const explicit = runWithdrawalSequence(
+      baseInputs({
+        startingBalances: { taxable: 500_000, pretax: 0, roth: 0, hsa: 0 },
+        realCAGRByBucket: { taxable: 0, pretax: 0, roth: 0, hsa: 0 },
+        startingAge: 60,
+        years: 1,
+        annualRealSpendUSD: 40_000,
+        retirementTaxRate: 0.32, // ordinary
+        longTermCapGainsRate: 0.15, // explicit LTCG
+      }),
+    );
+    // gross from taxable = 40k / (1 - 0.15) = $47,059
+    // tax = $47,059 × 0.15 = $7,059
+    expect(explicit.rows[0].withdrawalsByBucket.taxable).toBeCloseTo(
+      47_058.82,
+      0,
+    );
+    expect(explicit.rows[0].taxesPaidUSD).toBeCloseTo(7_058.82, 0);
+
+    // Default ltcg = ordinaryRate × 0.5 = 0.16
+    const defaultLTCG = runWithdrawalSequence(
+      baseInputs({
+        startingBalances: { taxable: 500_000, pretax: 0, roth: 0, hsa: 0 },
+        realCAGRByBucket: { taxable: 0, pretax: 0, roth: 0, hsa: 0 },
+        startingAge: 60,
+        years: 1,
+        annualRealSpendUSD: 40_000,
+        retirementTaxRate: 0.32,
+        // no explicit longTermCapGainsRate
+      }),
+    );
+    // gross = 40k / (1 - 0.16) = $47,619
+    // tax = $47,619 × 0.16 = $7,619
+    expect(defaultLTCG.rows[0].taxesPaidUSD).toBeCloseTo(7_619.05, 0);
+  });
+
+  it("Round 11: years=Infinity is clamped (no infinite loop)", () => {
+    const r = runWithdrawalSequence(
+      baseInputs({
+        startingBalances: { taxable: 100_000, pretax: 0, roth: 0, hsa: 0 },
+        realCAGRByBucket: { taxable: 0, pretax: 0, roth: 0, hsa: 0 },
+        startingAge: 60,
+        years: Number.POSITIVE_INFINITY,
+        annualRealSpendUSD: 10_000,
+      }),
+    );
+    // Clamped to ≤ 200 years per the safety bound.
+    expect(r.rows.length).toBeLessThanOrEqual(200);
+  });
+
+  it("Round 11: NaN years degrades to 0-year simulation", () => {
+    const r = runWithdrawalSequence(
+      baseInputs({
+        startingBalances: { taxable: 100_000, pretax: 0, roth: 0, hsa: 0 },
+        realCAGRByBucket: { taxable: 0, pretax: 0, roth: 0, hsa: 0 },
+        startingAge: 60,
+        years: Number.NaN,
+        annualRealSpendUSD: 10_000,
+      }),
+    );
+    expect(r.rows).toHaveLength(0);
+    expect(r.depletedYear).toBe(-1);
+  });
+
+  it("Round 11: NaN CAGR degrades to 0 growth (no NaN propagation)", () => {
+    const r = runWithdrawalSequence(
+      baseInputs({
+        startingBalances: {
+          taxable: 100_000,
+          pretax: 0,
+          roth: 0,
+          hsa: 0,
+        },
+        realCAGRByBucket: {
+          taxable: Number.NaN,
+          pretax: 0,
+          roth: 0,
+          hsa: 0,
+        },
+        startingAge: 60,
+        years: 3,
+        annualRealSpendUSD: 10_000,
+      }),
+    );
+    // Balances stay finite throughout — no NaN poisoning.
+    expect(Number.isFinite(r.endingTotalUSD)).toBe(true);
+    expect(Number.isFinite(r.totalTaxesPaidUSD)).toBe(true);
+    for (const row of r.rows) {
+      expect(Number.isFinite(row.endingBalances.taxable)).toBe(true);
+      expect(Number.isFinite(row.taxesPaidUSD)).toBe(true);
+    }
+  });
+
+  it("Round 11: ltcgRate > ordinaryRate is clamped to ordinaryRate", () => {
+    // A user mis-configuring ltcg=0.40, ordinary=0.20 would invert
+    // the bucket priority (taxable more expensive than pretax). The
+    // engine now clamps ltcg ≤ ordinary defensively.
+    const inverted = runWithdrawalSequence(
+      baseInputs({
+        startingBalances: {
+          taxable: 100_000,
+          pretax: 0,
+          roth: 0,
+          hsa: 0,
+        },
+        realCAGRByBucket: { taxable: 0, pretax: 0, roth: 0, hsa: 0 },
+        startingAge: 60,
+        years: 1,
+        annualRealSpendUSD: 10_000,
+        retirementTaxRate: 0.2,
+        longTermCapGainsRate: 0.4, // > ordinary
+      }),
+    );
+    const normal = runWithdrawalSequence(
+      baseInputs({
+        startingBalances: {
+          taxable: 100_000,
+          pretax: 0,
+          roth: 0,
+          hsa: 0,
+        },
+        realCAGRByBucket: { taxable: 0, pretax: 0, roth: 0, hsa: 0 },
+        startingAge: 60,
+        years: 1,
+        annualRealSpendUSD: 10_000,
+        retirementTaxRate: 0.2,
+        longTermCapGainsRate: 0.2, // = ordinary
+      }),
+    );
+    // Inverted run should match the normal (clamped) run — not
+    // produce a 2× higher tax.
+    expect(inverted.totalTaxesPaidUSD).toBeCloseTo(
+      normal.totalTaxesPaidUSD,
+      0,
+    );
+  });
+
+  it("pretax bucket continues to use ordinary rate (not LTCG)", () => {
+    // Verify the bucket-rate split is correct: only taxable gets
+    // LTCG treatment.
+    const r = runWithdrawalSequence(
+      baseInputs({
+        startingBalances: { taxable: 0, pretax: 500_000, roth: 0, hsa: 0 },
+        realCAGRByBucket: { taxable: 0, pretax: 0, roth: 0, hsa: 0 },
+        startingAge: 60,
+        years: 1,
+        annualRealSpendUSD: 40_000,
+        retirementTaxRate: 0.2,
+        longTermCapGainsRate: 0.1, // not used here (no taxable bucket)
+      }),
+    );
+    // gross from pretax = 40k / 0.8 = $50k
+    // tax = $50k × 0.2 = $10k (ordinary, not LTCG)
+    expect(r.rows[0].withdrawalsByBucket.pretax).toBeCloseTo(50_000, 0);
+    expect(r.rows[0].taxesPaidUSD).toBeCloseTo(10_000, 0);
   });
 });

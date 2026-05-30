@@ -190,6 +190,18 @@ export function aggregateAssumptions(
     fixedNominalValues.length > 0
       ? Math.max(...fixedNominalValues)
       : undefined;
+  // Assumed cap-gains fraction aggregates as a simple mean across
+  // members who have set it explicitly. When fully-undefined,
+  // leave undefined so the consumption site falls back to the
+  // engine default (1.0 — conservative). Mirrors the variable-
+  // share aggregation pattern.
+  const capGainsValues = effective
+    .map((a) => a.assumedCapGainsFraction)
+    .filter((v): v is number => v != null && Number.isFinite(v));
+  const meanCapGainsFraction =
+    capGainsValues.length > 0
+      ? capGainsValues.reduce((s, v) => s + v, 0) / capGainsValues.length
+      : undefined;
 
   return {
     ...household,
@@ -203,6 +215,7 @@ export function aggregateAssumptions(
     retirementVariableShare: meanVariableShare,
     retirementTaxRate: meanTax,
     retirementFixedNominalYears: maxFixedNominalYears,
+    assumedCapGainsFraction: meanCapGainsFraction,
   };
 }
 
@@ -330,6 +343,50 @@ export function useActiveProjection(): ActiveProjectionInput {
       memberAssumptions,
       scenarios,
       activeId,
+    ],
+  );
+}
+
+/**
+ * Scenario-neutral sibling of `useActiveProjection`. Honors member
+ * filter + liquidity view + per-member assumption overrides, but
+ * does NOT apply the active scenario's overrides — returns the
+ * "baseline" the user's current state would project to.
+ *
+ * Use for surfaces that ITERATE every scenario on their own (e.g.
+ * the Scenario Comparison Chart, which overlays all defined
+ * scenarios as separate curves on top of an explicit baseline).
+ * Using `useActiveProjection` for those surfaces would double-
+ * apply the active scenario's overrides to the chart's "active"
+ * curve AND mislabel the active scenario's data as "Baseline"
+ * (regression user reported on the Scenarios tab).
+ */
+export function useScenarioNeutralProjection(): ActiveProjectionInput {
+  const household = useAppStore((s) => s.household);
+  const memberId = useAppStore((s) => s.selectedMemberId);
+  const liquidityView = useAppStore((s) => s.liquidityView);
+  const assumptions = useAppStore((s) => s.assumptions);
+  const memberAssumptions = useAppStore((s) => s.memberAssumptions);
+  const scenarios = useAppStore((s) => s.scenarios);
+
+  return useMemo(
+    () =>
+      resolveActiveProjection({
+        household,
+        memberId,
+        liquidityView,
+        assumptions,
+        memberAssumptions,
+        scenarios,
+        activeId: null,
+      }),
+    [
+      household,
+      memberId,
+      liquidityView,
+      assumptions,
+      memberAssumptions,
+      scenarios,
     ],
   );
 }

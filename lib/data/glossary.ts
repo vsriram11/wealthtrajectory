@@ -183,7 +183,7 @@ export const GLOSSARY: GlossarySection[] = [
       {
         term: "Cash-bucket strategy",
         definition:
-          "Sometimes called the 'bond tent' or 'two-bucket' approach (originally popularized by Harold Evensky). Hold a small cash slice (typically 5%) at retirement; in years following a market drop, fund the year's spending from this bucket instead of selling equity at depressed prices. Next up-year's annual rebalance refills the bucket from appreciated equity. The MC stress test has a Bucket rebalance mode you can toggle.",
+          "Sometimes called the 'bond tent' or 'two-bucket' approach (originally popularized by Harold Evensky). Hold a small cash slice (typically 5%) at retirement; in years following a market drop, fund the year's spending from this bucket instead of selling equity at depressed prices. The MC stress test exposes this as a 'Cash-bucket priority' toggle that's ORTHOGONAL to the rebalance policy: with Annual rebalance the bucket refills each year (Kitces 'refilling reserve' — within-year liquidity protection, observationally equivalent to no-bucket at year-end MC snapshots); with None rebalance the bucket is never refilled by rebalance and trends toward depletion (Pfau 'depleting reserve' — finite SORR shield for the early-retirement danger zone, observably divergent in MC outcomes).",
         // (No source link: the bond-tent literature is spread
         // across Evensky / Kitces / Pfau articles, no single
         // canonical URL covers what THIS engine implements.
@@ -193,12 +193,64 @@ export const GLOSSARY: GlossarySection[] = [
       {
         term: "RMD (Required Minimum Distribution)",
         definition:
-          "The minimum withdrawal the IRS requires you to take from tax-deferred accounts (traditional IRA / 401(k)) starting at age 73 (or 75 under SECURE 2.0, depending on birth year). RMDs reduce your discretion over which buckets to drain first in retirement.",
+          "The minimum withdrawal the IRS requires you to take from tax-deferred accounts (traditional IRA / 401(k)) starting at age 73 (or 75 under SECURE 2.0, depending on birth year). RMDs reduce your discretion over which buckets to drain first in retirement. The IRS-mandated formula is `prior-year-end FMV / Uniform Lifetime Table divisor` — the year-by-year drawdown schedule on the Plan tab uses your start-of-year balance (= prior-year-end FMV), not the current year's grown balance.",
         source: {
           label: "IRS RMD overview",
           href: "https://www.irs.gov/retirement-plans/plan-participant-employee/retirement-topics-required-minimum-distributions-rmds",
         },
         aliases: ["required minimum distribution", "rmd"],
+      },
+      {
+        term: "Don't sell for cash-bucket funding (per-holding flag)",
+        definition:
+          "Tells the MC stress test's cash-bucket auto-sale path to keep this holding off the chopping block when funding a larger cash bucket. Useful for high-conviction positions, employer-share plays you can't unwind, or lots you're holding through retirement to capture the step-up basis at death. Doesn't affect liquid net worth or the deterministic Independence projection — only the per-MC-run sale plan that funds the cash bucket. Lives in the holding editor's advanced flags alongside 'Treat as illiquid.'",
+        aliases: [
+          "bucket opt-out",
+          "exclude from cash bucket",
+          "don't sell for cash bucket",
+        ],
+      },
+      {
+        term: "Cash bucket size override + tax model",
+        definition:
+          "When you size the MC cash bucket larger than your portfolio's projected cash share, the simulator models the cost of raising that cash: it walks sellable holdings in priority order (3x leveraged equity → 2x → 1x → bonds → commodity → non-primary RE → alts), preferring tax-advantaged accounts within each tier to minimize the bill. Capital-gains tax on the taxable-account portion is deducted from the simulator's starting NW. Primary residence, private stock, anything flagged 'isIlliquid', and per-holding opt-outs are excluded. Short-duration bonds (≤ 1 yr) are counted as cash-equivalent and not sold. Cost-basis assumption: treats all current value as gain (conservative).",
+        aliases: [
+          "cash bucket size",
+          "bucket funding tax",
+          "equity to cash swap tax",
+        ],
+      },
+      {
+        term: "Short-duration bonds (cash equivalent)",
+        definition:
+          "The MC stress test treats bond holdings with an average duration of 1 year or less (money-market funds, T-bills, short Treasuries, sub-1-year CDs) as already part of your SORR buffer — they're not auto-sold to fund a larger cash bucket. They still earn historical bond-series returns in the simulator; this convention only affects bucket-funding accounting. Captures the user-friendly intuition that 'a 6-month Treasury is basically cash for retirement planning purposes.'",
+        aliases: ["short bonds", "T-bills", "money market"],
+      },
+      {
+        term: "NIIT, IRMAA, state cap-gains (NOT modeled)",
+        definition:
+          "The MC stress test's retirement tax rate covers federal long-term capital gains only. The 3.8% NIIT surtax (Net Investment Income Tax, kicks in above ~$200k single / $250k MFJ), state capital-gains tax (0% in TX/FL to 13.3% in CA), bracket-climb from a large sale pushing 15% LTCG → 20%, and IRMAA Medicare Part B/D premium adders are NOT applied. A CA resident's real liability can be ~17 percentage points higher than the disclosure shows. Set your retirement tax rate higher to encompass federal + NIIT + state if you want the disclosure to match reality.",
+        source: {
+          label: "IRS NIIT overview",
+          href: "https://www.irs.gov/individuals/net-investment-income-tax",
+        },
+        aliases: [
+          "niit",
+          "irmaa",
+          "state tax",
+          "medicare premium",
+          "net investment income tax",
+        ],
+      },
+      {
+        term: "Step-up basis at death",
+        definition:
+          "When you die holding a taxable position, your heirs inherit it at its current market value — all unrealized capital gains are erased for tax purposes. This is why buy-and-hold-to-inheritance is the most tax-efficient drawdown strategy for taxable accounts. Selling a position that the bucket policy might auto-sell forfeits this benefit; use the 'Don't sell for cash-bucket funding' toggle on those holdings to preserve them through retirement.",
+        source: {
+          label: "IRS Pub 551 (Basis of Assets)",
+          href: "https://www.irs.gov/publications/p551",
+        },
+        aliases: ["stepped-up basis", "step up", "inheritance basis"],
       },
     ],
   },
@@ -258,7 +310,7 @@ export const GLOSSARY: GlossarySection[] = [
       {
         term: "Tax buckets",
         definition:
-          "Each account maps to one tax treatment. Pre-tax (traditional 401(k), traditional IRA — taxed on withdrawal). Roth (after-tax contributions, tax-free growth). HSA (triple-tax-advantaged for medical). Taxable (brokerage, savings — capital gains and dividends taxed). Education (529 plans + Trump Accounts — tax-advantaged for kids' future).",
+          "Each account maps to one tax treatment. Pre-tax (traditional 401(k), traditional IRA — taxed on withdrawal). Roth (after-tax contributions, tax-free growth). HSA (triple-tax-advantaged for medical). Taxable (brokerage, savings — capital gains and dividends taxed). Education (529 plans + Trump Accounts — beneficiary-locked, can only fund the beneficiary's qualified education or vested account, so EXCLUDED from the year-by-year retirement drawdown schedule even though the dollars show on your net worth).",
         source: {
           label: "IRS retirement-plan rules",
           href: "https://www.irs.gov/retirement-plans",
@@ -373,12 +425,39 @@ export const GLOSSARY: GlossarySection[] = [
       {
         term: "Snapshot",
         definition:
-          "A point-in-time record of your portfolio state, used for trailing growth-velocity and historical net-worth charts. Stored in nominal dollars (the prices at the time); the app converts to real terms when displayed.",
+          "A point-in-time record of your portfolio state, used for trailing growth-velocity and historical net-worth charts. Stored in nominal dollars (the prices at the time); the app converts to real terms when displayed. When the global member chip is set to a specific person, the Snapshots panel scopes every NW number + summary to that member's slice (legacy snapshots without per-member breakdowns drop out, with a count of how many were hidden). The stored payload itself still captures the full household — only the displayed slice changes.",
       },
       {
         term: "Encrypted export",
         definition:
           "Data → Export creates a passphrase-protected file (AES-256-GCM) you can move via AirDrop, Dropbox, email, USB — anything that transports a file. Import on another device to restore. No sign-in needed.",
+      },
+      {
+        term: "Investment growth calculator",
+        definition:
+          "A portfolio-blind, NerdWallet-style compound-interest tool on the Static Calculators page. Inputs: starting balance, recurring contribution (monthly or annual), expected annual rate of return, compound frequency (annually / monthly / daily), horizon in years. Optional annual contribution escalator (e.g. 3%/yr 'raise') and per-year overrides for one-off injections (windfall, bonus, college pull). Uses the ordinary-annuity convention — contributions earn no interest in their deposit month. Does NOT use your actual portfolio, scenarios, or member rollups; for personalized projections see the Projections and Plan pages.",
+        aliases: [
+          "compound interest",
+          "savings calculator",
+          "future value",
+          "fv calculator",
+        ],
+      },
+      {
+        term: "US Tax calculator",
+        definition:
+          "A portfolio-blind, wealth-analyze-style federal + state tax estimator on the Static Calculators page (tax year 2025). Computes federal ordinary income tax (10/12/22/24/32/35/37% brackets by filing status), federal long-term capital gains + qualified dividends at preferential 0/15/20% rates STACKED on top of ordinary income, FICA (6.2% Social Security to the $176,100 wage base + 1.45% Medicare uncapped), Additional Medicare 0.9% above filing-status thresholds, NIIT 3.8% on net investment income above MAGI thresholds, self-employment tax (15.3% × 92.35% with half deductible), and state income tax for the selected state (no-tax / flat / progressive). Does NOT model: AMT, QBI deduction (§199A), tax credits (CTC / EITC / education / dependent care / saver's), dependents, IRMAA Medicare premium surcharges, local income tax (NYC / Philly / SF), pass-through-entity SALT-cap workarounds, WA's $270k LTCG threshold with primary-residence exclusion, or other state-specific quirks. Like the Investment Growth tab, it's static and portfolio-blind — for personalized tax-aware projections see the Projections and Plan pages.",
+        aliases: [
+          "tax calculator",
+          "federal tax",
+          "income tax",
+          "state tax",
+          "ltcg",
+          "capital gains tax",
+          "niit",
+          "fica",
+          "paycheck calculator",
+        ],
       },
     ],
   },

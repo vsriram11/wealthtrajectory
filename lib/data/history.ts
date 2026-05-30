@@ -1,8 +1,9 @@
 import type { Quote } from "@/lib/data/quotes";
-import { priceAt } from "@/lib/data/quotes";
+import { priceAtDetailed } from "@/lib/data/quotes";
 import type { Snapshot } from "@/lib/persistence/persistence";
 import {
   filterHousehold,
+  householdForRollups,
   householdNetWorth,
   type Account,
   type Holding,
@@ -29,9 +30,44 @@ export function memberFilteredSnapshots(
   snapshots: Snapshot[],
   memberId: string | null,
 ): Snapshot[] {
-  if (!memberId) return snapshots;
+  // Boundary NaN/Infinity guard for `s.t`: cloud-sync / external
+  // imports can deliver a row with `t = NaN` (corrupted clock /
+  // hostile payload). NaN poisons Math.min in summary text and
+  // sort comparators (undefined ordering), so drop those rows
+  // here at the single canonical filter. Memberless calls also
+  // need the guard; can't pass-through-reference any more, but
+  // the cost is one filter pass on a tiny list (snapshots <100).
+  const finite = snapshots.filter((s) => Number.isFinite(s.t));
+  if (!memberId) {
+    // R2 audit CRITICAL: even on Household view (memberId=null),
+    // every snapshot's household MUST be passed through
+    // householdForRollups so an `includeInRollup=false` member's
+    // accounts drop out of past chart points the same way they
+    // drop out of today's headline NW. Without this, chart shows
+    // a discontinuity at the snapshot boundary.
+    //
+    // Short-circuit when nothing changes: if every snapshot lacks
+    // a household payload OR has no excluded members, the scope
+    // helper returns the same reference (identity preserved) and
+    // we hand back the original array so memoization downstream
+    // stays stable.
+    const scoped = finite.map((s) => {
+      if (!s.household) return s;
+      const scopedHh = householdForRollups(s.household);
+      if (scopedHh === s.household) return s;
+      return {
+        ...s,
+        household: scopedHh,
+        netWorthUSD: householdNetWorth(scopedHh),
+      };
+    });
+    const anyChanged =
+      scoped.some((s, i) => s !== finite[i]) ||
+      finite.length !== snapshots.length;
+    return anyChanged ? scoped : snapshots;
+  }
   const out: Snapshot[] = [];
-  for (const s of snapshots) {
+  for (const s of finite) {
     if (!s.household) continue; // legacy NW-only — can't attribute
     const filteredHh = filterHousehold(s.household, memberId);
     out.push({
@@ -87,6 +123,17 @@ export type HistoryPoint = {
 
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 
+/**
+ * IMPORTANT contract for callers: when the global member filter is
+ * active, `household` MUST be the member-filtered view AND `snapshots`
+ * MUST be pre-filtered via `memberFilteredSnapshots(snapshots, memberId)`.
+ * Round-2 audit (this branch) found that consumers passing raw
+ * snapshots alongside a member-filtered household silently produce
+ * a mid-chart discontinuity at the snapshot boundary (past windows
+ * show full household; present window shows member slice). This
+ * function trusts the caller; it has no way to detect the mismatch
+ * post-hoc. HistoryView and GrowthVelocityCard already comply.
+ */
 export function reconstructHistory(
   household: Household,
   quotes: Record<string, Quote | null>,
@@ -94,17 +141,28 @@ export function reconstructHistory(
   now = Date.now(),
   snapshots: Snapshot[] = [],
 ): HistoryPoint[] {
-  const start = rangeStartMs(range, now);
-  if (start === 0) {
-    const earliest = earliestQuoteTimestamp(quotes);
-    if (earliest != null) {
-      return reconstructHistory(
-        household,
-        quotes,
-        "5Y",
-        now,
-        snapshots,
-      ).filter((p) => p.t >= earliest);
+  let start = rangeStartMs(range, now);
+  if (range === "ALL") {
+    // User-reported semantic: "All" should show real recorded
+    // history, not CAGR-estimated back-projection. The
+    // pre-snapshot region is just synthesized from each holding's
+    // expected real CAGR — it's a guess, not data. Using
+    // earliest-snapshot as the start clamps the chart to what
+    // the user actually has snapshots for.
+    //
+    // When no snapshots exist (brand-new install / member with no
+    // recorded history), there's no "All" to show, so we fall
+    // back to a 1y window — the chart is still useful as a
+    // forecast-shape view rather than a "sweep from Unix epoch."
+    const oldestSnapT = snapshots.reduce<number | null>(
+      (acc, s) =>
+        Number.isFinite(s.t) && (acc === null || s.t < acc) ? s.t : acc,
+      null,
+    );
+    if (oldestSnapT != null && oldestSnapT > 0 && oldestSnapT < now) {
+      start = oldestSnapT;
+    } else {
+      start = rangeStartMs("1Y", now);
     }
   }
 
@@ -120,16 +178,183 @@ export function reconstructHistory(
     .filter((s): s is Snapshot & { household: Household } => !!s.household)
     .sort((a, b) => a.t - b.t);
 
+  // USER-REPORTED BUG: adding a holding today with `acquiredAt`
+  // set to a backdate (e.g. 2021) made the history chart show
+  // a large fake gain — the back-projection algorithm treated
+  // the holding as if it actually grew at its expected CAGR
+  // through the past year, when in reality the holding wasn't
+  // in the system until today. The "+8.8%" wasn't real, it was
+  // the algorithmic back-projection of holdings that didn't
+  // exist in the user's recorded history.
+  //
+  // FIX: identify holdings that aren't present in any past
+  // snapshot. Pass those IDs to composeNetWorthAt so it can
+  // hold them FLAT at today's value across all historical
+  // timepoints (instead of back-projecting them via CAGR).
+  // The holding still contributes to historical NW — just at
+  // its constant present-day value — so the chart shows it
+  // without inventing growth that didn't happen.
+  // USER-REPORTED BUG: adding a holding TODAY with `acquiredAt`
+  // backdated to e.g. 2021 made the history chart show a fake
+  // +8.8% gain. The back-projection treated the holding as
+  // having actually grown for a year, when it just appeared.
+  //
+  // TARGETED FIX: detect the EXACT scenario — a holding whose
+  // user-claimed `acquiredAt` PREDATES the oldest snapshot, but
+  // the holding is missing from EVERY snapshot. That mismatch
+  // ("I claim I had this back then but my snapshots don't show
+  // it") is the user-intent signal that calls for the flat-line
+  // treatment.
+  //
+  // This is narrower than "any holding missing from snapshots"
+  // (which would break the pruned-snapshot test where the user
+  // legitimately captured a smaller composition at a past
+  // moment in time — those holdings SHOULD be excluded from
+  // that snapshot's window, not flat-lined).
+  let newlyAddedFlatUSD = 0;
+  const newlyAddedIds = new Set<string>();
+  // Liability parallel to newlyAddedIds (R8 audit): liabilities
+  // have no `acquiredAt` field on the type, so we can't ask the
+  // user when the debt began. Without a guard, a mortgage the
+  // user records TODAY would subtract from every past bucket —
+  // making historical NW look artificially negative through dates
+  // that pre-date the debt. Heuristic: any liability present in
+  // the LIVE household but ABSENT from every rich snapshot is
+  // treated as "newly recorded today" → excluded from the past
+  // subtraction. (For pre-snapshot buckets where composition
+  // falls back to live, composeNetWorthAt consults this set; for
+  // snapshot-composition buckets, the snapshot's own liabilities
+  // are used by default, so no extra filtering needed.)
+  const newlyAddedLiabilityIds = new Set<string>();
+  if (richSnapshots.length > 0) {
+    const oldestSnapshotT = richSnapshots[0].t;
+    const idsInSnapshotHistory = new Set<string>();
+    const liabilityIdsInSnapshotHistory = new Set<string>();
+    for (const snap of richSnapshots) {
+      for (const acct of snap.household.accounts) {
+        for (const h of acct.holdings ?? []) {
+          idsInSnapshotHistory.add(h.id);
+        }
+      }
+      for (const liability of snap.household.liabilities ?? []) {
+        liabilityIdsInSnapshotHistory.add(liability.id);
+      }
+    }
+    for (const acct of household.accounts) {
+      for (const h of acct.holdings ?? []) {
+        if (idsInSnapshotHistory.has(h.id)) continue;
+        // Trigger condition: user-claimed acquisition predates
+        // the snapshot record. They're saying "I had this back
+        // then" but the snapshots disagree. Flat-line to avoid
+        // attributing fake gain. `acquiredAt` only exists on
+        // priced + real-estate kinds; cash/other don't have it,
+        // and they're already skipped earlier in the
+        // back-projection (held flat at face value).
+        const acquiredAt =
+          "acquiredAt" in h ? (h.acquiredAt as number | null | undefined) : null;
+        const claimedOld =
+          acquiredAt != null && acquiredAt < oldestSnapshotT;
+        // R6 audit CRITICAL: also require valueUSD >= 0. A holding
+        // with a negative valueUSD (data-import corruption / a
+        // short position recorded incorrectly) would subtract from
+        // every historical bucket and produce a phantom negative
+        // band across the entire chart. Track the ID either way so
+        // composeNetWorthAt SKIPS it (no back-projection), but
+        // don't FLAT-line the negative value across history.
+        if (claimedOld && Number.isFinite(h.valueUSD)) {
+          newlyAddedIds.add(h.id);
+          if (h.valueUSD > 0) newlyAddedFlatUSD += h.valueUSD;
+        }
+      }
+    }
+    for (const liability of household.liabilities ?? []) {
+      if (!liabilityIdsInSnapshotHistory.has(liability.id)) {
+        newlyAddedLiabilityIds.add(liability.id);
+      }
+    }
+  }
+
   const days = Math.max(2, Math.ceil((now - start) / MS_PER_DAY));
   const out: HistoryPoint[] = [];
   for (let i = 0; i <= days; i++) {
     const t = start + (i * (now - start)) / days;
-    // Pick the composition source: the latest snapshot at-or-before t
-    // (if any), otherwise the current household.
     const compSnap = pickCompositionSnapshot(richSnapshots, t);
     const composition = compSnap?.household ?? household;
-    const nw = composeNetWorthAt(composition, quotes, t, now);
+    const nw =
+      composeNetWorthAt(
+        composition,
+        quotes,
+        t,
+        now,
+        newlyAddedIds,
+        // Liability exclusion only applies when the composition is
+        // the LIVE household (pre-first-snapshot buckets). When
+        // composition is a snapshot's household, that snapshot's
+        // own liabilities are the authoritative record of debt at
+        // that time — nothing to filter.
+        compSnap ? new Set<string>() : newlyAddedLiabilityIds,
+      ) + newlyAddedFlatUSD;
     out.push({ t, netWorthUSD: nw });
+  }
+
+  // Smooth the pre-first-snapshot region so it meets the first
+  // snapshot's anchor without a visible discontinuity. The
+  // back-projection (CAGR estimate) and the snapshot's recorded
+  // NW are computed differently and don't naturally agree at the
+  // boundary: the user sees a vertical jump up/down at the first
+  // snapshot's date that has nothing to do with actual portfolio
+  // movement (it's the chart's estimation error becoming visible).
+  //
+  // Fix: compute the reconstructed value AT the first snapshot's
+  // t, compute the snapshot's anchor NW (with the same backdated-
+  // holding augmentation overlaySnapshots will apply), additive-
+  // correct every pre-first-snapshot bucket by their difference.
+  // The CAGR-shape of the curve is preserved; only the absolute
+  // level shifts so the boundary lines up.
+  if (richSnapshots.length > 0) {
+    const firstSnap = richSnapshots[0];
+    const reconstructedAtBoundary =
+      composeNetWorthAt(
+        household,
+        quotes,
+        firstSnap.t,
+        now,
+        newlyAddedIds,
+        newlyAddedLiabilityIds,
+      ) + newlyAddedFlatUSD;
+    // Compute the snapshot's effective anchor NW using the SAME
+    // compose math as the pre-snap region, so the smoothed
+    // boundary genuinely meets the chart anchor. This MUST mirror
+    // overlaySnapshots' anchor computation; a mismatch here
+    // produces a residual visible jump.
+    let snapAnchorNW = effectiveSnapNW(firstSnap, quotes, now);
+    const snapIds = new Set<string>();
+    for (const acct of firstSnap.household.accounts) {
+      for (const h of acct.holdings ?? []) snapIds.add(h.id);
+    }
+    for (const acct of household.accounts) {
+      for (const h of acct.holdings ?? []) {
+        if (snapIds.has(h.id)) continue;
+        const acquiredAt =
+          "acquiredAt" in h
+            ? (h.acquiredAt as number | null | undefined)
+            : null;
+        if (acquiredAt == null || acquiredAt > firstSnap.t) continue;
+        if (!Number.isFinite(h.valueUSD) || h.valueUSD <= 0) continue;
+        snapAnchorNW += h.valueUSD;
+      }
+    }
+    const correction = snapAnchorNW - reconstructedAtBoundary;
+    if (Number.isFinite(correction) && Math.abs(correction) > 0.01) {
+      for (let i = 0; i < out.length; i++) {
+        if (out[i].t < firstSnap.t) {
+          out[i] = {
+            t: out[i].t,
+            netWorthUSD: out[i].netWorthUSD + correction,
+          };
+        }
+      }
+    }
   }
   return out;
 }
@@ -152,10 +377,30 @@ function composeNetWorthAt(
   quotes: Record<string, Quote | null>,
   t: number,
   now: number,
+  /**
+   * IDs of holdings that exist in the current household but were
+   * NEVER in any past snapshot — "newly added to the system."
+   * For these, hold the value FLAT at today's lastPriceUSD×shares
+   * across all historical timepoints. Prevents fake-gain bug
+   * where a holding added today with backdated `acquiredAt` got
+   * back-projected via CAGR (inventing growth that didn't happen).
+   */
+  newlyAddedIds: Set<string> = new Set(),
+  /**
+   * R8 audit: IDs of liabilities present in the LIVE household
+   * but absent from every snapshot — "newly recorded today."
+   * Excluded from the historical subtraction since a debt
+   * recorded today shouldn't pull down past-bucket NW. Only
+   * meaningful when the caller passes the live household as
+   * `household` (pre-first-snapshot region); for snapshot-
+   * composition buckets, the snapshot's own liabilities are
+   * authoritative and the caller passes an empty set here.
+   */
+  newlyAddedLiabilityIds: Set<string> = new Set(),
 ): number {
   const cashTotal = sumCash(household);
   const liabilitiesTotal = household.liabilities.reduce(
-    (s, l) => s + l.balanceUSD,
+    (s, l) => (newlyAddedLiabilityIds.has(l.id) ? s : s + l.balanceUSD),
     0,
   );
   let nw = cashTotal - liabilitiesTotal;
@@ -175,10 +420,25 @@ function composeNetWorthAt(
       )
         continue;
       if (h.acquiredAt != null && h.acquiredAt > t) continue;
+      // Newly-added IDs are accounted for via the OUTER flat
+      // contribution in reconstructHistory — skip them here to
+      // avoid double-counting when iterating the LIVE household.
+      // (Snapshot-composition iteration won't see these IDs by
+      // construction, so this branch only fires on the live path.)
+      if (newlyAddedIds.has(h.id)) continue;
       const q = quotes[h.symbol.toUpperCase()];
       let price: number;
-      if (q && q.history.length > 0) {
-        price = priceAt(q, t) ?? h.lastPriceUSD;
+      const detailed = q ? priceAtDetailed(q, t) : null;
+      // CRITICAL (R2 audit): treat a CLAMPED lookup as a MISS and
+      // fall through to CAGR back-projection. The old code took the
+      // clamped price (oldest sample in the history window) for any
+      // t before the window — so a 6-yr-old timepoint with a 5-yr
+      // quote history would silently use the 5-yr-old price as if
+      // it were the 6-yr-old price, making the chart flat-line at
+      // the oldest sample and inventing zero growth. Falling to the
+      // CAGR branch is the documented "estimated" behavior.
+      if (detailed && !detailed.clamped) {
+        price = detailed.price;
       } else {
         // Synthesize the back-projection from the holding's expected
         // real CAGR. Better than a flat line when upstream history
@@ -233,6 +493,45 @@ function earliestQuoteTimestamp(quotes: Record<string, Quote | null>): number | 
 }
 
 /**
+ * Compute a snapshot's "effective" chart anchor NW.
+ *
+ * The stored `snap.netWorthUSD` was computed via
+ * `householdNetWorth` at SAVE TIME (sum of valueUSDs minus
+ * liabilities). It's correct AS RECORDED but wrong as a chart
+ * anchor: the pre-snap region back-projects equity to past
+ * prices via the LIVE quote history, but the recorded snap.NW
+ * reflects today's prices (or whatever prices were live at save
+ * time — for time-travel saves, that's today, not snap.t).
+ *
+ * For continuity at the snap boundary, the anchor must use the
+ * SAME math as the pre-snap region. We call `composeNetWorthAt`
+ * with snap.household at snap.t against the LIVE quotes — quotes
+ * are the canonical source of historical prices, and they're
+ * available whether or not the time-travel historical-price
+ * fetch succeeded for the snap row.
+ *
+ * Cash / real_estate / private_stock / other use snap.valueUSD
+ * (those kinds don't fluctuate with market data; sumCash inside
+ * compose handles them). Live-priceable kinds use the quote's
+ * price-at-t (or CAGR back-projection if the quote is missing).
+ *
+ * This makes the snap anchor INDEPENDENT of whether the
+ * historical-price fetch succeeded — eliminating the
+ * Yahoo-rate-limit-induced visible jump the user reported.
+ */
+function effectiveSnapNW(
+  snap: Snapshot,
+  quotes: Record<string, Quote | null> | undefined,
+  now: number,
+): number {
+  if (!snap.household) return snap.netWorthUSD;
+  // No quotes available: fall back to the recorded NW (best we
+  // can do without market data — same as the pre-fix behavior).
+  if (!quotes) return snap.netWorthUSD;
+  return composeNetWorthAt(snap.household, quotes, snap.t, now);
+}
+
+/**
  * Overlay real net-worth snapshots onto a reconstructed series. For
  * each output bucket, prefer the most-recent snapshot at-or-before that
  * timestamp; fall back to the reconstructed value otherwise. The result
@@ -263,31 +562,155 @@ export function overlaySnapshots(
    * the chart and the headline NW consistent.
    */
   liveNetWorth?: number,
+  /**
+   * Optional live household. When supplied, each snapshot anchor's
+   * recorded `netWorthUSD` is AUGMENTED to include the valueUSD of
+   * any LIVE holdings that are backdated (`acquiredAt <= snap.t`)
+   * but absent from THIS snapshot's embedded household. Without
+   * this, a snapshot recorded BEFORE the user added a backdated
+   * holding produces a chart anchor that ignores the holding —
+   * even though the holding's acquiredAt claims it existed at the
+   * snapshot's time. The user sees the chart "forget" the
+   * backdated holding for any snapshot recorded before the user
+   * entered it. R-deep audit user-reported bug.
+   */
+  liveHousehold?: Household,
+  /**
+   * Optional live quote data. When supplied, the snap anchor's
+   * effective NW is recomputed via `composeNetWorthAt(snap, t)`
+   * using quote-driven prices at snap.t. This makes the anchor
+   * use the SAME math as the pre-snap reconstruction, eliminating
+   * the boundary discontinuity regardless of whether the
+   * time-travel historical-price fetch succeeded (Yahoo
+   * rate-limit failures were leaving snap.lastPriceUSD pinned at
+   * today's price, making the snap anchor reflect today's
+   * portfolio value on a past date — and the pre-snap region was
+   * back-projecting to past prices via quotes, so they didn't
+   * meet at the boundary).
+   */
+  quotes?: Record<string, Quote | null>,
+  now?: number,
 ): HistoryPoint[] {
-  const usable = snapshots.filter(
-    (s) => Number.isFinite(s.netWorthUSD) && s.netWorthUSD > 0,
-  );
+  // Round-1 audit MED: don't drop legitimate zero/negative-NW
+  // snapshots here. A user underwater (high mortgage, low assets)
+  // has real negative NW worth charting. `loadSnapshots` already
+  // purges genuinely-corrupt NaN/Infinity at the IDB boundary;
+  // any finite value is user-intentional and renders.
+  const usable = snapshots.filter((s) => Number.isFinite(s.netWorthUSD));
   let out = series;
-  if (usable.length > 0) {
-    const sorted = [...usable].sort((a, b) => a.t - b.t);
-    let i = 0;
-    out = series.map((p) => {
-      while (i + 1 < sorted.length && sorted[i + 1].t <= p.t) i++;
-      const snap = sorted[i];
-      if (snap.t > p.t) return p;
-      return { t: p.t, netWorthUSD: snap.netWorthUSD };
-    });
-  }
-  if (
+  // Build the anchor list: every snapshot is an anchor the chart
+  // MUST pass through. The live-NW (today's headline) is ALSO an
+  // anchor when supplied — pinned at the last bucket's `t`. This
+  // way the post-last-snapshot region interpolates toward today
+  // instead of holding flat at a stale snapshot, AND the post-hoc
+  // last-bucket pin (the original semantic) is preserved.
+  const lastBucketT = series.length > 0 ? series[series.length - 1].t : null;
+  const liveAnchorEnabled =
     liveNetWorth != null &&
     Number.isFinite(liveNetWorth) &&
-    out.length > 0
-  ) {
-    const lastIdx = out.length - 1;
-    out = [
-      ...out.slice(0, lastIdx),
-      { t: out[lastIdx].t, netWorthUSD: liveNetWorth },
-    ];
+    lastBucketT != null;
+  if (usable.length > 0 || liveAnchorEnabled) {
+    type Anchor = { t: number; netWorthUSD: number };
+    const sorted = [...usable].sort((a, b) => a.t - b.t);
+    // Per-snapshot adjustment: if a LIVE holding has
+    // acquiredAt <= snap.t but the snapshot's embedded household
+    // doesn't contain it (snapshot was recorded BEFORE the user
+    // added the holding), add the holding's valueUSD to this
+    // snapshot's anchor NW. Without this, snapshots recorded
+    // before a backdated entry produce chart anchors that ignore
+    // the holding — even though the user claims it existed then.
+    function adjustForBackdated(snap: Snapshot): number {
+      let extra = 0;
+      if (!liveHousehold || !snap.household) return extra;
+      const snapIds = new Set<string>();
+      for (const acct of snap.household.accounts) {
+        for (const h of acct.holdings ?? []) {
+          snapIds.add(h.id);
+        }
+      }
+      for (const acct of liveHousehold.accounts) {
+        for (const h of acct.holdings ?? []) {
+          if (snapIds.has(h.id)) continue;
+          const acquiredAt =
+            "acquiredAt" in h
+              ? (h.acquiredAt as number | null | undefined)
+              : null;
+          if (acquiredAt == null || acquiredAt > snap.t) continue;
+          if (!Number.isFinite(h.valueUSD) || h.valueUSD <= 0) continue;
+          extra += h.valueUSD;
+        }
+      }
+      return extra;
+    }
+    const effectiveNow = now ?? Date.now();
+    const anchors: Anchor[] = sorted.map((s) => ({
+      t: s.t,
+      // Use the snap's effective NW computed via the SAME math as
+      // the pre-snap reconstruction (compose at snap.t against
+      // live quotes), so the boundary lines up regardless of
+      // whether the time-travel historical-price fetch succeeded
+      // when the snap was saved.
+      netWorthUSD: effectiveSnapNW(s, quotes, effectiveNow) + adjustForBackdated(s),
+    }));
+    // Add the live anchor. Two cases:
+    //   1. There's no snapshot at the last-bucket t: append the
+    //      live anchor at the right edge.
+    //   2. There IS a snapshot at (or after) the last-bucket t:
+    //      the live anchor OVERRIDES it at the right edge — live
+    //      headline NW is authoritative for "now" even if the
+    //      most recent snapshot row has a stale value.
+    if (liveAnchorEnabled) {
+      // Drop any snapshots whose t >= lastBucketT — they'd
+      // either be redundant (== lastBucketT) or post-date the
+      // visible window (> lastBucketT), and either way the live
+      // anchor should win at the right edge.
+      while (
+        anchors.length > 0 &&
+        anchors[anchors.length - 1].t >= (lastBucketT as number)
+      ) {
+        anchors.pop();
+      }
+      anchors.push({
+        t: lastBucketT as number,
+        netWorthUSD: liveNetWorth as number,
+      });
+    }
+    // User-reported visual bug: chart looked like a staircase —
+    // flat plateaus between adjacent snapshots interrupted by
+    // abrupt vertical steps. Root cause: the previous algorithm
+    // forced EVERY bucket whose t >= snap.t to that snap's
+    // recorded NW until the next snap arrived. The smoother
+    // semantic: anchors are points the chart MUST pass through;
+    // between two anchors, blend linearly so the line connects
+    // them without inventing a flat run.
+    out = series.map((p) => {
+      // Find surrounding anchors: `lo` = latest anchor with t <=
+      // p.t, `hi` = earliest anchor with t >= p.t.
+      let lo: Anchor | null = null;
+      let hi: Anchor | null = null;
+      for (let i = 0; i < anchors.length; i++) {
+        if (anchors[i].t <= p.t) lo = anchors[i];
+        if (anchors[i].t >= p.t && hi === null) hi = anchors[i];
+        if (hi !== null) break;
+      }
+      // Bucket pre-dates every anchor: use reconstructed value.
+      if (lo === null) return p;
+      // Bucket post-dates every anchor (shouldn't happen when
+      // live anchor is enabled and lastBucketT is the rightmost,
+      // but guard).
+      if (hi === null) return { t: p.t, netWorthUSD: lo.netWorthUSD };
+      // Bucket exactly at an anchor: pin.
+      if (hi.t === lo.t) {
+        return { t: p.t, netWorthUSD: lo.netWorthUSD };
+      }
+      // Strictly between two anchors: linear interpolation on the
+      // time axis. (lo.t < p.t < hi.t guaranteed by the search.)
+      const span = hi.t - lo.t;
+      const frac = (p.t - lo.t) / span;
+      const nw =
+        lo.netWorthUSD + (hi.netWorthUSD - lo.netWorthUSD) * frac;
+      return { t: p.t, netWorthUSD: nw };
+    });
   }
   return out;
 }

@@ -27,11 +27,16 @@ import {
   findBackupFile,
   uploadBackup,
 } from "@/lib/sync/googleDrive";
-import { exportData, parseImport } from "@/lib/persistence/dataIO";
+import {
+  applyImportedPayload,
+  exportData,
+  parseImport,
+} from "@/lib/persistence/dataIO";
 import {
   DriveUnreadableError,
   checkShrinkageAgainstDrive,
 } from "@/lib/sync/syncSafety";
+import { loadSnapshots } from "@/lib/persistence/persistence";
 
 export type PullResult =
   | "ok"
@@ -242,6 +247,12 @@ export async function pullFromDrive(
     // the user has explicitly consented to the data loss.
     if (!skipShrinkageCheck) {
       const localNow = store.getState();
+      // Round-1-D1 audit CRITICAL fix: snapshot count comes from
+      // IDB (not the store). MUST be loaded BEFORE the shrinkage
+      // check, otherwise a Drive payload with snapshots: [] would
+      // pass the guard and silently wipe N local snapshots via
+      // replaceAllSnapshots downstream.
+      const localSnapshotsForShrinkage = await loadSnapshots();
       const shrinkage = isInboundShrinkage(parsed, {
         healthImportanceWeights: localNow.healthImportanceWeights,
         memberAssumptions: localNow.memberAssumptions,
@@ -250,6 +261,7 @@ export async function pullFromDrive(
         budgetItems: localNow.budgetItems,
         incomeStreams: localNow.incomeStreams,
         healthPlans: localNow.healthPlans,
+        snapshots: localSnapshotsForShrinkage,
       });
       if (shrinkage) {
         s.setGoogleSyncState({
@@ -264,21 +276,20 @@ export async function pullFromDrive(
         return "shrinkage-blocked";
       }
     }
-    s.importPayload({
-      household: parsed.household,
-      assumptions: parsed.assumptions,
-      scenarios: parsed.scenarios ?? [],
-      memberAssumptions: parsed.memberAssumptions,
-      preferredMemberId: parsed.preferredMemberId,
-      targetAllocation: parsed.targetAllocation,
-      glidePath: parsed.glidePath,
-      householdAnnualIncomeUSD: parsed.householdAnnualIncomeUSD,
-      goals: parsed.goals,
-      budgetItems: parsed.budgetItems,
-      incomeStreams: parsed.incomeStreams,
-      healthPlans: parsed.healthPlans,
-      healthImportanceWeights: parsed.healthImportanceWeights,
-    });
+    // Round-1 audit CRITICAL fix: apply via the bundled helper so
+    // store-backed slices AND IDB-backed snapshots both move atomically
+    // (caller can't forget the snapshot mirror).
+    await applyImportedPayload(parsed, s.importPayload);
+    // R1-D10 audit CRITICAL fix: bump snapshot revision when the
+    // import potentially changed the snapshot collection, so
+    // subscribers (HistoryView, GrowthVelocityCard, Insights,
+    // Review) re-read snapshots from IDB on the next render. Only
+    // bump when the payload actually carried a snapshots field —
+    // otherwise the import was a no-op for snapshots and the bump
+    // would trigger a redundant CloudSyncer upload cycle.
+    if (parsed.snapshots !== undefined) {
+      s.bumpSnapshotsRevision();
+    }
     s.setGoogleSyncState({
       googleSyncing: false,
       googleLastSyncAt: Date.now(),
@@ -385,6 +396,12 @@ export async function pushToDrive(
         const existing = await findBackupFile(token);
         if (existing) {
           const driveText = await downloadBackup(token, existing.id);
+          // Round-1-D1 audit CRITICAL fix: snapshots are now in
+          // SHRINKAGE_GUARDED_ARRAY_COLLECTIONS, so the outbound
+          // guard MUST see the local snapshot count too — otherwise
+          // a device with zero local snapshots would silently wipe
+          // N snapshots on Drive when this user pushes.
+          const localSnapshotsForShrinkage = await loadSnapshots();
           const shrinkage = await checkShrinkageAgainstDrive(
             driveText,
             s.encryptionPassphrase,
@@ -396,6 +413,7 @@ export async function pushToDrive(
               healthPlans: s.healthPlans,
               healthImportanceWeights: s.healthImportanceWeights,
               memberAssumptions: s.memberAssumptions,
+              snapshots: localSnapshotsForShrinkage,
             },
           );
           if (shrinkage) {
@@ -434,6 +452,12 @@ export async function pushToDrive(
       }
     }
 
+    // Round-1 audit CRITICAL fix: snapshots live in IDB (not in the
+    // Zustand state slice), so we must pull them out at push time so
+    // the Drive backup is the source-of-truth for the user's full
+    // state. Without this, a user who wiped local data / changed
+    // devices lost ALL their snapshot history.
+    const snapshots = await loadSnapshots();
     const json = exportData({
       household: s.household,
       assumptions: s.assumptions,
@@ -448,6 +472,7 @@ export async function pushToDrive(
       incomeStreams: s.incomeStreams,
       healthPlans: s.healthPlans,
       healthImportanceWeights: s.healthImportanceWeights,
+      snapshots,
     });
     const payload = s.encryptionPassphrase
       ? await (

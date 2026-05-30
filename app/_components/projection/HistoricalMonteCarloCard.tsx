@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useDeferredValue, useMemo, useState } from "react";
 import { useAppStore } from "@/lib/store";
 import { useActiveProjection } from "@/lib/projection/useActiveProjection";
 import {
@@ -12,7 +12,10 @@ import {
   runBootstrap,
   runHistoricalSequences,
   type MonteCarloResult,
+  type RebalancePolicy,
 } from "@/lib/projection/monteCarlo";
+import { applyCashBucketOverride } from "@/lib/projection/cashBucketAllocation";
+import { planBucketFunding } from "@/lib/portfolio/bucketFunding";
 import { computePortfolio } from "@/lib/portfolio/portfolio";
 import { computeLeveragedEquityBuckets } from "@/lib/portfolio/leveragedEquity";
 import { ageHousehold } from "@/lib/portfolio/futureAllocation";
@@ -151,8 +154,16 @@ export function HistoricalMonteCarloCard() {
   // sync with `defaultStartingNW` as upstream inputs (member filter,
   // target, current NW) shift. Once they touch the input, freeze.
   const [startingNWTouched, setStartingNWTouched] = useState(false);
-  if (!startingNWTouched && startingNW !== Math.round(defaultStartingNW)) {
-    setStartingNW(Math.round(defaultStartingNW));
+  // NaN guard: if `defaultStartingNW` is NaN (corrupted persisted
+  // state, hostile cloud-sync payload), `Math.round(NaN) === NaN`
+  // and NaN never equals itself — so `startingNW !== NaN` would be
+  // true on every render, firing setState forever → infinite render
+  // loop. CLAUDE.md NaN-safety contract: bad input degrades to no-op.
+  const defaultStartingNWRounded = Number.isFinite(defaultStartingNW)
+    ? Math.round(defaultStartingNW)
+    : 0;
+  if (!startingNWTouched && startingNW !== defaultStartingNWRounded) {
+    setStartingNW(defaultStartingNWRounded);
   }
   const startingMode =
     targetNW > 0 && startingNW >= targetNW
@@ -175,9 +186,49 @@ export function HistoricalMonteCarloCard() {
   // class returns — when a glide path is configured, only year 0 of
   // the glide path is honored under "none" since no rebalance = no
   // glide-target snap.
-  const [rebalance, setRebalance] = useState<"annual" | "none" | "bucket">(
-    "annual",
+  // Rebalance × Cash-bucket as two orthogonal toggles (PR
+  // redesign per user feedback: the old 3-way `Annual / None /
+  // Bucket` collapsed two distinct strategies and produced
+  // minimal observable change in success rate). The 2×2:
+  //   - annual + bucket-off: Trinity baseline
+  //   - annual + bucket-on:  refilling cash reserve (Kitces)
+  //   - none + bucket-off:   set-and-forget drift
+  //   - none + bucket-on:    DEPLETING cash reserve (Pfau), the
+  //                           finite SORR shield for early years
+  // Per-card sim knobs are SESSION-SCOPED (useState, not Zustand).
+  // Intentional: this card is an exploration sandbox — the user is
+  // expected to flip toggles to see what happens. Persisting would
+  // create stale state across reloads ("why is my baseline acting
+  // weird?"). The assumptions slice (retirement-tax-rate, etc.)
+  // remains the long-lived source of plan-level truth.
+  const [rebalance, setRebalance] = useState<RebalancePolicy>("annual");
+  const [cashBucketPriority, setCashBucketPriority] = useState(false);
+  // Optional cash-bucket size override (in % of NW). Default
+  // null = use the projected cash share at target unchanged.
+  // When set, the simulator's allocation is rewritten via
+  // `applyCashBucketOverride` so the cash slice equals this value
+  // and every non-cash class is rescaled proportionally to sum
+  // to 1. Defer the equity → cash swap tax hit to a later
+  // iteration (documented in methodology copy).
+  const [cashBucketSizePct, setCashBucketSizePct] = useState<number | null>(
+    null,
   );
+
+  // Defer the four free-form NumberInput values before they feed
+  // into the expensive MC simulator + bucket-funding plan. Round-9
+  // audit CRITICAL: every keystroke in cashBucketSizePct cascaded
+  // through bucketFundingPlan + leveragedBuckets + applyCashBucket
+  // + runHistoricalSequences (67-98 paths × 30 yrs = ~3k path-years
+  // per stroke, up to 60k in bootstrap mode). useDeferredValue lets
+  // the input itself stay snappy (React paints at the new value
+  // immediately) while React schedules the heavy recompute at low
+  // priority — typically the next idle frame. User pauses typing →
+  // sim catches up. User keeps typing → React skips intermediate
+  // sims. Inputs still display the live value (no perceived lag).
+  const deferredStartingNW = useDeferredValue(startingNW);
+  const deferredAnnualSpend = useDeferredValue(annualSpend);
+  const deferredHorizonYears = useDeferredValue(horizonYears);
+  const deferredCashBucketSizePct = useDeferredValue(cashBucketSizePct);
 
   // Project the household forward to the date the user is expected
   // to reach the Independence target — then derive allocation from
@@ -238,18 +289,6 @@ export function HistoricalMonteCarloCard() {
   const portfolio = useMemo(
     () => computePortfolio(projectedHousehold),
     [projectedHousehold],
-  );
-  // Today's (un-aged) cash share, used ONLY for the bucket-
-  // strategy "configure a cash slice" warning. The simulator
-  // consumes the AGED `portfolio.classes.cashShare`, but the
-  // warning text says "your cash allocation" — and the user's
-  // mental model is "what I configured today," not "what my
-  // portfolio will look like at retirement." A user with 5% cash
-  // today and 20y of equity-compounding ahead would correctly
-  // see <1% cash at target but the warning shouldn't nag them.
-  const cashShareToday = useMemo(
-    () => computePortfolio(scopedHousehold).classes.cashShare,
-    [scopedHousehold],
   );
   // Detect whether the user has any mortgaged RE in the current
   // scope. Damodaran's RE series is UNLEVERED price return — for a
@@ -331,28 +370,147 @@ export function HistoricalMonteCarloCard() {
   // is materially larger than on a baseline. Routing this through the
   // projected household is what the user observed differing across
   // scenarios already.
+  // Cash-bucket size override gating + the resolved requested
+  // fraction. MUST be derived BEFORE leveragedBuckets +
+  // bucketFundingPlan so those two engines can compose without
+  // double-tax (Round-1 audit). The override has three gates:
+  //   1. cashBucketPriority is ON
+  //   2. cashBucketSizePct is set
+  //   3. No glide path active (glide bypasses static allocation)
+  const CASH_BUCKET_MAX_PCT = 50;
+  // `cashBucketOverrideActive` uses the DEFERRED size so the gate +
+  // the consumption are coherent (otherwise the gate could flip
+  // between live and deferred frames, producing transient
+  // mis-classification on the way through a transition).
+  const cashBucketOverrideActive =
+    cashBucketPriority &&
+    deferredCashBucketSizePct != null &&
+    !glidePathActive;
+  const projectedCashShare = portfolio.classes.cashShare;
+  const requestedCashFraction = cashBucketOverrideActive
+    ? Math.max(
+        0,
+        Math.min(
+          CASH_BUCKET_MAX_PCT / 100,
+          (deferredCashBucketSizePct ?? 0) / 100,
+        ),
+      )
+    : null;
+
+  // Bucket-funding plan: models the cost of raising the user's
+  // requested cash bucket (sells highest-leverage equity first,
+  // primary residence + opt-outs excluded, cap-gains on taxable-
+  // account portions, short bonds counted as cash-equivalent).
+  // Compute BEFORE leveragedBuckets so the deleveraging engine can
+  // skip holdings already consumed for cash — preventing the
+  // Round-1 audit's double-tax bug.
+  // Cap-gains fraction the engines should use to convert "$X face
+  // value sold" into "$X × gainFraction × taxRate" cap-gains tax.
+  // Default 1.0 (conservative — matches the engines' shipped default
+  // when the assumption is unset) so existing user state behaves
+  // identically. User can dial down via Plan → Assumptions to reflect
+  // a less-fully-appreciated portfolio.
+  const assumedCapGainsFraction = Math.max(
+    0,
+    Math.min(1, effective.assumedCapGainsFraction ?? 1),
+  );
+  const bucketFundingPlan = useMemo(
+    () =>
+      planBucketFunding(
+        projectedHousehold,
+        portfolio.netWorthUSD,
+        cashBucketOverrideActive && requestedCashFraction != null
+          ? requestedCashFraction
+          : portfolio.classes.cashShare,
+        effective.retirementTaxRate ?? 0,
+        undefined,
+        assumedCapGainsFraction,
+      ),
+    [
+      projectedHousehold,
+      portfolio.netWorthUSD,
+      portfolio.classes.cashShare,
+      cashBucketOverrideActive,
+      requestedCashFraction,
+      effective.retirementTaxRate,
+      assumedCapGainsFraction,
+    ],
+  );
+  // Map<holdingId, USD-consumed-by-bucket-funding> for the
+  // deleveraging engine. Empty when no bucket sales fired.
+  const bucketFundingConsumed = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const s of bucketFundingPlan.sales) {
+      m.set(s.holdingId, s.faceValueSoldUSD);
+    }
+    return m;
+  }, [bucketFundingPlan.sales]);
+
+  // Deleveraging restructure tax — computed on the household
+  // POST bucket-funding so a leveraged ETF that was sold for cash
+  // doesn't also get re-taxed for the 3x→2x restructure (it's gone).
   const leveragedBuckets = useMemo(
     () =>
       computeLeveragedEquityBuckets(
         projectedHousehold,
         effective.retirementTaxRate,
+        assumedCapGainsFraction,
+        bucketFundingConsumed,
       ),
-    [projectedHousehold, effective.retirementTaxRate],
+    [
+      projectedHousehold,
+      effective.retirementTaxRate,
+      assumedCapGainsFraction,
+      bucketFundingConsumed,
+    ],
   );
+
   // Decompose equity into face values to recompose post-tax.
   // `regular1xEquityUSD` is the equity that's neither recognized 2x
   // nor leveraged-being-restructured — it stays at full face value.
-  const totalEquityFaceUSD =
-    portfolio.classes.equityShare * portfolio.netWorthUSD;
+  //
+  // Round-2 audit CRITICAL fix: after Round 1, leveragedBuckets'
+  // stocks2xUSD and nonRecognizedLeveragedUSD EXCLUDE the portion
+  // consumed by bucket-funding. But `totalEquityFaceUSD` still
+  // counted the full pre-sale face. Subtracting the (reduced)
+  // leveraged values from the unchanged total face was RE-ATTRIBUTING
+  // the consumed leveraged value into `regular1xEquityUSD` —
+  // simulator saw the same TQQQ as cash AND as 1x stocks (phantom
+  // equity). Fix: subtract the consumed equity face from the total
+  // BEFORE deriving the 1x residual.
+  const consumedEquityFaceUSD = bucketFundingPlan.sales
+    .filter((s) => s.kind === "equity")
+    .reduce((sum, s) => sum + s.faceValueSoldUSD, 0);
+  const totalEquityFaceUSD = Math.max(
+    0,
+    portfolio.classes.equityShare * portfolio.netWorthUSD -
+      consumedEquityFaceUSD,
+  );
   const regular1xEquityUSD = Math.max(
     0,
     totalEquityFaceUSD -
       leveragedBuckets.stocks2xUSD -
       leveragedBuckets.nonRecognizedLeveragedUSD,
   );
+  // Per-class consumption from non-equity buckets, so the share
+  // computations below also reflect post-sale composition (Round-2
+  // CRITICAL: bonds / commodity / RE / alts could be drained too
+  // when equity is exhausted; the simulator must see the reduced
+  // shares, not pre-sale shares).
+  const consumedByBucketUSD: Record<string, number> = {
+    bonds: 0,
+    commodity: 0,
+    realEstate: 0,
+    otherAlts: 0,
+  };
+  for (const s of bucketFundingPlan.sales) {
+    if (s.bucket in consumedByBucketUSD) {
+      consumedByBucketUSD[s.bucket] += s.faceValueSoldUSD;
+    }
+  }
   // Bucket dollar amounts going into the MC sim:
-  //   stocks2x = recognized 2x face (unchanged) + post-tax 3x SPY/Nasdaq
-  //   stocks   = regular 1x face (unchanged)  + post-tax other-leveraged
+  //   stocks2x = recognized 2x face (post-bucket-funding) + post-tax 3x SPY/Nasdaq
+  //   stocks   = regular 1x face (post-bucket-funding) + post-tax other-leveraged
   const stocks2xBucketUSD =
     leveragedBuckets.stocks2xUSD +
     leveragedBuckets.postTaxDeleverageToStocks2xUSD;
@@ -361,9 +519,7 @@ export function HistoricalMonteCarloCard() {
   // Fractions of pre-tax NW. `resolveWeights` inside the simulator
   // normalizes these to sum-to-1, so a sub-1 raw sum (the tax-hit
   // shrinkage) is handled correctly when applied to the post-tax
-  // `effectiveStartingNW` below — net effect: bucket dollars come
-  // out as bucket_face_or_post_tax × (startingNW / netWorthUSD),
-  // which scales correctly with what-if overrides.
+  // `effectiveStartingNW` below.
   const stocks2xFraction =
     portfolio.netWorthUSD > 0
       ? stocks2xBucketUSD / portfolio.netWorthUSD
@@ -372,45 +528,139 @@ export function HistoricalMonteCarloCard() {
     portfolio.netWorthUSD > 0
       ? stocks1xBucketUSD / portfolio.netWorthUSD
       : 0;
-  // Tax hit as a fraction of total pre-tax NW. Scales with the
-  // user's startingNW override so what-if scenarios get proportional
-  // tax drag — the assumption is portfolio composition is held
-  // constant across what-if sizing.
+  // Tax hit as a fraction of total pre-tax NW.
   const taxHitFraction =
     portfolio.netWorthUSD > 0
       ? leveragedBuckets.deleveragingTaxHitUSD / portfolio.netWorthUSD
       : 0;
+  // Per-class shares for non-equity classes, reduced by any
+  // bucket-funding consumption from that class. The plan drains
+  // priority-ordered (equity first), so in typical use only equity
+  // is touched — but a household with little equity could see
+  // bonds/commodity/RE consumed too. Round-2 audit CRITICAL fix:
+  // simulator must see post-sale shares, not pre-sale shares.
+  const bondsFractionPostSale =
+    portfolio.netWorthUSD > 0
+      ? Math.max(
+          0,
+          portfolio.classes.bondShare * portfolio.netWorthUSD -
+            consumedByBucketUSD.bonds,
+        ) / portfolio.netWorthUSD
+      : 0;
+  const commodityFractionPostSale =
+    portfolio.netWorthUSD > 0
+      ? Math.max(
+          0,
+          commodityShare * portfolio.netWorthUSD -
+            consumedByBucketUSD.commodity,
+        ) / portfolio.netWorthUSD
+      : 0;
+  const realEstateFractionPostSale =
+    portfolio.netWorthUSD > 0
+      ? Math.max(
+          0,
+          realEstateShare * portfolio.netWorthUSD -
+            consumedByBucketUSD.realEstate,
+        ) / portfolio.netWorthUSD
+      : 0;
+  const otherAltsFractionPostSale =
+    portfolio.netWorthUSD > 0
+      ? Math.max(
+          0,
+          otherAltsShare * portfolio.netWorthUSD -
+            consumedByBucketUSD.otherAlts,
+        ) / portfolio.netWorthUSD
+      : 0;
+
+  // Single pure transformation: see lib/projection/cashBucketAllocation.ts.
+  // Passes the bucket-funding plan's POST-TAX effective cash
+  // fraction (NOT the raw requested fraction). Round-1 audit HIGH:
+  // if user requests 25% cash but raising it costs $T in tax,
+  // actual post-tax cash is less than 25%; piping the raw request
+  // through magicked $T of cash out of thin air. The plan's
+  // `effectiveCashFractionPostTax` reconciles this correctly +
+  // also handles the partial-funding case (shortfallUSD > 0).
+  //
+  // Round-2 KNOWN APPROXIMATION: applyCashBucketOverride
+  // proportionally shrinks non-cash classes uniformly, while the
+  // plan drains highest-leverage FIRST. For a request that's
+  // mostly satisfied from equity (typical), the disagreement is
+  // bounded: equity classes are explicitly fed in already-shrunk
+  // (regularStocksFraction, stocks2xFraction reflect plan
+  // consumption). Bonds/etc. use `*PostSale` fractions above.
+  // The override's final pass only handles the cash dilution; if
+  // it shrinks non-cash slightly more than needed, the simulator
+  // sees a marginally lower equity exposure (conservative bias).
   const allocation = useMemo(
-    () => ({
-      stocksFraction: regularStocksFraction,
-      stocks2xFraction,
-      bondsFraction: portfolio.classes.bondShare,
-      cashFraction: portfolio.classes.cashShare,
-      commodityFraction: commodityShare,
-      realEstateFraction: realEstateShare,
-      otherFraction: otherAltsShare,
-    }),
+    () =>
+      applyCashBucketOverride(
+        {
+          stocksFraction: regularStocksFraction,
+          stocks2xFraction,
+          bondsFraction: bondsFractionPostSale,
+          cashFraction: projectedCashShare,
+          commodityFraction: commodityFractionPostSale,
+          realEstateFraction: realEstateFractionPostSale,
+          otherFraction: otherAltsFractionPostSale,
+        },
+        cashBucketOverrideActive
+          ? bucketFundingPlan.effectiveCashFractionPostTax
+          : null,
+      ),
     [
       regularStocksFraction,
       stocks2xFraction,
-      portfolio.classes.bondShare,
-      portfolio.classes.cashShare,
-      commodityShare,
-      realEstateShare,
-      otherAltsShare,
+      bondsFractionPostSale,
+      projectedCashShare,
+      commodityFractionPostSale,
+      realEstateFractionPostSale,
+      otherAltsFractionPostSale,
+      cashBucketOverrideActive,
+      bucketFundingPlan.effectiveCashFractionPostTax,
     ],
   );
+  // For methodology display + warnings: the effective cash share
+  // the simulator sees. When the override is inactive, this is
+  // just the projected (aged) cash share.
+  const cashFractionEffective = allocation.cashFraction;
 
-  // Post-tax starting NW. When the user has leveraged ETFs that
-  // the stress test models as deleveraged-at-retirement, the
-  // capital-gains tax on that restructure comes out of starting NW.
-  // When there are no leveraged positions to deleverage (or all
-  // such positions are in tax-advantaged accounts),
-  // `taxHitFraction` is 0 and this reduces to the original
-  // `Math.max(0, startingNW)`.
+  // Bucket-funding tax model. When the user requests a larger cash
+  // bucket than the projected cash share + short-bond buffer, we
+  // model the cost of raising it: sell highest-leverage equity
+  // first (preferring tax-advantaged accounts within the same
+  // leverage tier to minimize the bill), apply cap-gains on
+  // taxable-account portions, reduce starting NW by the tax.
+  // Primary residence + private stock + isIlliquid + user opt-outs
+  // (excludeFromCashBucketSale) are excluded.
+  // Scale the bucket-funding tax to the user's overridden starting
+  // NW (matches the deleverage-tax scaling pattern at line ~399).
+  // This way "what if I had $X starting" scenarios get a
+  // proportional tax drag rather than a fixed dollar amount.
+  // (The plan itself is computed at line ~370 above, before
+  // `computeLeveragedEquityBuckets`, so the leveraging engine can
+  // skip already-consumed holdings — Round-1 audit ordering fix.)
+  const bucketFundingTaxFraction =
+    portfolio.netWorthUSD > 0
+      ? bucketFundingPlan.totalTaxOwedUSD / portfolio.netWorthUSD
+      : 0;
+
+  // Post-tax starting NW. TWO taxes compose:
+  //   1. Deleveraging tax (existing) — capital gains on the at-
+  //      retirement 3x → 2x ETF restructure that the stress test
+  //      assumes the user performs anyway.
+  //   2. Bucket-funding tax (new) — capital gains on the sale of
+  //      equity (or bonds, etc.) to raise the requested cash bucket.
+  // Both are taxable-account-only (tax-advantaged rebalancing is
+  // tax-free); both default to gainFraction=1.0 (conservative —
+  // no cost-basis tracking, so assume all current value is gain).
+  // effectiveStartingNW uses DEFERRED startingNW so the MC sim
+  // doesn't re-run on every keystroke. UI surfaces that display
+  // startingNW (e.g., the "Starting NW" disclosure block, the
+  // NumberInput value, the "your tax cost on $X" prose) continue
+  // to use live `startingNW` for snappy feel. Round-9 audit fix.
   const effectiveStartingNW = Math.max(
     0,
-    startingNW * (1 - taxHitFraction),
+    deferredStartingNW * (1 - taxHitFraction - bucketFundingTaxFraction),
   );
   const effectiveWR =
     effectiveStartingNW > 0 ? annualSpend / effectiveStartingNW : 0;
@@ -429,21 +679,31 @@ export function HistoricalMonteCarloCard() {
     const haircutRate = clampHaircut(effective.retirementVariableHaircut);
     const haircutOnDownYearOnly =
       effective.retirementVariableHaircutOnDownYearOnly === true;
+    // Sim inputs use DEFERRED values for the four free-form
+    // NumberInputs (startingNW already deferred via
+    // effectiveStartingNW; annualSpend + horizonYears deferred
+    // here). UI displays stay snappy; the MC simulator only
+    // re-runs when React idle-time allows. Round-9 audit fix.
     const inputs = {
       startingNetWorthUSD: effectiveStartingNW,
       allocation,
-      annualSpendUSD: annualSpend,
+      annualSpendUSD: deferredAnnualSpend,
       // Dynamic-spending config. Always pass it so the simulator
       // is the SINGLE source of truth for haircut application —
       // even the "always apply" mode now flows through here
       // rather than being baked upstream. When haircut is 0 this
       // is a no-op for the simulator's per-year math.
       spending: {
-        variableUSD: annualSpend * variableShare,
+        variableUSD: deferredAnnualSpend * variableShare,
         haircut: {
           rate: haircutRate,
           onlyAfterDownYear: haircutOnDownYearOnly,
         },
+        // Cash-bucket priority: when on, retirement-year
+        // withdrawals come from cash first. Combines with the
+        // `rebalance` policy: annual → refilling bucket;
+        // none → depleting bucket.
+        cashBucketPriority,
         // Fixed-nominal freeze (SORR mitigation). The user
         // configures both the freeze duration and the assumed
         // inflation on the AssumptionsPanel. When years is 0
@@ -480,9 +740,9 @@ export function HistoricalMonteCarloCard() {
           activeMemberIds(scopedHousehold),
         ),
         baseYear,
-        Math.max(1, Math.min(60, horizonYears)),
+        Math.max(1, Math.min(60, deferredHorizonYears)),
       ),
-      retirementHorizonYears: Math.max(1, Math.min(60, horizonYears)),
+      retirementHorizonYears: Math.max(1, Math.min(60, deferredHorizonYears)),
       otherTreatedAsStocks: altsAs === "stocks",
       // When a glide path is configured + we know the member's age,
       // pass them so the simulator interpolates the allocation
@@ -502,13 +762,13 @@ export function HistoricalMonteCarloCard() {
   }, [
     effectiveStartingNW,
     allocation,
-    annualSpend,
+    deferredAnnualSpend,
     budgetItems,
     incomeStreams,
     scopedHousehold,
     memberId,
     effective,
-    horizonYears,
+    deferredHorizonYears,
     mode,
     bootstrapPaths,
     altsAs,
@@ -516,6 +776,7 @@ export function HistoricalMonteCarloCard() {
     glidePath,
     memberAge,
     rebalance,
+    cashBucketPriority,
     baseYear,
   ]);
 
@@ -645,9 +906,13 @@ export function HistoricalMonteCarloCard() {
               <span className="num">
                 {((effective.retirementTaxRate ?? 0.2) * 100).toFixed(0)}%
               </span>{" "}
-              retirement tax rate × 100% gain assumption × value in
-              taxable accounts). See the leveraged-allocation warning
-              on the Allocation page for the per-position breakdown.
+              retirement tax rate ×{" "}
+              <span className="num">
+                {Math.round(assumedCapGainsFraction * 100)}%
+              </span>{" "}
+              gain assumption × value in taxable accounts). See the
+              leveraged-allocation warning on the Allocation page for
+              the per-position breakdown.
             </div>
           )}
           {effectiveWR > 0.06 && (
@@ -798,22 +1063,24 @@ export function HistoricalMonteCarloCard() {
           </div>
         )}
 
-        {/* Rebalancing-policy toggle.
-              - Annual: snap to target weights every year (Trinity
-                Study / cfiresim convention).
-              - None: set-and-forget; let weights drift.
-              - Bucket: annual rebalance EXCEPT in retirement years
-                following a market drop, where the simulator skips
-                the snap so equity can recover unsold AND draws the
-                spend from the cash slice first. Next up-year's
-                snap refills the cash slice. Requires a non-zero
-                cash allocation to do anything. */}
+        {/* Rebalance × Cash-bucket as two orthogonal toggles.
+            The 2×2 matrix:
+              - annual + bucket-off: Trinity baseline
+              - annual + bucket-on:  refilling reserve (Kitces)
+              - none + bucket-off:   drift, proportional draw
+              - none + bucket-on:    depleting reserve (Pfau) —
+                                     finite SORR shield for early
+                                     retirement years */}
         <div className="mt-3 flex items-center justify-between gap-2 rounded-md border border-border bg-bg-elevated px-3 py-2">
           <div className="min-w-0 text-[10px] leading-snug text-text-dim">
             <span className="text-text">Rebalance</span> between
             asset classes
           </div>
-          <div className="inline-flex shrink-0 gap-0.5 rounded-full border border-border bg-bg-surface p-0.5">
+          <div
+            className="inline-flex shrink-0 gap-0.5 rounded-full border border-border bg-bg-surface p-0.5"
+            role="group"
+            aria-label="Rebalance policy"
+          >
             <ModeChip
               label="Annual"
               active={rebalance === "annual"}
@@ -824,22 +1091,148 @@ export function HistoricalMonteCarloCard() {
               active={rebalance === "none"}
               onClick={() => setRebalance("none")}
             />
+          </div>
+        </div>
+        <div className="mt-2 flex items-center justify-between gap-2 rounded-md border border-border bg-bg-elevated px-3 py-2">
+          <div className="min-w-0 text-[10px] leading-snug text-text-dim">
+            <span className="text-text">Cash-bucket priority</span> in
+            retirement (draw cash before equity)
+          </div>
+          <div
+            className="inline-flex shrink-0 gap-0.5 rounded-full border border-border bg-bg-surface p-0.5"
+            role="group"
+            aria-label="Cash-bucket priority"
+          >
             <ModeChip
-              label="Bucket"
-              active={rebalance === "bucket"}
-              onClick={() => setRebalance("bucket")}
+              label="Off"
+              active={!cashBucketPriority}
+              onClick={() => setCashBucketPriority(false)}
+            />
+            <ModeChip
+              label="On"
+              active={cashBucketPriority}
+              onClick={() => setCashBucketPriority(true)}
             />
           </div>
         </div>
-        {rebalance === "bucket" && cashShareToday < 0.005 && (
-          <div className="mt-2 rounded-md border border-amber-300/40 bg-amber-300/5 px-2.5 py-1.5 text-[10px] leading-snug text-amber-200">
-            Bucket strategy is on but your cash allocation is
-            essentially 0%. With no cash to drain, the policy
-            degrades to standard annual rebalance — set up a
-            small cash slice (5% is typical) for the strategy to
-            actually matter.
+        {cashBucketPriority && !glidePathActive && (
+          <div className="mt-2 flex items-center justify-between gap-2 rounded-md border border-border bg-bg-elevated px-3 py-2">
+            <div className="min-w-0 text-[10px] leading-snug text-text-dim">
+              <span className="text-text">Cash bucket size</span>{" "}
+              (override; default = projected cash share at target{" "}
+              <span className="num">
+                {(projectedCashShare * 100).toFixed(2)}%
+              </span>
+              )
+            </div>
+            <span className="flex shrink-0 items-center gap-1 rounded-md border border-border-strong bg-bg-surface px-2 py-1">
+              <NumberInput
+                label="%"
+                // Initialize displayed value to the projected
+                // float at the SAME precision the math uses. Two
+                // decimals + step=0.1 means the value the user
+                // sees and the value the simulator runs are the
+                // same number — no silent rounding when the user
+                // submits the displayed default. (Round-4 audit:
+                // previously step=1 + Math.round caused 5.13%
+                // float to display as "5", and typing "5" then
+                // flipped state from null to 5 → math used 5%
+                // exactly, a 0.13% NW shift with no warning.)
+                value={
+                  cashBucketSizePct ??
+                  Number((projectedCashShare * 100).toFixed(2))
+                }
+                onChange={(v) =>
+                  setCashBucketSizePct(
+                    Math.max(0, Math.min(CASH_BUCKET_MAX_PCT, v)),
+                  )
+                }
+                step={0.1}
+                min={0}
+                max={CASH_BUCKET_MAX_PCT}
+                compact
+              />
+            </span>
           </div>
         )}
+        {cashBucketPriority && glidePathActive && (
+          <div
+            className="mt-2 rounded-md border border-amber-300/40 bg-amber-300/5 px-2.5 py-1.5 text-[10px] leading-snug text-amber-200"
+            role="status"
+          >
+            A glide path is configured — the simulator computes
+            per-year allocation from age, so the cash bucket SIZE
+            override is ignored (the priority flag still drives
+            cash-first withdrawal at retirement). To customize the
+            bucket size, switch off the glide path in your settings.
+          </div>
+        )}
+        {cashBucketPriority && cashFractionEffective < 0.005 && (
+          <div
+            className="mt-2 rounded-md border border-amber-300/40 bg-amber-300/5 px-2.5 py-1.5 text-[10px] leading-snug text-amber-200"
+            role="status"
+          >
+            Cash-bucket priority is on but your effective cash slice
+            is essentially 0%. With no cash to drain, the policy
+            no-ops — either set a Cash bucket size above or add
+            cash to your real portfolio.
+          </div>
+        )}
+        {/* Tax-implications warning: fires when the requested
+            bucket size differs from the projected (aged) cash
+            share by MORE THAN the input's precision (step=0.1
+            → 0.001 fractional). `delta` is computed ONCE here so
+            the gate, the direction test, and the message all
+            agree. Two-way: equity → cash sells equity at
+            cap-gains; cash → equity has no direct tax hit, but
+            we still flag the composition change explicitly. */}
+        {(() => {
+          if (!cashBucketOverrideActive || requestedCashFraction == null)
+            return null;
+          // Special case: 100% cash portfolio. The helper short-
+          // circuits (no non-cash to redistribute from).
+          if (projectedCashShare >= 1 - 0.001) {
+            const requestedDelta = Math.abs(
+              requestedCashFraction - projectedCashShare,
+            );
+            if (requestedDelta < 0.001) return null;
+            return (
+              <div
+                className="mt-2 rounded-md border border-amber-300/40 bg-amber-300/5 px-2.5 py-1.5 text-[10px] leading-snug text-amber-200"
+                role="status"
+              >
+                Your projected portfolio is essentially 100% cash, so
+                the bucket-size override has nothing to redistribute
+                from — the simulator runs at 100% cash. Add equity /
+                bond holdings to model a meaningful cash-bucket
+                sizing.
+              </div>
+            );
+          }
+          const delta = requestedCashFraction - projectedCashShare;
+          if (Math.abs(delta) < 0.001) return null;
+          // Bucket-funding tax is now MODELED. Disclose the actual
+          // tax cost + the sale plan + the assumptions.
+          return (
+            <BucketFundingDisclosure
+              delta={delta}
+              plan={bucketFundingPlan}
+              scaledTaxUSD={bucketFundingTaxFraction * startingNW}
+              gainFraction={assumedCapGainsFraction}
+              // Scale `amountRaisedUSD` by the same factor so the
+              // disclosure's "sold X / tax Y" pair is internally
+              // consistent under what-if startingNW overrides
+              // (Round-3 audit HIGH). Without scaling, tax/sold
+              // wouldn't equal the configured tax rate when the
+              // user's startingNW differs from portfolio NW.
+              startingNWScale={
+                portfolio.netWorthUSD > 0
+                  ? startingNW / portfolio.netWorthUSD
+                  : 1
+              }
+            />
+          );
+        })()}
 
         <div className="mt-3 rounded-md border border-border bg-bg-elevated px-3 py-2 text-[10px] leading-snug text-text-dim">
           <div className="text-[10px] uppercase tracking-wider text-text-muted">
@@ -876,31 +1269,37 @@ export function HistoricalMonteCarloCard() {
                 Allocation inferred from your portfolio
                 {yearsToTarget > 0 && " AT target date"}:
               </span>{" "}
-              {(allocation.stocksFraction * 100).toFixed(0)}% stocks /{" "}
-              {(allocation.bondsFraction * 100).toFixed(0)}% bonds /{" "}
-              {(allocation.cashFraction * 100).toFixed(0)}% cash
-              {stocks2xFraction > 0.001 && (
+              {(allocation.stocksFraction * 100).toFixed(2)}% stocks /{" "}
+              {(allocation.bondsFraction * 100).toFixed(2)}% bonds /{" "}
+              {(allocation.cashFraction * 100).toFixed(2)}% cash
+              {/* Show minor classes using the SCALED allocation
+                  (what the simulator actually runs), not raw
+                  portfolio shares. Threshold 0.0001 = 0.01% — the
+                  smallest value that displays as non-zero at
+                  2-decimal precision. Lower thresholds risk
+                  showing "0.00% X" lines that look like bugs. */}
+              {allocation.stocks2xFraction > 0.0001 && (
                 <>
-                  {" "}/ {(stocks2xFraction * 100).toFixed(0)}% 2x equity
-                  (RYTNX series — real 2001+, projected pre-2001)
+                  {" "}/ {(allocation.stocks2xFraction * 100).toFixed(2)}% 2x
+                  equity (RYTNX series — real 2001+, projected pre-2001)
                 </>
               )}
-              {commodityShare > 0.001 && (
+              {allocation.commodityFraction > 0.0001 && (
                 <>
-                  {" "}/ {(commodityShare * 100).toFixed(0)}% commodity
-                  (gold series)
+                  {" "}/ {(allocation.commodityFraction * 100).toFixed(2)}%
+                  commodity (gold series)
                 </>
               )}
-              {realEstateShare > 0.001 && (
+              {allocation.realEstateFraction > 0.0001 && (
                 <>
-                  {" "}/ {(realEstateShare * 100).toFixed(0)}% real estate
-                  (Damodaran RE price series)
+                  {" "}/ {(allocation.realEstateFraction * 100).toFixed(2)}%
+                  real estate (Damodaran RE price series)
                 </>
               )}
-              {otherAltsShare > 0.001 && (
+              {allocation.otherFraction > 0.0001 && (
                 <>
-                  {" "}/ {(otherAltsShare * 100).toFixed(0)}% alts (
-                  {altsAs === "stocks" ? "as stocks" : "as cash"})
+                  {" "}/ {(allocation.otherFraction * 100).toFixed(2)}% alts
+                  ({altsAs === "stocks" ? "as stocks" : "as cash"})
                 </>
               )}
               .
@@ -949,26 +1348,6 @@ export function HistoricalMonteCarloCard() {
                   page and it&apos;ll honor that here instead.
                 </li>
               )
-            ) : rebalance === "bucket" ? (
-              <li>
-                <span className="text-text">
-                  Cash-bucket strategy (Kitces &ldquo;bond tent&rdquo; / Pfau).
-                </span>{" "}
-                Annual rebalance in normal years; in retirement
-                years following a market drop, the simulator skips
-                the snap (equity stays unsold through the recovery)
-                and takes the whole withdrawal from the{" "}
-                <span className="num text-text">
-                  {(allocation.cashFraction * 100).toFixed(0)}%
-                </span>{" "}
-                cash slice first — only spilling proportionally to
-                other classes when cash runs dry. Next up-year&apos;s
-                annual snap refills the cash bucket from appreciated
-                equity. SORR-mitigation for multi-year downturns;
-                annual rebalance can still outperform on V-shaped
-                crash-and-bounce sequences (the rebalance-buy-the-
-                dip mechanic), so this isn&apos;t a free lunch.
-              </li>
             ) : (
               <li>
                 <span className="text-text">
@@ -990,16 +1369,39 @@ export function HistoricalMonteCarloCard() {
                 small over a 30+ year horizon.
               </li>
             )}
+            {cashBucketPriority && (
+              <li>
+                <span className="text-text">
+                  Cash-bucket priority {rebalance === "annual"
+                    ? "(refilling reserve, Kitces interp.)"
+                    : "(depleting reserve, Pfau interp.)"}
+                  .
+                </span>{" "}
+                Retirement-year withdrawals come from the{" "}
+                <span className="num text-text">
+                  {(allocation.cashFraction * 100).toFixed(2)}%
+                </span>{" "}
+                cash slice first — only spilling proportionally to
+                other classes when cash runs dry.{" "}
+                {rebalance === "annual"
+                  ? "CAVEAT: with annual rebalance, the next year-start snap restores cash share back to target weights. So at year-end MC snapshot resolution (what this simulator measures), the success rate is observationally equivalent to annual + no-bucket. The benefit is within-year liquidity / tax-lot timing, NOT survival rate. For OBSERVABLE SORR shielding in the simulator, switch rebalance to 'no rebalance' (depleting reserve)."
+                  : "Cash is never refilled by rebalance — the slice trends toward depletion through retirement-year draws. (It can still grow modestly from real cash returns or absorb a slice of any positive income.) Once exhausted, withdrawals fall through to proportional draw. The protection horizon depends on bucket size: a 5% cash slice at a 4% real spend rate lasts only ~1–2 years; a 20–30% bucket gives 5–10 years of shielding. Survival rate genuinely diverges from no-bucket."}{" "}
+                Composes with the fixed-nominal freeze and variable
+                haircut: all three can be on simultaneously.
+              </li>
+            )}
             <li>
               <span className="text-text">
                 Mid-year cash-flow timing.
               </span>{" "}
               Contributions (pre-retirement) and spend (retirement)
-              are applied at mid-year: a $40K real spend in a −10%
-              year reduces NW by $40K × (1 + −0.05) = $38K, not the
-              full $40K — the unspent half avoids the second half of
-              the drawdown. Matches the deterministic Independence
-              projection.
+              are applied at mid-year: a $40K real spend in a year
+              with a −10% blended portfolio return reduces NW by
+              $40K × (1 + −0.05) = $38K, not the full $40K — the
+              unspent half avoids the second half of the drawdown.
+              (Blended, not stocks-only: in a 60/40 mix a −10% stocks
+              year is a ~−6% blended year.) Matches the deterministic
+              Independence projection.
             </li>
             {(leveragedBuckets.stocks2xUSD +
               leveragedBuckets.postTaxDeleverageToStocks2xUSD >
@@ -1084,6 +1486,301 @@ export function HistoricalMonteCarloCard() {
         onClose={() => setHistoricalTableOpen(false)}
       />
     </section>
+  );
+}
+
+/**
+ * Bucket-funding tax disclosure block. Shows when the user has
+ * sized the cash bucket above the projected cash share (which
+ * means equity / bonds must be sold to fund it). Surfaces:
+ *
+ *   - The MODELED tax cost (replacing the prior "NOT modeled" copy).
+ *   - Short-bond cash-equivalent buffer (when applicable).
+ *   - Sale-plan summary: which holdings got drained, in priority
+ *     order. Collapsible to keep the warning compact by default.
+ *   - Excluded items: primary residence + user opt-outs, named so
+ *     the user knows why they weren't sold.
+ *   - Pointer to the account editor for opting out specific holdings.
+ *   - Cost-basis assumption (gainFraction; the value the user
+ *     configured under Plan → Assumptions, default 1.0).
+ */
+/**
+ * Display formatter for AccountCategory enum values. The raw enum is
+ * UPPER_SNAKE (BROKERAGE, TRAD_IRA, ROTH_IRA) which renders jarringly
+ * in prose. Mapped to short human-friendly labels.
+ */
+function formatAccountCategory(category: string): string {
+  switch (category) {
+    case "BROKERAGE":
+      return "brokerage";
+    case "SAVINGS":
+      return "savings";
+    case "CHECKING":
+      return "checking";
+    case "401K":
+      return "401(k)";
+    case "ROTH_401K":
+      return "Roth 401(k)";
+    case "TRAD_IRA":
+      return "Trad IRA";
+    case "ROTH_IRA":
+      return "Roth IRA";
+    case "HSA":
+      return "HSA";
+    case "FIVE_29":
+      return "529";
+    case "TRUMP_ACCOUNT":
+      return "Trump account";
+    case "CRYPTO":
+      return "crypto";
+    case "REAL_ESTATE":
+      return "real estate";
+    case "OTHER":
+      return "other";
+    default:
+      return category.toLowerCase();
+  }
+}
+
+function BucketFundingDisclosure({
+  delta,
+  plan,
+  scaledTaxUSD,
+  startingNWScale,
+  gainFraction,
+}: {
+  delta: number;
+  plan: ReturnType<typeof planBucketFunding>;
+  scaledTaxUSD: number;
+  /**
+   * Scale factor = startingNW / portfolio.netWorthUSD. Applied to
+   * the plan's dollar amounts (which are computed in portfolio
+   * terms) so the displayed numbers are CONSISTENT with the
+   * already-scaled tax figure under what-if startingNW overrides
+   * (Round-3 audit HIGH).
+   */
+  startingNWScale: number;
+  /**
+   * The user-configured fraction of sold value treated as taxable
+   * gain. Surfaced in the disclosure so the user can see WHICH
+   * value the engine is using (1.0 default → fully-appreciated,
+   * conservative; lower → less of the sale is taxable).
+   */
+  gainFraction: number;
+}) {
+  if (delta < 0) {
+    return (
+      <div
+        className="mt-2 rounded-md border border-amber-300/40 bg-amber-300/5 px-2.5 py-1.5 text-[10px] leading-snug text-amber-200"
+        role="status"
+        aria-live="polite"
+      >
+        You&apos;ve sized the bucket BELOW the projected cash share
+        (de-risking out of cash into equity). The composition swap is
+        modeled; the buy side has no immediate tax. Future cap-gains
+        on the new equity position are realized when sold (not in v1).
+      </div>
+    );
+  }
+
+  // Equity → cash sale. Show the modeled tax + sale breakdown.
+  // Scale plan dollars so "sold X / tax Y" pair is consistent.
+  const amountRaisedDisplay = plan.amountRaisedUSD * startingNWScale;
+  const amountToRaiseDisplay = plan.amountToRaiseUSD * startingNWScale;
+  const shortDurationBondDisplay =
+    plan.shortDurationBondUSD * startingNWScale;
+  const excludedPrimaryResidenceDisplay =
+    plan.excludedPrimaryResidenceUSD * startingNWScale;
+  const excludedUserOptOutDisplay =
+    plan.excludedUserOptOutUSD * startingNWScale;
+  return (
+    <div
+      className="mt-2 rounded-md border border-amber-300/40 bg-amber-300/5 px-2.5 py-1.5 text-[10px] leading-snug text-amber-200"
+      role="status"
+      aria-live="polite"
+    >
+      <div>
+        Funding the larger bucket requires selling{" "}
+        <span className="num text-amber-100">
+          {formatUSDCompact(amountRaisedDisplay)}
+        </span>{" "}
+        of non-cash holdings. Modeled cap-gains tax (on the taxable-
+        account portion) is{" "}
+        <span className="num text-amber-100">
+          {formatUSDCompact(scaledTaxUSD)}
+        </span>
+        , deducted from the simulator&apos;s starting NW.
+      </div>
+      {plan.shortDurationBondUSD > 0 && (
+        <div className="mt-1 text-amber-300/80">
+          Short-duration bonds (≤ 1 yr,{" "}
+          <span className="num">
+            {formatUSDCompact(shortDurationBondDisplay)}
+          </span>
+          ) are counted as cash-equivalent and not sold — they&apos;re
+          already part of the SORR buffer.
+        </div>
+      )}
+      {plan.shortfallUSD > 0 && (
+        <div className="mt-1 text-red-300">
+          Shortfall: only{" "}
+          <span className="num">{formatUSDCompact(amountRaisedDisplay)}</span>{" "}
+          could be raised vs the{" "}
+          <span className="num">
+            {formatUSDCompact(amountToRaiseDisplay)}
+          </span>{" "}
+          requested. Sellable non-cash holdings ran out — the simulator
+          uses the actual cash share that resulted.
+        </div>
+      )}
+      <details className="mt-1">
+        <summary
+          className="cursor-pointer text-amber-300/90"
+          aria-label="Show sale plan and tax assumptions"
+        >
+          Sale plan + assumptions
+        </summary>
+        <div className="mt-1.5 space-y-1 text-amber-300/80">
+          {plan.sales.length > 0 && (
+            <div>
+              <div className="font-medium text-amber-200">
+                Sold (highest-leverage first; tax-advantaged accounts
+                preferred within tier to minimize the tax bill):
+              </div>
+              <ul className="mt-0.5 ml-3 list-disc">
+                {plan.sales.slice(0, 15).map((s) => (
+                  <li key={s.holdingId}>
+                    {s.label}
+                    {s.leverage > 1 && (
+                      <span className="text-amber-300/70">
+                        {" "}
+                        ({s.leverage}× lev)
+                      </span>
+                    )}{" "}
+                    —{" "}
+                    <span className="num">
+                      {formatUSDCompact(
+                        s.faceValueSoldUSD * startingNWScale,
+                      )}
+                    </span>{" "}
+                    from {formatAccountCategory(s.accountCategory)}
+                    {s.isTaxable ? (
+                      <>
+                        ,{" "}
+                        <span className="num">
+                          {formatUSDCompact(s.taxOwedUSD * startingNWScale)}
+                        </span>{" "}
+                        tax
+                      </>
+                    ) : (
+                      ", tax-free at sale"
+                    )}
+                  </li>
+                ))}
+                {plan.sales.length > 15 && (
+                  <li className="text-amber-300/70">
+                    …and {plan.sales.length - 15} more holding
+                    {plan.sales.length - 15 === 1 ? "" : "s"}
+                  </li>
+                )}
+              </ul>
+            </div>
+          )}
+          {(plan.excludedPrimaryResidenceUSD > 0 ||
+            plan.excludedUserOptOutUSD > 0) && (
+            <div>
+              <span className="font-medium text-amber-200">Excluded:</span>{" "}
+              {plan.excludedPrimaryResidenceUSD > 0 && (
+                <>
+                  primary residence (
+                  <span className="num">
+                    {formatUSDCompact(excludedPrimaryResidenceDisplay)}
+                  </span>{" "}
+                  — can&apos;t be sold without moving)
+                </>
+              )}
+              {plan.excludedPrimaryResidenceUSD > 0 &&
+                plan.excludedUserOptOutUSD > 0 &&
+                "; "}
+              {plan.excludedUserOptOutUSD > 0 && (
+                <>
+                  user-marked holdings (
+                  <span className="num">
+                    {formatUSDCompact(excludedUserOptOutDisplay)}
+                  </span>
+                  )
+                </>
+              )}
+              .
+            </div>
+          )}
+          <div>
+            To keep a specific holding (e.g. a long-held high-conviction
+            position you intend to hold-to-inheritance for step-up
+            basis), open the account editor and toggle{" "}
+            <span className="text-amber-200">
+              &ldquo;Don&apos;t sell for cash-bucket funding&rdquo;
+            </span>{" "}
+            on that holding.
+          </div>
+          <div>
+            <span className="font-medium text-amber-200">
+              Cost-basis assumption:
+            </span>{" "}
+            this app doesn&apos;t track per-holding cost basis, so the
+            model treats{" "}
+            <span className="num text-amber-100">
+              {Math.round(gainFraction * 100)}%
+            </span>{" "}
+            of each sold position&apos;s current value as taxable gain
+            (your configured assumed cap-gains fraction;{" "}
+            {gainFraction >= 0.999
+              ? "the default — conservative, correct for very long-held positions but overstated for recently-bought ones"
+              : gainFraction <= 0.001
+                ? "no gain — assumes basis ≈ current value (e.g. just-purchased positions)"
+                : "tune from Plan → Assumptions to match your portfolio's gain-to-value mix"}
+            ).
+          </div>
+          <div>
+            <span className="font-medium text-amber-200">Tax rate:</span>{" "}
+            <span className="num">
+              {(plan.effectiveTaxRate * 100).toFixed(0)}%
+            </span>{" "}
+            (your configured retirement rate). NOT modeled in v1: the
+            3.8% NIIT surtax above ~$200k AGI, state cap-gains (0–13.3%
+            depending on state), bracket-climb from a large sale
+            pushing 15% LTCG → 20%, and IRMAA premium adders. For a CA
+            user, real liability could be ~17 pts higher than shown;
+            set the rate slider to encompass federal + NIIT + state if
+            you want the disclosure to match reality.
+          </div>
+          <div>
+            <span className="font-medium text-amber-200">
+              Not modeled:
+            </span>{" "}
+            tax-loss-harvesting offsets (a holding with unrealized
+            losses would generate tax savings, not cost); wash-sale
+            disallowance (if the bucket sale of a ticker is
+            effectively re-bought by the simulator&apos;s allocation,
+            IRS disallows the loss); step-up basis at death (selling a
+            hold-to-inheritance position forfeits the heir&apos;s
+            basis reset — use the opt-out toggle).
+          </div>
+          <div>
+            <span className="font-medium text-amber-200">
+              Pre-tax (401k/Trad IRA) caveat:
+            </span>{" "}
+            sales from these accounts show as &ldquo;tax-free at sale&rdquo;
+            because rebalancing inside the account is tax-free. Those
+            dollars WILL be taxed as ordinary income on withdrawal
+            (already reflected in the simulator&apos;s drawdown
+            tax-bucket logic upstream). Roth + HSA-for-medical
+            withdrawals stay tax-free; HSA-non-medical post-65 is
+            ordinary income.
+          </div>
+        </div>
+      </details>
+    </div>
   );
 }
 

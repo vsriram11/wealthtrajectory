@@ -10,6 +10,16 @@ export type Quote = {
   history: QuoteHistoryPoint[];
   fetchedAt: number;
   unavailable?: boolean;
+  /**
+   * Diagnostic reason captured from the upstream API route when
+   * the fetch fell through to `unavailable: true`. Concatenates
+   * Finnhub + Yahoo failure reasons (e.g. "finnhub: no
+   * FINNHUB_API_KEY env var | yahoo: query1 returned 401
+   * Unauthorized"). Surfaced in the time-travel banner so users
+   * can diagnose why historical prices aren't loading without
+   * opening DevTools.
+   */
+  error?: string;
 };
 
 type QuoteRow = { symbol: string; quote: Quote };
@@ -56,13 +66,45 @@ function isUsableQuote(q: Quote | null | undefined): q is Quote {
   return !!q && q.currentPrice > 0 && !q.unavailable;
 }
 
-export async function getQuote(symbolRaw: string): Promise<Quote | null> {
+export type GetQuoteOptions = {
+  /**
+   * "5y" (default) requests the standard 5-year daily history.
+   * "max" fetches the full available history (Yahoo: symbol
+   * inception, often 20-40+ years; Finnhub: 30y). Used by
+   * time-travel mode for backdates older than 5 years ago.
+   *
+   * Cache behavior: a "max" fetch overwrites the cached entry
+   * for that symbol (max is a strict superset of 5y, so all
+   * subsequent reads benefit). The cache key is unchanged.
+   */
+  range?: "5y" | "max";
+};
+
+export async function getQuote(
+  symbolRaw: string,
+  opts: GetQuoteOptions = {},
+): Promise<Quote | null> {
   const symbol = symbolRaw.trim().toUpperCase();
   if (!symbol) return null;
+  const wantMax = opts.range === "max";
+
+  // Cache hit acceptance: if caller wants "max" but the cached
+  // history covers only ~5y, we should refetch. Use the cached
+  // history span as the proxy for "what range did we last
+  // fetch." If the oldest point is < 6 years ago AND wantMax,
+  // bypass cache to upgrade to a wider window.
+  const SIX_YEARS_MS = 6 * 365 * 24 * 60 * 60 * 1000;
+  const cacheCoversMax = (q: Quote): boolean => {
+    if (!wantMax) return true;
+    if (q.history.length === 0) return false;
+    return Date.now() - q.history[0].t > SIX_YEARS_MS;
+  };
+
   const fromMem = memCache.get(symbol);
   if (
     isUsableQuote(fromMem) &&
-    Date.now() - fromMem.fetchedAt < TTL_MS
+    Date.now() - fromMem.fetchedAt < TTL_MS &&
+    cacheCoversMax(fromMem)
   ) {
     return fromMem;
   }
@@ -70,28 +112,35 @@ export async function getQuote(symbolRaw: string): Promise<Quote | null> {
   const cached = await readCache(symbol);
   if (
     isUsableQuote(cached) &&
-    Date.now() - cached.fetchedAt < TTL_MS
+    Date.now() - cached.fetchedAt < TTL_MS &&
+    cacheCoversMax(cached)
   ) {
     memCache.set(symbol, cached);
     return cached;
   }
 
-  if (inflight.has(symbol)) return inflight.get(symbol)!;
-  const promise = fetchFresh(symbol).finally(() => inflight.delete(symbol));
-  inflight.set(symbol, promise);
+  // Inflight dedup keyed by (symbol, range) — two callers
+  // requesting different ranges simultaneously shouldn't
+  // cross-pollute.
+  const inflightKey = wantMax ? `${symbol}:max` : symbol;
+  if (inflight.has(inflightKey)) return inflight.get(inflightKey)!;
+  const promise = fetchFresh(symbol, opts).finally(() =>
+    inflight.delete(inflightKey),
+  );
+  inflight.set(inflightKey, promise);
   const fresh = await promise;
   if (fresh) {
-    // Only persist a quote that actually contains a real price.
-    // Caching zero / unavailable would poison subsequent reads.
     if (isUsableQuote(fresh)) {
       memCache.set(symbol, fresh);
       void writeCache(symbol, fresh);
     }
+    // Return the fresh quote even when it's unavailable — the
+    // caller (PriceRefresher historical-mode loop) needs the
+    // `error` field to surface a diagnostic in the time-travel
+    // banner. Previously this fell through to `return null` and
+    // the error was lost.
     return fresh;
   }
-  // Last-resort: a cached quote we previously decided was stale. Still
-  // better than nothing for the caller to display, but we don't
-  // re-warm memCache with it.
   if (cached) return cached;
   return null;
 }
@@ -106,13 +155,18 @@ export async function getCachedQuote(symbolRaw: string): Promise<Quote | null> {
   return cached;
 }
 
-async function fetchFresh(symbol: string): Promise<Quote | null> {
+async function fetchFresh(
+  symbol: string,
+  opts: GetQuoteOptions = {},
+): Promise<Quote | null> {
   try {
-    const res = await fetch(`/api/quote/${encodeURIComponent(symbol)}`);
+    const qs = opts.range === "max" ? "?range=max" : "";
+    const res = await fetch(`/api/quote/${encodeURIComponent(symbol)}${qs}`);
     if (!res.ok) return null;
     const data = (await res.json()) as Omit<Quote, "fetchedAt"> & {
       asOf?: number;
       unavailable?: boolean;
+      error?: string;
     };
     return {
       symbol: data.symbol,
@@ -122,6 +176,7 @@ async function fetchFresh(symbol: string): Promise<Quote | null> {
       history: Array.isArray(data.history) ? data.history : [],
       fetchedAt: data.asOf ?? Date.now(),
       unavailable: data.unavailable === true,
+      ...(typeof data.error === "string" ? { error: data.error } : {}),
     };
   } catch (e) {
     console.warn(`quote fetch failed for ${symbol}`, e);
@@ -177,11 +232,41 @@ export async function primeCache(quote: Quote): Promise<void> {
   await writeCache(symbol, quote);
 }
 
-export function priceAt(quote: Quote, atMs: number): number | null {
+/**
+ * Result discriminator so callers can distinguish "exact" vs
+ * "clamped to nearest endpoint" — important for backdated lookups
+ * where clamping to the 5-year-old earliest sample would silently
+ * lie about prices from 6+ years ago. Round-5 audit BLOCK: the
+ * previous return-just-a-number signature gave callers no way to
+ * know they got the oldest-sample clamp.
+ */
+export type PriceAtResult = {
+  price: number;
+  /** True when atMs fell outside [h[0].t, h[N-1].t]. */
+  clamped: boolean;
+};
+
+/**
+ * Binary-search the history array for the closing price at or
+ * before atMs. Returns the price + a `clamped` flag indicating
+ * whether atMs was outside the available history window.
+ *
+ * Callers wanting strict "data unavailable for this date" semantics
+ * should treat `clamped === true` as null.
+ */
+export function priceAtDetailed(
+  quote: Quote,
+  atMs: number,
+): PriceAtResult | null {
   const h = quote.history;
   if (h.length === 0) return null;
-  if (atMs <= h[0].t) return h[0].p;
-  if (atMs >= h[h.length - 1].t) return h[h.length - 1].p;
+  // Strict inequality on the boundary: an exact match against the
+  // first or last sample is INSIDE the available window — flagging
+  // it `clamped` makes the historical-price flow skip a valid
+  // sample (R2 audit HIGH). Only out-of-window lookups clamp.
+  if (atMs < h[0].t) return { price: h[0].p, clamped: true };
+  if (atMs > h[h.length - 1].t)
+    return { price: h[h.length - 1].p, clamped: true };
   let lo = 0;
   let hi = h.length - 1;
   while (lo + 1 < hi) {
@@ -189,5 +274,22 @@ export function priceAt(quote: Quote, atMs: number): number | null {
     if (h[mid].t <= atMs) lo = mid;
     else hi = mid;
   }
-  return h[lo].p;
+  // After the loop, `hi` may be the exact-end match; otherwise
+  // `lo` is the at-or-before index. Pick whichever is exactly
+  // atMs first; fall back to lo (the standard at-or-before).
+  return {
+    price: h[hi].t <= atMs ? h[hi].p : h[lo].p,
+    clamped: false,
+  };
+}
+
+/**
+ * Back-compat wrapper for legacy callers. Returns just the price,
+ * including clamp cases. New code should use priceAtDetailed when
+ * the clamp distinction matters (historical-price application for
+ * time-travel sessions).
+ */
+export function priceAt(quote: Quote, atMs: number): number | null {
+  const r = priceAtDetailed(quote, atMs);
+  return r === null ? null : r.price;
 }

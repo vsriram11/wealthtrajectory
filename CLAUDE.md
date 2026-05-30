@@ -52,9 +52,9 @@ The cascade is enforced by:
 
 ### 4. Subsystem organization + import paths
 
-`lib/` is organized by subsystem: `projection/`, `portfolio/`, `budget/`, `health/`, `tax/`, `sync/`, `persistence/`, `data/`, `insights/`, plus the existing `store/`. Cross-cutting core types (`types`, `format`, `nominal`, `entityIds`, `demo`, `store`, `useLocalStorageState`) stay at `lib/` root.
+`lib/` is organized by subsystem: `projection/`, `portfolio/`, `budget/`, `health/`, `tax/`, `sync/`, `persistence/`, `data/`, `insights/`, `calculators/`, plus the existing `store/`. Cross-cutting core types (`types`, `format`, `nominal`, `entityIds`, `demo`, `store`, `useLocalStorageState`) stay at `lib/` root.
 
-`app/_components/` follows the same shape: `ui/`, `shell/`, `infra/`, `projection/`, `allocation/`, `holdings/`, `plan/`, `insights/`, `data/`.
+`app/_components/` follows the same shape: `ui/`, `shell/`, `infra/`, `projection/`, `allocation/`, `holdings/`, `plan/`, `insights/`, `data/`, `calculators/`.
 
 Import-path convention:
 - **Same subsystem** → relative `./X`

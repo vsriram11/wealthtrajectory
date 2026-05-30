@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useMemo } from "react";
+import { useEffect, useMemo, useRef } from "react";
 import { useAppStore } from "@/lib/store";
 import { uniqueSymbols } from "@/lib/data/history";
-import { getQuote } from "@/lib/data/quotes";
+import { getQuote, priceAtDetailed } from "@/lib/data/quotes";
+import { parseISODate } from "@/lib/dateInput";
 
 // 1-second spacing between *network* calls keeps any single browser
 // session well under Finnhub's 60-calls-per-minute API key limit when
@@ -25,6 +26,21 @@ function sleep(ms: number) {
 export function PriceRefresher() {
   const household = useAppStore((s) => s.household);
   const applyLivePrice = useAppStore((s) => s.applyLivePrice);
+  // Time-travel session gate (user-reported UX bug): while the
+  // user is editing a backdated session, the live-quote refresh
+  // was overwriting their manual price entries with CURRENT
+  // market prices — making it impossible to capture historical
+  // values. The whole point of the session is "the app as it
+  // looked on date D", so live quotes should NOT apply.
+  //
+  // Future enhancement: fetch HISTORICAL quotes for the chosen
+  // date instead of skipping refresh entirely. For now, freezing
+  // values to whatever the user enters is the correct UX.
+  const timeTravelActive = useAppStore((s) => s.timeTravelActive);
+  const timeTravelDate = useAppStore((s) => s.timeTravelDate);
+  const recordTimeTravelPriceOutcome = useAppStore(
+    (s) => s.recordTimeTravelPriceOutcome,
+  );
 
   // Track per-holding identity (not just the unique symbol set) so
   // adding a SECOND VOO doesn't skip the refresh — the previous
@@ -61,6 +77,10 @@ export function PriceRefresher() {
   }, [household.accounts]);
 
   useEffect(() => {
+    // Time-travel gate — skip the entire refresh pass while
+    // the user is in a backdated session. Manual price entries
+    // stay untouched.
+    if (timeTravelActive) return;
     const symbols = uniqueSymbols(household);
     if (symbols.length === 0) return;
     let cancelled = false;
@@ -68,6 +88,11 @@ export function PriceRefresher() {
       let lastWasNetwork = false;
       for (const s of symbols) {
         if (cancelled) return;
+        // Defense in depth: check the time-travel flag at each
+        // iteration too. The user could enter time-travel mid-
+        // refresh; we want to abort immediately rather than
+        // overwrite their nascent manual entries.
+        if (useAppStore.getState().timeTravelActive) return;
         if (lastWasNetwork) await sleep(NETWORK_SPACING_MS);
         const t0 =
           typeof performance !== "undefined" ? performance.now() : Date.now();
@@ -78,6 +103,10 @@ export function PriceRefresher() {
             : Date.now()) - t0;
         lastWasNetwork = elapsed > NETWORK_THRESHOLD_MS;
         if (cancelled) return;
+        // Fire-time gate (mirror of the subscribe-time check):
+        // catches the "entered time-travel during the in-flight
+        // network round-trip" race.
+        if (useAppStore.getState().timeTravelActive) return;
         if (q && q.currentPrice > 0) {
           applyLivePrice(s, q.currentPrice, q.fetchedAt);
         }
@@ -87,7 +116,122 @@ export function PriceRefresher() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [holdingsKey, applyLivePrice]);
+  }, [holdingsKey, applyLivePrice, timeTravelActive]);
+
+  // Track symbols already historically-applied this session so a
+  // mid-session holdingsKey change (e.g. user adds a new holding)
+  // doesn't re-clobber manually-edited symbols. Reset on
+  // entry/exit of time-travel via the timeTravelActive dep.
+  // Round-5 audit WARN: manual override clobber.
+  const appliedSymbols = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    if (!timeTravelActive) appliedSymbols.current = new Set();
+  }, [timeTravelActive]);
+
+  // Historical-price effect for time-travel sessions. Calls
+  // getQuote (5y history, cached server-side per Vercel instance
+  // + client-side via IDB) → priceAtDetailed (binary-searches the
+  // history array, returns {price, clamped}) → applyLivePrice in
+  // "historical" mode (preserves user-entered dollar values for
+  // freshly-added holdings; only updates existing-holding shares).
+  // Per-iteration gates + network throttling mirror the live loop.
+  useEffect(() => {
+    if (!timeTravelActive || !timeTravelDate) return;
+    const targetMs = parseISODate(timeTravelDate);
+    if (targetMs === null) return;
+    const symbols = uniqueSymbols(household);
+    if (symbols.length === 0) return;
+    let cancelled = false;
+    void (async () => {
+      let lastWasNetwork = false;
+      for (const s of symbols) {
+        if (cancelled) return;
+        if (!useAppStore.getState().timeTravelActive) return;
+        if (appliedSymbols.current.has(s)) continue;
+        if (lastWasNetwork) await sleep(NETWORK_SPACING_MS);
+        const t0 =
+          typeof performance !== "undefined" ? performance.now() : Date.now();
+        // Pass range="max" so the upstream returns full available
+        // history (often 20+ years from Yahoo) — covers backdates
+        // older than 5 years. Cached server-side per Vercel
+        // instance.
+        const q = await getQuote(s, { range: "max" });
+        const elapsed =
+          (typeof performance !== "undefined"
+            ? performance.now()
+            : Date.now()) - t0;
+        lastWasNetwork = elapsed > NETWORK_THRESHOLD_MS;
+        if (cancelled) continue;
+        if (!useAppStore.getState().timeTravelActive) return;
+        // Record outcome regardless of branch so the
+        // TimeTravelBanner can surface a "needs manual entry"
+        // count for symbols that failed or fell outside the
+        // history window. User explicitly asked: "make sure the
+        // fallback of manual entry is clear from a UX and
+        // engineering standpoint." Auto-fill is best-effort;
+        // manual entry is the load-bearing path.
+        if (!q) {
+          recordTimeTravelPriceOutcome(
+            s,
+            "failed",
+            "getQuote returned null (network error or fetch threw — see browser console)",
+          );
+          continue;
+        }
+        // Surface the API's diagnostic error string when the
+        // upstream marked the response unavailable. This is
+        // typically "yahoo: 401 Unauthorized | finnhub: no API
+        // key" — actionable info the user can use to diagnose.
+        if (q.unavailable) {
+          recordTimeTravelPriceOutcome(
+            s,
+            "failed",
+            q.error ?? "upstream unavailable (no reason reported)",
+          );
+          continue;
+        }
+        const r = priceAtDetailed(q, targetMs);
+        if (r === null) {
+          // The reason intentionally does NOT include the
+          // symbol name — TimeTravelBanner groups failures by
+          // identical reason and lists the affected symbols
+          // separately. Including the symbol here would defeat
+          // the grouping (each holding becomes its own one-of-N
+          // block, blowing out the page height — user-reported).
+          const reason = q.error
+            ? q.error
+            : "Upstream returned no history. Enter the per-share price manually in the holding editor.";
+          recordTimeTravelPriceOutcome(s, "failed", reason);
+          continue;
+        }
+        if (r.clamped) {
+          recordTimeTravelPriceOutcome(s, "clamped");
+          continue;
+        }
+        if (r.price > 0) {
+          applyLivePrice(s, r.price, targetMs, "historical");
+          appliedSymbols.current.add(s);
+          recordTimeTravelPriceOutcome(s, "applied");
+        } else {
+          recordTimeTravelPriceOutcome(
+            s,
+            "failed",
+            `priceAt returned ${r.price} (non-positive)`,
+          );
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    timeTravelActive,
+    timeTravelDate,
+    holdingsKey,
+    applyLivePrice,
+    recordTimeTravelPriceOutcome,
+  ]);
 
   return null;
 }

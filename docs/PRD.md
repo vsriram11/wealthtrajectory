@@ -666,12 +666,41 @@ to keep the doc structured, NOT to suggest tiering:
 
 ### Tax + drawdown
 - Tax-efficient drawdown sequencer (Bogleheads default order)
+  - LTCG vs ordinary-income rate split per bucket (taxable
+    uses long-term cap-gains; pretax uses ordinary)
+  - 529 / Trump Account dollars routed to a separate
+    `education` bucket (excluded from retirement spend)
+  - Couple RMD timing uses the YOUNGER member's age
+    (conservative; defers RMDs)
 - Roth conversion ladder estimator
 - Multi-phase drawdown with custom rate transitions
 - Legacy floor + sustained-check
 - Insights engine (concentration, leverage warning, monthly
   gain, YoY return, tax-bucket concentration, manual-price
   staleness)
+
+### Cash-bucket SORR shield (Historical MC card)
+- Cash-bucket priority toggle (orthogonal to rebalance policy)
+  - 2×2: annual+bucket (Kitces refilling) / none+bucket
+    (Pfau depleting) + their no-bucket counterparts
+- Configurable cash bucket size override (0–50% of NW)
+- Short-duration bonds (≤ 1 yr) counted as cash-equivalent —
+  not auto-sold to fund the bucket
+- Modeled cap-gains tax on the equity-to-cash sale
+  - Sale priority: 3x → 2x → 1x leveraged equity → bonds →
+    commodity → non-primary RE → alts; tax-advantaged accounts
+    drained first within each tier
+  - Primary residence + private stock + isIlliquid excluded
+  - User-tunable cost-basis assumption
+    (`assumedCapGainsFraction`, default 1.0 conservative)
+  - Per-holding `excludeFromCashBucketSale` flag for high-
+    conviction positions / step-up-basis preservation
+
+### Calculators (standalone, portfolio-blind)
+- Investment Growth calculator (NerdWallet-style compound
+  interest with monthly/annual contributions, optional annual
+  contribution escalator, optional per-year overrides for
+  one-off injections)
 
 ### Data ownership + privacy
 - Manual asset entry + holdings management

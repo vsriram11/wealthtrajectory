@@ -11,6 +11,8 @@ import {
 } from "@/lib/format";
 import {
   activeMemberIds,
+  filterHousehold,
+  householdForRollups,
   householdNetWorth,
   type Household,
 } from "@/lib/types";
@@ -80,6 +82,26 @@ export function NetWorthCard() {
   const netWorth = useMemo(
     () => householdNetWorth(viewHousehold),
     [viewHousehold],
+  );
+  // Round-6 audit HIGH fix: HistoryView pins the chart's right edge
+  // to "today's NW" and renders past snapshots. Snapshots are
+  // captured from the BASE household (no scenario applied — see
+  // SnapshotsManager docstring + R6 fix). If we passed the scenario-
+  // adjusted `netWorth` as the today-pin, the chart's right edge
+  // would JUMP every time the user toggled a scenario, while past
+  // snapshots stayed flat — internally inconsistent and misleading.
+  // Compute the base-household NW (rollup + member-filter applied,
+  // but NO scenario overrides) and feed THAT to HistoryView.
+  const baseScopedHousehold = useMemo(
+    () =>
+      memberId == null
+        ? householdForRollups(householdAll)
+        : filterHousehold(householdAll, memberId),
+    [householdAll, memberId],
+  );
+  const historyNetWorth = useMemo(
+    () => householdNetWorth(baseScopedHousehold),
+    [baseScopedHousehold],
   );
   const projection = useMemo(
     () =>
@@ -313,10 +335,12 @@ export function NetWorthCard() {
           />
         ) : (
           <HistoryView
-            household={viewHousehold}
-            netWorth={netWorth}
+            household={baseScopedHousehold}
+            netWorth={historyNetWorth}
             memberId={memberId}
             empty={empty}
+            scenarioName={scenarioName}
+            scenarioAdjustedNetWorth={netWorth}
           />
         )}
       </div>

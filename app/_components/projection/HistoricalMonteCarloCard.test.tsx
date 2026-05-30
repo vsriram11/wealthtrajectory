@@ -24,7 +24,7 @@
  */
 
 import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { useAppStore } from "@/lib/store";
 import { HistoricalMonteCarloCard } from "./HistoricalMonteCarloCard";
 import type { Account, Assumptions, Household } from "@/lib/types";
@@ -324,8 +324,8 @@ describe("HistoricalMonteCarloCard — projection-forward composition", () => {
     // them past today's parity), bonds < 50.
     const allocSummary = screen.getByText(/% stocks \/ /);
     const text = allocSummary.textContent ?? "";
-    const stocksMatch = text.match(/(\d+)% stocks/);
-    const bondsMatch = text.match(/(\d+)% bonds/);
+    const stocksMatch = text.match(/(\d+(?:\.\d+)?)% stocks/);
+    const bondsMatch = text.match(/(\d+(?:\.\d+)?)% bonds/);
     expect(stocksMatch).not.toBeNull();
     expect(bondsMatch).not.toBeNull();
     const stocksPct = Number(stocksMatch![1]);
@@ -449,8 +449,234 @@ describe("HistoricalMonteCarloCard — retirementFixedNominalYears propagation",
 });
 
 function readStocksPctFromAllocation(): number {
+  // Allocation precision in the methodology block is 2-decimal
+  // (e.g. "57.13% stocks"). The regex accepts the decimal so the
+  // helper survives the precision bump.
   const allocSummary = screen.getByText(/% stocks \/ /);
-  const match = (allocSummary.textContent ?? "").match(/(\d+)% stocks/);
+  const match = (allocSummary.textContent ?? "").match(
+    /(\d+(?:\.\d+)?)% stocks/,
+  );
   if (!match) throw new Error("stocks pct not found in allocation summary");
   return Number(match[1]);
 }
+
+function readCashPctFromAllocation(): number {
+  const allocSummary = screen.getByText(/% stocks \/ /);
+  const match = (allocSummary.textContent ?? "").match(
+    /(\d+(?:\.\d+)?)% cash/,
+  );
+  if (!match) throw new Error("cash pct not found in allocation summary");
+  return Number(match[1]);
+}
+
+describe("HistoricalMonteCarloCard — cash-bucket toggle truth table", () => {
+  // The 2×2 priority × size override × glide-path matrix has several
+  // ways to leak state across toggles. Round-4 audit surfaced one:
+  // `cashBucketSizePct` could persist across a priority-OFF flip and
+  // silently override allocation when re-enabled. The runtime gate
+  // (`cashBucketOverrideActive`) blocks this — these tests pin that
+  // behavior so a future refactor can't reintroduce the leak.
+
+  // "refilling reserve" / "depleting reserve" only appear in the
+  // methodology bullet (never in the toggle row), so it's a clean
+  // signal that the bullet is rendered.
+  const METHODOLOGY_BULLET = /(refilling|depleting) reserve/;
+
+  it("baseline (priority OFF) shows methodology without cash-bucket bullet", () => {
+    seed({ targetNetWorthUSD: 2_000_000, withdrawalRate: 0.04 });
+    const { container } = render(<HistoricalMonteCarloCard />);
+    const text = container.textContent ?? "";
+    expect(text).not.toMatch(METHODOLOGY_BULLET);
+  });
+
+  it("toggling priority ON renders the methodology bullet", () => {
+    seed({ targetNetWorthUSD: 2_000_000, withdrawalRate: 0.04 });
+    const { container } = render(<HistoricalMonteCarloCard />);
+    const priorityGroup = screen.getByRole("group", {
+      name: "Cash-bucket priority",
+    });
+    fireEvent.click(
+      priorityGroup.querySelector('[aria-pressed="false"]') as HTMLElement,
+    );
+    // textContent search: the bullet text spans multiple inline
+    // elements so a single getByText query can fragment it. Querying
+    // the methodology container's textContent is the robust approach.
+    const text = container.textContent ?? "";
+    expect(text).toMatch(METHODOLOGY_BULLET);
+  });
+
+  it("toggling priority OFF after setting a custom size does NOT leak the size into baseline allocation", () => {
+    // Round-3/4 state-leak regression. Prior bug: the size override
+    // survived priority-OFF and continued to drive the simulator's
+    // allocation, contradicting the UI's "off" mode chip.
+    seed({ targetNetWorthUSD: 2_000_000, withdrawalRate: 0.04 });
+    render(<HistoricalMonteCarloCard />);
+    const baselineCashPct = readCashPctFromAllocation();
+
+    // Toggle priority ON.
+    const priorityGroup = screen.getByRole("group", {
+      name: "Cash-bucket priority",
+    });
+    fireEvent.click(
+      priorityGroup.querySelector('[aria-pressed="false"]') as HTMLElement,
+    );
+
+    // Find the bucket size input — it's the 4th spinbutton (after
+    // Starting NW, Annual spend, Horizon).
+    const spinButtons = screen.getAllByRole(
+      "spinbutton",
+    ) as HTMLInputElement[];
+    const sizeInput = spinButtons[3];
+    fireEvent.change(sizeInput, { target: { value: "30" } });
+    // Cash% in allocation should now be ~30%.
+    expect(readCashPctFromAllocation()).toBeGreaterThan(25);
+
+    // Toggle priority OFF — click the chip that is CURRENTLY
+    // inactive (the "Off" chip with aria-pressed="false"). Clicking
+    // the active chip would re-fire setCashBucketPriority(true) with
+    // the same value, a no-op.
+    fireEvent.click(
+      priorityGroup.querySelector('[aria-pressed="false"]') as HTMLElement,
+    );
+    const afterOffCashPct = readCashPctFromAllocation();
+    // Allow ±0.1% slack for 2-decimal rounding noise.
+    expect(Math.abs(afterOffCashPct - baselineCashPct)).toBeLessThan(0.1);
+  });
+});
+
+describe("HistoricalMonteCarloCard — assumedCapGainsFraction propagation", () => {
+  // Round-3 deferred HIGH: the `gainFraction = 1.0` assumption in the
+  // bucket-funding + deleveraging engines is conservative for long-
+  // held positions but overstated for recently-purchased ones. This
+  // suite pins that the per-portfolio `assumedCapGainsFraction`
+  // setting on the Assumptions slice actually threads through to both
+  // engine call sites in HistoricalMonteCarloCard — without it, the
+  // setting would be dead state and the user would see no effect.
+
+  it("scales the bucket-funding tax disclosure when the setting is lowered", () => {
+    // Single-member household, $1M brokerage (taxable) equity. Push
+    // the requested cash bucket above the projected cash share so the
+    // BucketFundingDisclosure fires and surfaces a tax dollar amount.
+    useAppStore.setState({
+      household: buildHousehold(),
+      assumptions: {
+        ...baseAssumptions(),
+        retirementTaxRate: 0.20,
+        // Default — full-gain, conservative. Should produce the
+        // larger tax bill of the two runs.
+        assumedCapGainsFraction: 1.0,
+      },
+      memberAssumptions: {},
+      selectedMemberId: null,
+      liquidityView: "total",
+      scenarios: [],
+      activeScenarioId: null,
+      budgetItems: [],
+      incomeStreams: [],
+      glidePath: null,
+    });
+    const { unmount } = render(<HistoricalMonteCarloCard />);
+
+    // Toggle priority ON so the cash-bucket SIZE input is rendered.
+    const priorityGroup = screen.getByRole("group", {
+      name: "Cash-bucket priority",
+    });
+    fireEvent.click(
+      priorityGroup.querySelector('[aria-pressed="false"]') as HTMLElement,
+    );
+    // Size = 30% > projected cash share → triggers the disclosure.
+    const sizeInput = (
+      screen.getAllByRole("spinbutton") as HTMLInputElement[]
+    )[3];
+    fireEvent.change(sizeInput, { target: { value: "30" } });
+
+    // Disclosure now visible. It surfaces "X% of each sold position's
+    // current value as taxable gain" — at gainFraction=1.0 this is
+    // "100%". The actual tax dollars are inside the same block.
+    const fullGainText = screen.getByText(
+      /of each sold position.s current value as taxable gain/i,
+    ).parentElement?.textContent ?? "";
+    expect(fullGainText).toMatch(/100%/);
+    unmount();
+
+    // Re-render with gainFraction = 0.5 — the engine should now
+    // compute HALF the cap-gains tax for the same sale. The
+    // disclosure's gain-assumption percent must reflect the new value.
+    useAppStore.setState({
+      household: buildHousehold(),
+      assumptions: {
+        ...baseAssumptions(),
+        retirementTaxRate: 0.20,
+        assumedCapGainsFraction: 0.5,
+      },
+      memberAssumptions: {},
+      selectedMemberId: null,
+      liquidityView: "total",
+      scenarios: [],
+      activeScenarioId: null,
+      budgetItems: [],
+      incomeStreams: [],
+      glidePath: null,
+    });
+    render(<HistoricalMonteCarloCard />);
+    const priorityGroup2 = screen.getByRole("group", {
+      name: "Cash-bucket priority",
+    });
+    fireEvent.click(
+      priorityGroup2.querySelector('[aria-pressed="false"]') as HTMLElement,
+    );
+    const sizeInput2 = (
+      screen.getAllByRole("spinbutton") as HTMLInputElement[]
+    )[3];
+    fireEvent.change(sizeInput2, { target: { value: "30" } });
+
+    const halfGainText = screen.getByText(
+      /of each sold position.s current value as taxable gain/i,
+    ).parentElement?.textContent ?? "";
+    expect(halfGainText).toMatch(/50%/);
+    // And the gain assumption MUST NOT still read 100% — pin the
+    // sense of the change so a regression that pinned the display
+    // at "100%" can't pass silently.
+    expect(halfGainText).not.toMatch(/100% of each sold/i);
+  });
+
+  it("undefined setting defaults to 1.0 (preserves existing behavior — no surprise on existing user state)", () => {
+    // Pristine assumptions object (no assumedCapGainsFraction). The
+    // engines + disclosure must behave identically to the explicit-
+    // 1.0 case. Protects against a future refactor that silently
+    // changes the default — that would shift the modeled tax bill
+    // for every existing user without warning.
+    useAppStore.setState({
+      household: buildHousehold(),
+      assumptions: {
+        ...baseAssumptions(),
+        retirementTaxRate: 0.20,
+        // assumedCapGainsFraction intentionally omitted.
+      },
+      memberAssumptions: {},
+      selectedMemberId: null,
+      liquidityView: "total",
+      scenarios: [],
+      activeScenarioId: null,
+      budgetItems: [],
+      incomeStreams: [],
+      glidePath: null,
+    });
+    render(<HistoricalMonteCarloCard />);
+    const priorityGroup = screen.getByRole("group", {
+      name: "Cash-bucket priority",
+    });
+    fireEvent.click(
+      priorityGroup.querySelector('[aria-pressed="false"]') as HTMLElement,
+    );
+    const sizeInput = (
+      screen.getAllByRole("spinbutton") as HTMLInputElement[]
+    )[3];
+    fireEvent.change(sizeInput, { target: { value: "30" } });
+
+    const text = screen.getByText(
+      /of each sold position.s current value as taxable gain/i,
+    ).parentElement?.textContent ?? "";
+    expect(text).toMatch(/100%/);
+  });
+});

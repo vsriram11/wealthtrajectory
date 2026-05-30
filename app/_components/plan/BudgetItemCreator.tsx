@@ -17,6 +17,7 @@ import {
 } from "@/lib/budget/budget";
 import { formatUSD } from "@/lib/format";
 import { NumberField } from "@/app/_components/ui/NumberField";
+import { parseISODate } from "@/lib/dateInput";
 
 /**
  * Add / edit a budget line. Modal sheet (mirrors LiabilityCreator's
@@ -139,12 +140,15 @@ export function BudgetItemCreator({
       monthlyUSD: amount / monthsPerCycle,
       type,
       endsAtRetirement,
-      endDate: endDate ? new Date(endDate).getTime() : null,
+      // parseISODate: noon-UTC anchor + round-trip validation so
+      // "2024-02-31" doesn't silently land as March 2. Audit round-4
+      // WARN.
+      endDate: endDate ? (parseISODate(endDate) ?? null) : null,
       isSubscription,
       billingCycle: isSubscription ? billingCycle : undefined,
       startDate:
         isSubscription && startDate
-          ? new Date(startDate).getTime()
+          ? (parseISODate(startDate) ?? null)
           : null,
       excessInflationOverride,
     } as const;

@@ -411,6 +411,88 @@ This is the same convention used by every monthly-compounding engine
 in the app, so the deterministic Independence date and the Monte Carlo
 success rate stay consistent for the same inputs.
 
+### 7.8 Cash-bucket priority + bucket-funding tax model
+Two orthogonal user controls govern the MC's drawdown behavior:
+
+- **Rebalance policy** (`annual` | `none`): whether the simulator
+  snaps to target weights each year-start.
+- **Cash-bucket priority** (`spending.cashBucketPriority`): whether
+  retirement-year withdrawals are sourced from the cash slice
+  FIRST (rather than proportionally across all classes).
+
+The 2×2 produces four observable simulator behaviors:
+
+| | rebalance: annual | rebalance: none |
+|---|---|---|
+| bucket OFF | Trinity baseline | Set-and-forget drift |
+| bucket ON | Refilling reserve (within-year SORR shielding; year-end NW observationally null vs no-bucket) | Depleting reserve (finite SORR shield, observably divergent in MC outcomes) |
+
+**Cash bucket size override** lets the user request a larger cash
+slice than the projected portfolio's cash share. Sourcing the
+extra cash incurs realized cap-gains tax modeled by
+`planBucketFunding` in `lib/portfolio/bucketFunding.ts`:
+
+```
+amountToRaise = max(0, (requestedCashFraction - effectiveCashEquivalentShare) × NW)
+  where  effectiveCashEquivalentShare = (cash + short-bond) / NW
+         short-bond = bonds with averageDurationYears ≤ 1 (cash-equivalent)
+```
+
+Sale priority order (highest leverage first):
+1. Leveraged equity (3x → 2x → 1x), with multi-asset wrappers
+   (NTSX/GDE/RSST/AVGE etc.) classified as `regularEquity`.
+2. Regular 1x equity.
+3. Bonds.
+4. Commodity.
+5. Non-primary real estate.
+6. Other alts (crypto, other).
+
+Within each leverage tier, **tax-advantaged accounts drain first**
+(rebalancing within a 401k/IRA/Roth/HSA is tax-free).
+
+Exclusions:
+- **Primary residence** + **private stock** + **isIlliquid** flags
+  (via `isLiquid()`).
+- **`excludeFromCashBucketSale`** per-holding opt-out (user-set
+  in the holding editor; for high-conviction positions or
+  step-up-basis preservation plays).
+
+Tax computation:
+```
+tax = Σ_i (faceSold_i × isTaxable_i × assumedCapGainsFraction × retirementTaxRate)
+```
+- `assumedCapGainsFraction` defaults to 1.0 (conservative — no
+  cost-basis tracking). User-tunable on the Assumptions panel.
+- Only TAXABLE-treatment accounts (BROKERAGE / SAVINGS / CHECKING)
+  contribute to the tax. Pre-tax / Roth / HSA rebalancing is
+  tax-free at sale.
+
+**Post-tax effective cash fraction**:
+```
+postTaxNW       = NW − totalTax
+netCashFromSale = amountRaised − totalTax
+effectiveCashFractionPostTax = (cash + netCashFromSale) / postTaxNW
+```
+This is the value the simulator's `applyCashBucketOverride` runs
+with — NOT the raw requested fraction, so the simulator doesn't
+magick `totalTax` of cash out of thin air.
+
+**Composition with at-retirement deleveraging** (§7.5):
+`computeLeveragedEquityBuckets` accepts an optional
+`consumedByBucketFunding` map. When the bucket-funding plan
+consumed some or all of a leveraged ETF for cash, the
+deleveraging restructure operates only on what REMAINS — so the
+same TQQQ position can't be double-taxed by both engines.
+
+NOT modeled (surfaced in the user-facing tax disclosure):
+- NIIT 3.8% surtax above ~$200k AGI
+- State cap-gains tax (0–13.3% depending on state)
+- Bracket-climb from a large sale pushing 15% LTCG → 20%
+- IRMAA Medicare premium adders
+- Tax-loss harvesting offsets
+- Wash-sale rule
+- Step-up basis at death (use the opt-out toggle to preserve)
+
 ---
 
 ## 8. SENSITIVITY & WHAT-IF
@@ -553,6 +635,61 @@ offsets, survivor benefits, early-claim reduction past 62,
 delayed retirement credits past FRA. Anything more
 sophisticated belongs in user-entered numbers, not the
 heuristic.
+
+---
+
+## 12.5 TAX-AWARE WITHDRAWAL SEQUENCER (PLAN → TAX)
+
+Year-by-year retirement drawdown simulator that respects the
+canonical Bogleheads / Mike Piper sequence: taxable first, then
+pre-tax (Trad 401k/IRA), Roth + HSA preserved last. Engine in
+`lib/tax/withdrawalSequencer.ts`.
+
+### 12.5.1 Per-bucket rate split
+A user-configured `retirementTaxRate` is treated as the ORDINARY
+income rate. The engine also accepts a `longTermCapGainsRate`
+parameter for the taxable bucket (defaults to `ordinaryRate × 0.5`
+— rough proxy because ordinary marginal is typically 22-32% federal
+while LTCG is 0/15/20% federal). The clamp `ltcgRate ≤ ordinaryRate`
+prevents user mis-configuration from inverting the bucket priority.
+
+Per-year tax:
+```
+tax = withdrawals.pretax × ordinaryRate         // RMD + pretax draw
+    + withdrawals.taxable × ltcgRate            // brokerage cap-gains
+    + withdrawals.roth × 0                       // tax-free
+    + withdrawals.hsa × 0                        // tax-free (medical)
+```
+
+### 12.5.2 RMD timing (SECURE 2.0)
+Required Minimum Distributions fire at `age ≥ rmdStartAge` (73 by
+default, 75 from 2033). The IRS Uniform Lifetime Table divisors are
+applied to the **prior-year-end FMV** (= start-of-year balance, NOT
+the grown balance) per IRS Pub 590-B. The engine uses
+`startBal.pretax / rmdDivisor(age)` for this reason.
+
+### 12.5.3 EDUCATION bucket (529 / Trump Account)
+529 + Trump Account holdings are routed to a separate `education`
+WithdrawalBucket and EXCLUDED from the year-by-year drawdown
+schedule. They remain visible in the household-wide bucket
+display so users see the asset exists, but they're beneficiary-
+locked — can only fund the beneficiary's qualified education or
+vested account.
+
+### 12.5.4 Couple RMD timing approximation
+For multi-member households, the schedule uses the **youngest
+member's age** (more conservative — defers RMDs → more tax-
+deferred growth, lower modeled tax). True per-member RMD
+splitting would split pretax balances by `ownerId` and run RMD
+per-member; current v1 uses the conservative aggregate.
+
+### 12.5.5 What the engine does NOT model
+Same omissions as §7.8 bucket-funding tax (NIIT, state, bracket
+climb, IRMAA, etc.). Plus: no per-bucket CAGR (uses a single
+household-weighted real CAGR); no Social Security tax interaction;
+no QCD or charitable workarounds; user-editable drawdown order is
+not yet wired to the engine's `order` parameter (engine accepts
+it; UI is decorative for now).
 
 ---
 

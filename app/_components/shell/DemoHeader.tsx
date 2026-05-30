@@ -17,6 +17,7 @@ const PAGE_TITLES: Record<PageId, string> = {
   projections: "Projections",
   plan: "Plan",
   data: "Data",
+  calculators: "Static Calculators",
   glossary: "Glossary",
 };
 

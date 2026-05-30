@@ -436,6 +436,55 @@ describe("live-pricing flows", () => {
     a.applyLivePrice("OBSCURE", 500, 1_700_000_000_000);
     expect(s.state.household.accounts[0].holdings[0].valueUSD).toBe(100);
   });
+
+  it("convertHoldingToManual flips isManualPrice + freezes value (next live-fetch skips)", () => {
+    const s = makeFakeStore({
+      household: {
+        id: "h1",
+        members: [{ id: "m1", displayName: "Alex" }],
+        accounts: [
+          {
+            id: "acc1",
+            displayName: "x",
+            category: "BROKERAGE",
+            ownerId: "m1",
+            monthlyContributionUSD: 0,
+            holdings: [
+              {
+                kind: "equity",
+                id: "h1",
+                symbol: "VOO",
+                shares: 100,
+                lastPriceUSD: 500,
+                lastPricedAt: 1_700_000_000_000,
+                isManualPrice: false,
+                enteredAsShares: false,
+                acquiredAt: null,
+                valueUSD: 50_000,
+                expectedRealCAGR: 0.07,
+                leverage: 1,
+                styleBox: { LARGE_BLEND: 1 } as never,
+                geography: { US: 1, DEVELOPED: 0, EMERGING: 0 },
+              },
+            ],
+          },
+        ],
+        liabilities: [],
+      },
+    });
+    const a = createHoldingsActions(s.set);
+    a.convertHoldingToManual("h1" as never);
+    const h = s.state.household.accounts[0].holdings[0];
+    if (h.kind !== "equity") throw new Error("test fixture drifted");
+    expect(h.isManualPrice).toBe(true);
+    // Value, shares, lastPriceUSD all preserved.
+    expect(h.valueUSD).toBe(50_000);
+    expect(h.shares).toBe(100);
+    expect(h.lastPriceUSD).toBe(500);
+    // Now a live-fetch must not move it.
+    a.applyLivePrice("VOO", 510, 1_700_000_001_000);
+    expect(s.state.household.accounts[0].holdings[0].valueUSD).toBe(50_000);
+  });
 });
 
 describe("setHoldingComposition / setHoldingCommodityBreakdown", () => {

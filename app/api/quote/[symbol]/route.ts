@@ -1,5 +1,12 @@
 import { NextRequest } from "next/server";
 
+import {
+  NUM_HISTORY_SHARDS,
+  shardForSymbol,
+  type HistoryManifest,
+  type ShardPayload,
+} from "@/lib/data/historyShards";
+
 export const runtime = "nodejs";
 
 const UA_VARIATIONS = [
@@ -8,6 +15,325 @@ const UA_VARIATIONS = [
 ];
 
 const HOSTS = ["query1.finance.yahoo.com", "query2.finance.yahoo.com"];
+
+/**
+ * Full browser-style header set for Yahoo Finance fetches.
+ *
+ * Vercel's serverless function IPs are heavily throttled by Yahoo's
+ * WAF (every Vercel tenant scrapes Yahoo through the same IP pools).
+ * From cleaner residential / GitHub-Action IPs, just a UA header is
+ * enough to get 200s reliably — but on Vercel IPs the WAF demands
+ * the full browser fingerprint (Sec-Fetch-*, Sec-CH-UA-*, full
+ * Accept-* triplet) before relenting. Adding these is the
+ * highest-leverage fix we can make to the dynamic-fetch path: it
+ * doesn't avoid the IP problem entirely but materially shifts the
+ * success rate.
+ *
+ * Sec-Fetch-Site=same-site claims the request originates from a
+ * finance.yahoo.com subdomain — paired with the Origin / Referer
+ * already set, it's the same fingerprint the real browser sends
+ * when finance.yahoo.com client-side code fetches query2.
+ */
+function browserHeaders(ua: string): Record<string, string> {
+  return {
+    "User-Agent": ua,
+    Accept: "application/json, text/plain, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Accept-Encoding": "gzip, deflate, br",
+    Referer: "https://finance.yahoo.com/",
+    Origin: "https://finance.yahoo.com",
+    "Sec-Fetch-Dest": "empty",
+    "Sec-Fetch-Mode": "cors",
+    "Sec-Fetch-Site": "same-site",
+    "Sec-CH-UA":
+      '"Chromium";v="120", "Not(A:Brand";v="24", "Google Chrome";v="120"',
+    "Sec-CH-UA-Mobile": "?0",
+    "Sec-CH-UA-Platform": '"macOS"',
+    DNT: "1",
+  };
+}
+
+/**
+ * Module-level Yahoo session state. The cookie+crumb dance with
+ * fc.yahoo.com → getcrumb establishes a session the WAF treats more
+ * leniently. Cached per warm Vercel instance; re-established on
+ * cold start or 24h staleness.
+ */
+let yahooSession: {
+  cookie: string;
+  crumb: string;
+  fetchedAt: number;
+} | null = null;
+const YAHOO_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+
+async function getYahooSession(
+  ua: string,
+): Promise<{ cookie: string; crumb: string } | null> {
+  if (
+    yahooSession &&
+    Date.now() - yahooSession.fetchedAt < YAHOO_SESSION_TTL_MS
+  ) {
+    return { cookie: yahooSession.cookie, crumb: yahooSession.crumb };
+  }
+  try {
+    const cookieRes = await fetch("https://fc.yahoo.com/", {
+      headers: browserHeaders(ua),
+      // Don't follow redirects — we just want the Set-Cookie headers.
+      redirect: "manual",
+    });
+    const setCookies: string[] = [];
+    cookieRes.headers.forEach((v, k) => {
+      if (k.toLowerCase() === "set-cookie") setCookies.push(v);
+    });
+    if (setCookies.length === 0) return null;
+    const cookie = setCookies
+      .map((c) => c.split(";")[0])
+      .filter(Boolean)
+      .join("; ");
+    const crumbRes = await fetch(
+      "https://query2.finance.yahoo.com/v1/test/getcrumb",
+      {
+        headers: { ...browserHeaders(ua), Cookie: cookie },
+      },
+    );
+    if (!crumbRes.ok) return null;
+    const crumb = (await crumbRes.text()).trim();
+    if (!crumb || crumb.length > 32) return null; // sanity check
+    yahooSession = { cookie, crumb, fetchedAt: Date.now() };
+    return { cookie, crumb };
+  } catch {
+    return null;
+  }
+}
+
+// ── Static historical-price cache ────────────────────────────────
+//
+// Top-1000-by-AUM ETFs (plus the app's preset symbols) have their
+// 10y daily history pre-fetched and uploaded to Vercel Blob as 32
+// hash-shards by a monthly GitHub Action. The route consults the
+// static cache FIRST: a hit returns instantly via Vercel's CDN
+// (no upstream dependency, no rate-limit risk) and the rare
+// trailing-days gap is filled by a small dynamic Yahoo call.
+//
+// The manifest URL lives in NEXT_PUBLIC_QUOTE_HISTORY_MANIFEST.
+// When unset (local dev / no static data yet), the cache lookup
+// returns null and the route falls through to the existing
+// Yahoo+Finnhub path — no behavior change vs pre-cache.
+
+const STATIC_CACHE_TTL_MS = 60 * 60 * 1000; // 1h
+type ManifestCache = { manifest: HistoryManifest; fetchedAt: number };
+let manifestCache: ManifestCache | null = null;
+// Single-flight guard: concurrent requests to load the manifest
+// share one in-flight fetch instead of racing N parallel fetches
+// against the Blob CDN (Vercel-Blob counts these as billable ops).
+let manifestInflight: Promise<HistoryManifest | null> | null = null;
+
+async function loadManifest(): Promise<HistoryManifest | null> {
+  const manifestUrl = process.env.NEXT_PUBLIC_QUOTE_HISTORY_MANIFEST;
+  if (!manifestUrl) return null;
+  if (
+    manifestCache &&
+    Date.now() - manifestCache.fetchedAt < STATIC_CACHE_TTL_MS
+  ) {
+    return manifestCache.manifest;
+  }
+  if (manifestInflight) return manifestInflight;
+  manifestInflight = (async () => {
+    try {
+      const res = await fetch(manifestUrl, {
+        next: { revalidate: 86400 },
+      });
+      if (!res.ok) return null;
+      const manifest = (await res.json()) as HistoryManifest;
+      if (
+        !manifest ||
+        !Array.isArray(manifest.shards) ||
+        manifest.numShards !== NUM_HISTORY_SHARDS ||
+        typeof manifest.generatedAt !== "number"
+      ) {
+        return null;
+      }
+      manifestCache = { manifest, fetchedAt: Date.now() };
+      return manifest;
+    } catch {
+      return null;
+    } finally {
+      manifestInflight = null;
+    }
+  })();
+  return manifestInflight;
+}
+
+const shardCache = new Map<number, { payload: ShardPayload; fetchedAt: number }>();
+// Per-shard single-flight guard — same logic as manifestInflight,
+// scoped per shard so unrelated shard requests can still proceed
+// concurrently.
+const shardInflight = new Map<number, Promise<ShardPayload | null>>();
+
+async function loadShard(
+  manifest: HistoryManifest,
+  shardIdx: number,
+): Promise<ShardPayload | null> {
+  const cached = shardCache.get(shardIdx);
+  if (cached && Date.now() - cached.fetchedAt < STATIC_CACHE_TTL_MS) {
+    return cached.payload;
+  }
+  const existing = shardInflight.get(shardIdx);
+  if (existing) return existing;
+  const entry = manifest.shards.find((s) => s.shard === shardIdx);
+  if (!entry) return null;
+  const promise = (async () => {
+    try {
+      const res = await fetch(entry.url, { next: { revalidate: 86400 } });
+      if (!res.ok) return null;
+      const payload = (await res.json()) as ShardPayload;
+      if (
+        !payload ||
+        payload.tickers === null ||
+        typeof payload.tickers !== "object" ||
+        Array.isArray(payload.tickers) ||
+        typeof payload.generatedAt !== "number"
+      ) {
+        return null;
+      }
+      shardCache.set(shardIdx, { payload, fetchedAt: Date.now() });
+      return payload;
+    } catch {
+      return null;
+    } finally {
+      shardInflight.delete(shardIdx);
+    }
+  })();
+  shardInflight.set(shardIdx, promise);
+  return promise;
+}
+
+/**
+ * Fetch just the trailing window of daily prices from Yahoo to
+ * splice onto the static-cache baseline. The cache is refreshed
+ * monthly so the gap between last-cached-point and "now" is at
+ * most ~30 days; we fetch range=3mo to cover that window with
+ * headroom (in case the refresh is overdue or a particular ticker
+ * was missing from a prior shard).
+ *
+ * Returns null on any failure — caller falls through to "serve
+ * cache without trailing splice." Cache-without-trailing is still
+ * useful: the chart's history is correct up to ~30 days ago, and
+ * the headline NW just sits on the slightly-stale currentPrice
+ * until the next refresh.
+ */
+async function fetchTrailingFromYahoo(
+  symbol: string,
+): Promise<Array<{ t: number; p: number }> | null> {
+  const session = await getYahooSession(UA_VARIATIONS[0]);
+  const path = `/v8/finance/chart/${encodeURIComponent(symbol)}?range=3mo&interval=1d`;
+  for (const host of HOSTS) {
+    for (const ua of UA_VARIATIONS) {
+      try {
+        const headers = browserHeaders(ua);
+        if (session) headers.Cookie = session.cookie;
+        const res = await fetch(`https://${host}${path}`, {
+          headers,
+          next: { revalidate: 3600 }, // 1h edge cache on the trailing window
+        });
+        if (!res.ok) continue;
+        const json = (await res.json()) as YahooChart;
+        const result = json.chart?.result?.[0];
+        if (!result) continue;
+        const ts = result.timestamp ?? [];
+        const closes = result.indicators?.adjclose?.[0]?.adjclose ?? [];
+        if (ts.length === 0 || closes.length === 0) continue;
+        const out: Array<{ t: number; p: number }> = [];
+        for (let i = 0; i < ts.length; i++) {
+          const p = closes[i];
+          if (typeof p === "number" && Number.isFinite(p) && p > 0) {
+            out.push({ t: ts[i] * 1000, p });
+          }
+        }
+        if (out.length > 0) return out;
+      } catch {
+        continue;
+      }
+    }
+  }
+  return null;
+}
+
+type StaticCacheHit = {
+  quote: ParsedQuote;
+  shardGeneratedAt: number;
+  trailingSpliced: boolean;
+};
+
+async function tryStaticCache(
+  symbol: string,
+  range: "5y" | "max",
+): Promise<StaticCacheHit | null> {
+  const manifest = await loadManifest();
+  if (!manifest) return null;
+  const shardIdx = shardForSymbol(symbol);
+  const shard = await loadShard(manifest, shardIdx);
+  if (!shard) return null;
+  const history = shard.tickers[symbol];
+  if (!history || history.length === 0) return null;
+
+  // Splice fresh trailing prices onto the cached baseline. The
+  // shard was generated up to ~30 days ago (monthly cron); the
+  // trailing fetch from Yahoo covers the gap so the chart's right
+  // edge and the headline NW are current. If the trailing fetch
+  // fails (Yahoo rate limit, network), we still return the cached
+  // baseline — better than falling all the way through to a fully
+  // dynamic fetch that probably ALSO fails.
+  let merged: Array<{ t: number; p: number }>;
+  let mergedCurrent: number | null;
+  const trailing = await fetchTrailingFromYahoo(symbol);
+  if (trailing && trailing.length > 0) {
+    // Dedupe by UTC day, not exact timestamp. Yahoo can shift a
+    // given trading day's epoch slightly across endpoints/ranges,
+    // and we'd see duplicate same-day points if we filtered by
+    // exact equality. Drop any cached point whose UTC day matches
+    // ANY trailing point's UTC day; append the entire trailing
+    // window.
+    const trailingDays = new Set(
+      trailing.map((p) => Math.floor(p.t / 86_400_000)),
+    );
+    merged = history
+      .filter(([t]) => !trailingDays.has(Math.floor(t / 86_400_000)))
+      .map(([t, p]) => ({ t, p }))
+      .concat(trailing);
+    mergedCurrent = trailing[trailing.length - 1].p;
+  } else {
+    // Trailing fetch failed. We can still return the cached
+    // history (useful for the chart) but MUST NOT claim the last
+    // shard point as the current price — it could be 30+ days
+    // stale. Set currentPrice to null so the client falls back
+    // to its own live-price refresh path; the chart still gets
+    // the historical baseline.
+    merged = history.map(([t, p]) => ({ t, p }));
+    mergedCurrent = null;
+  }
+
+  // Clamp to the requested range.
+  const now = Date.now();
+  const cutoff =
+    range === "max" ? 0 : now - 5 * 365 * 24 * 60 * 60 * 1000;
+  const clamped = merged.filter((p) => p.t >= cutoff);
+  if (clamped.length === 0) return null;
+  return {
+    quote: {
+      symbol,
+      currentPrice: mergedCurrent,
+      currency: "USD",
+      name: null,
+      history: clamped,
+    },
+    shardGeneratedAt: shard.generatedAt,
+    trailingSpliced: !!trailing && trailing.length > 0,
+  };
+}
+
+const STATIC_CACHE_MAX_STALENESS_MS = 35 * 24 * 60 * 60 * 1000; // ~5 weeks
+
 
 // ── Module-level state (persists across requests within a warm Vercel
 // function instance; resets on cold start). Two structures:
@@ -60,25 +386,163 @@ function lruSet(symbol: string, value: ParsedQuote): void {
 
 type RouteParams = { params: Promise<{ symbol: string }> };
 
-export async function GET(_req: NextRequest, { params }: RouteParams) {
+export async function GET(req: NextRequest, { params }: RouteParams) {
   const { symbol: raw } = await params;
-  const symbol = raw.toUpperCase().slice(0, 12);
+  // Normalize: uppercase + dot→dash (Yahoo accepts both, but the
+  // static cache shards key tickers in dash form to match Nasdaq's
+  // canonical representation — without this rewrite, BRK.B
+  // requests hash to a different shard than BRK-B is stored under
+  // and silently miss the static cache).
+  const symbol = raw.toUpperCase().replace(/\./g, "-").slice(0, 12);
   if (!/^[A-Z0-9.\-^]+$/.test(symbol)) {
     return json({ error: "invalid symbol" }, 400);
   }
 
-  let parsed = await tryFinnhub(symbol);
-  let source = "finnhub";
+  // Optional ?range=max query: fetch the maximum available
+  // history from upstream instead of the default 5 years. Used
+  // by the time-travel mode's historical-price flow when the
+  // user backdates to a date older than 5 years ago. The wider
+  // payload is ~3-10x larger but caches identically (per-symbol
+  // LRU + IDB), so subsequent requests pay nothing extra.
+  const range = req.nextUrl.searchParams.get("range") === "max" ? "max" : "5y";
 
-  if (!parsed) {
-    parsed = await tryYahoo(symbol);
-    if (parsed) source = "yahoo";
+  // FAST PATH — static historical cache.
+  //
+  // For the top ~1000 US ETFs by AUM (plus the app's preset
+  // symbols), full 10y daily history is pre-fetched into Vercel
+  // Blob shards via a monthly GitHub Action and served from the
+  // CDN. A hit here returns in tens of ms, avoids any upstream
+  // dependency, and bypasses Vercel's IP-class rate-limit
+  // entirely. A miss (long-tail tickers, brand-new symbols) falls
+  // through to the Yahoo+Finnhub path as before.
+  const cached = await tryStaticCache(symbol, range);
+  // Defense-in-depth: if the shard is older than 5 weeks, the
+  // monthly cron missed AND the cache is too stale to trust the
+  // trading-day boundaries. Fall through to the dynamic path
+  // rather than serve obviously-old data.
+  const cacheTooStale =
+    cached &&
+    Date.now() - cached.shardGeneratedAt > STATIC_CACHE_MAX_STALENESS_MS;
+  if (cached && !cacheTooStale) {
+    // DON'T poison the LRU when trailing failed — currentPrice is
+    // null in that case and the LRU fallback path serves it as
+    // "lru-fallback" which would propagate the null indefinitely.
+    if (cached.trailingSpliced) lruSet(symbol, cached.quote);
+    return json(
+      {
+        ...cached.quote,
+        cachedFromStatic: true,
+        // Surfaces staleness to the client: how old is the shard
+        // we served from? UI can warn if shardGeneratedAt is too
+        // old (e.g., > 35 days = monthly cron missed a run).
+        shardGeneratedAt: cached.shardGeneratedAt,
+        trailingSpliced: cached.trailingSpliced,
+        fetchedAt: Date.now(),
+      },
+      200,
+      {
+        // Vercel edge cache: serve repeat requests for the same
+        // symbol from the edge — collapsing thousands of function
+        // invocations into ~one per ticker per cache window.
+        //
+        // Trailing-spliced (fresh tail + current price): 5 min
+        // edge cache, 1 hour stale-while-revalidate. Trailing-
+        // failed (currentPrice null, history may be stale at the
+        // tail): 30 sec edge cache, 5 min stale-while-revalidate
+        // so we retry the trailing fetch sooner instead of
+        // burning a long window serving the null price.
+        "Cache-Control": cached.trailingSpliced
+          ? "public, s-maxage=300, stale-while-revalidate=3600"
+          : "public, s-maxage=30, stale-while-revalidate=300",
+        // CDN-tagged so a force-refresh can invalidate per-symbol
+        // (Vercel `revalidateTag` API).
+        "Cache-Tag": `quote:${symbol}`,
+      },
+    );
+  }
+
+  // Track upstream diagnostic reasons so the response payload
+  // carries an `error` string when both fail — surfaced in the
+  // UI banner so the user can diagnose (Yahoo IP blocked, no
+  // Finnhub key, rate-limited, etc).
+  //
+  // FALLBACK STRATEGY (refined after user-reported "0 history
+  // points" bug):
+  //   Finnhub free tier provides /quote (current price) but
+  //   /stock/candle requires paid tier → free-tier requests
+  //   silently return empty history. Yahoo is the only free
+  //   source for history.
+  //
+  //   1. Try Finnhub. If it gives us a current price BUT empty
+  //      history, treat as PARTIAL success and ALSO try Yahoo.
+  //   2. Yahoo's full quote (price + history) wins on success.
+  //   3. If Yahoo fails but Finnhub gave a current price, use
+  //      Finnhub's partial quote (better than nothing for live
+  //      NW; historical CAGR back-projection takes over).
+  //   4. If both fail entirely, surface both reasons + serve LRU.
+  const finnhubResult = await tryFinnhub(symbol, range);
+  let parsed: ParsedQuote | null = null;
+  let source = "finnhub";
+  let finnhubReason: string | null = null;
+  let yahooReason: string | null = null;
+  let yahooResult: UpstreamResult | null = null;
+  if (finnhubResult.ok) {
+    parsed = finnhubResult.quote;
+    // Partial-success path: Finnhub gave us current price but
+    // empty history. Try Yahoo for the history; if Yahoo
+    // succeeds, prefer its full quote.
+    if (parsed.history.length === 0) {
+      yahooResult = await tryYahoo(symbol, range);
+      if (yahooResult.ok && yahooResult.quote.history.length > 0) {
+        parsed = yahooResult.quote;
+        source = "yahoo";
+      } else if (!yahooResult.ok) {
+        yahooReason = yahooResult.reason;
+        finnhubReason =
+          "finnhub: current price OK but candle endpoint returned no history (likely free-tier limitation — /stock/candle requires paid tier)";
+      } else {
+        // Yahoo succeeded but also had no history — rare.
+        // Keep Finnhub's partial quote; record both partial
+        // statuses for diagnostic.
+        finnhubReason =
+          "finnhub: current price OK but no history (free-tier candle limitation)";
+        yahooReason = "yahoo: response OK but history empty";
+      }
+    }
+  } else {
+    finnhubReason = finnhubResult.reason;
+    yahooResult = await tryYahoo(symbol, range);
+    if (yahooResult.ok) {
+      parsed = yahooResult.quote;
+      source = "yahoo";
+    } else {
+      yahooReason = yahooResult.reason;
+    }
   }
 
   if (parsed) {
     lruSet(symbol, parsed);
+    // Surface partial-failure diagnostics on the success path
+    // too. The user-reported scenario: Finnhub gave us current
+    // price but empty history, Yahoo (the only free history
+    // source) also failed. The chart's historical view will
+    // then fail with `priceAt returned null` — and the user
+    // deserves to see WHY (rate limited / paid tier / etc),
+    // not a generic "0 history points" message.
+    const partialErrorParts: string[] = [];
+    if (finnhubReason) partialErrorParts.push(finnhubReason);
+    if (yahooReason) partialErrorParts.push(yahooReason);
+    const partialError =
+      partialErrorParts.length > 0 && parsed.history.length === 0
+        ? partialErrorParts.join(" | ")
+        : undefined;
     return json(
-      { ...parsed, source, asOf: Date.now() },
+      {
+        ...parsed,
+        source,
+        asOf: Date.now(),
+        ...(partialError ? { error: partialError } : {}),
+      },
       200,
       {
         // Historical daily closes never change retroactively; current
@@ -89,6 +553,7 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
         // data, just the ticker's market price.
         "Cache-Control":
           "public, s-maxage=86400, stale-while-revalidate=604800",
+        "Cache-Tag": `quote:${symbol}`,
       },
     );
   }
@@ -135,6 +600,15 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
   //
   // no-store cache so a future request retries upstream
   // immediately rather than serving this empty payload back.
+  // Compose the diagnostic error message — both upstream
+  // reasons separated by ` | ` so the UI can show both.
+  const errorParts: string[] = [];
+  if (finnhubReason) errorParts.push(finnhubReason);
+  if (yahooReason) errorParts.push(yahooReason);
+  const error =
+    errorParts.length > 0
+      ? errorParts.join(" | ")
+      : "unknown — both upstream attempts returned ok=false with no reason";
   return json(
     {
       symbol,
@@ -143,6 +617,7 @@ export async function GET(_req: NextRequest, { params }: RouteParams) {
       name: null,
       history: [],
       unavailable: true,
+      error,
       asOf: Date.now(),
     },
     200,
@@ -158,13 +633,27 @@ type ParsedQuote = {
   history: Array<{ t: number; p: number }>;
 };
 
-async function tryFinnhub(symbol: string): Promise<ParsedQuote | null> {
+/**
+ * Result discriminator: success returns the parsed quote;
+ * failure returns a diagnostic reason. Surfaced via the
+ * `unavailable: true` payload + propagated to the UI banner so
+ * the user can see EXACTLY why a price lookup failed (which is
+ * critical when scrapers get blocked by upstream — Yahoo
+ * actively blocks Vercel IP ranges, Finnhub free tier rate-
+ * limits, etc).
+ */
+type UpstreamResult =
+  | { ok: true; quote: ParsedQuote }
+  | { ok: false; reason: string };
+
+async function tryFinnhub(
+  symbol: string,
+  range: "5y" | "max" = "5y",
+): Promise<UpstreamResult> {
   const key = process.env.FINNHUB_API_KEY;
-  if (!key) return null;
-  // Per-instance rate limit safety belt: pretend the call failed if
-  // we'd otherwise overshoot the upstream cap. Caller falls through
-  // to Yahoo or LRU.
-  if (!canCallFinnhub()) return null;
+  if (!key) return { ok: false, reason: "finnhub: no FINNHUB_API_KEY env var" };
+  if (!canCallFinnhub())
+    return { ok: false, reason: "finnhub: rate-limit safety belt (≥55/min)" };
 
   const enc = encodeURIComponent(symbol);
   let currentPrice: number | null = null;
@@ -177,42 +666,52 @@ async function tryFinnhub(symbol: string): Promise<ParsedQuote | null> {
       `https://finnhub.io/api/v1/quote?symbol=${enc}&token=${key}`,
       { next: { revalidate: 3600 } },
     );
-    if (!quoteRes.ok) return null;
-    const q = (await quoteRes.json()) as { c?: number; pc?: number; t?: number };
-    if (typeof q.c !== "number" || q.c <= 0) return null;
-    currentPrice = q.c;
-  } catch {
-    return null;
-  }
-
-  try {
-    if (canCallFinnhub()) {
-      recordFinnhubCall();
-      const profRes = await fetch(
-        `https://finnhub.io/api/v1/stock/profile2?symbol=${enc}&token=${key}`,
-        { next: { revalidate: 86400 } },
-      );
-      if (profRes.ok) {
-        const p = (await profRes.json()) as {
-          name?: string;
-          currency?: string;
-        };
-        name = p.name ?? null;
-        if (p.currency) currency = p.currency;
-      }
+    if (!quoteRes.ok) {
+      return {
+        ok: false,
+        reason: `finnhub: quote ${quoteRes.status} ${quoteRes.statusText}`,
+      };
     }
-  } catch {
-    /* skip */
+    const q = (await quoteRes.json()) as { c?: number; pc?: number; t?: number };
+    if (typeof q.c !== "number" || q.c <= 0) {
+      return {
+        ok: false,
+        reason: `finnhub: quote returned c=${JSON.stringify(q.c)} (invalid symbol?)`,
+      };
+    }
+    currentPrice = q.c;
+  } catch (e) {
+    return {
+      ok: false,
+      reason: `finnhub: quote fetch threw — ${e instanceof Error ? e.message : String(e)}`,
+    };
   }
 
+  // PROFILE FETCH SKIPPED. Was using a slot of the 60/min
+  // Finnhub free-tier budget for nice-to-have `name` + currency.
+  // Tripled per-symbol call cost and contributed to the
+  // user-reported "finnhub: rate-limit safety belt (≥55/min)"
+  // errors. Names come from the preset registry / user's own
+  // nickname; currency defaults to USD.
+  void name;
+  void currency;
+
+  // HISTORY FETCH: only attempted for the default 5y range. For
+  // range="max" Finnhub's free tier returns 403 (paid tier needed)
+  // — wasting a budget slot AND silently producing empty history,
+  // which then masked Yahoo from being tried. Saving 1 call per
+  // symbol on max-range requests roughly halves Finnhub usage
+  // during time-travel sessions.
   const history: Array<{ t: number; p: number }> = [];
+  const shouldTryHistory = range !== "max";
   try {
-    if (canCallFinnhub()) {
+    if (shouldTryHistory && canCallFinnhub()) {
       recordFinnhubCall();
       const now = Math.floor(Date.now() / 1000);
-      const fiveYrAgo = now - 5 * 365 * 24 * 60 * 60;
+      const fromOffsetSec = 5 * 365 * 24 * 60 * 60;
+      const fromTs = now - fromOffsetSec;
       const candleRes = await fetch(
-        `https://finnhub.io/api/v1/stock/candle?symbol=${enc}&resolution=D&from=${fiveYrAgo}&to=${now}&token=${key}`,
+        `https://finnhub.io/api/v1/stock/candle?symbol=${enc}&resolution=D&from=${fromTs}&to=${now}&token=${key}`,
         { next: { revalidate: 86400 } },
       );
       if (candleRes.ok) {
@@ -237,42 +736,89 @@ async function tryFinnhub(symbol: string): Promise<ParsedQuote | null> {
   }
 
   return {
-    symbol,
-    currentPrice,
-    currency,
-    name,
-    history,
+    ok: true,
+    quote: {
+      symbol,
+      currentPrice,
+      currency,
+      name,
+      history,
+    },
   };
 }
 
-async function tryYahoo(symbol: string): Promise<ParsedQuote | null> {
-  const path = `/v8/finance/chart/${encodeURIComponent(symbol)}?range=5y&interval=1d&includePrePost=false`;
+async function tryYahoo(
+  symbol: string,
+  range: "5y" | "max" = "5y",
+): Promise<UpstreamResult> {
+  // Yahoo's range=max goes back to symbol inception (often
+  // 20-40+ years for major equities). Default 5y for live
+  // refresh; max for time-travel sessions.
+  const yahooRange = range === "max" ? "max" : "5y";
+  const path = `/v8/finance/chart/${encodeURIComponent(symbol)}?range=${yahooRange}&interval=1d&includePrePost=false`;
+  // Track the LAST observed failure across all 4 (host × UA)
+  // attempts so the caller has a concrete reason to surface.
+  // Yahoo blocks Vercel IP ranges aggressively, so the typical
+  // failure is a 401/403/429 — surfacing the status code makes
+  // it instantly diagnosable.
+  let lastReason = "yahoo: no attempt made";
+  // Warm a Yahoo session once per cold start. Yahoo's WAF treats
+  // requests with an established session cookie + crumb materially
+  // more leniently than naked-IP fetches — measurably increases
+  // 200s on Vercel's shared IP pool.
+  const session = await getYahooSession(UA_VARIATIONS[0]);
   for (const host of HOSTS) {
     for (const ua of UA_VARIATIONS) {
       try {
-        const res = await fetch(`https://${host}${path}`, {
-          headers: {
-            "User-Agent": ua,
-            Accept: "application/json,text/plain,*/*",
-            "Accept-Language": "en-US,en;q=0.9",
-            Referer: "https://finance.yahoo.com/",
-            Origin: "https://finance.yahoo.com",
-          },
+        // 429-retry path: when Yahoo returns "Too Many Requests"
+        // on the first attempt, wait briefly + retry once. Vercel's
+        // shared IP pool gets rate-limited aggressively by Yahoo
+        // across all users on the same warm instance; a single
+        // 750ms backoff often gets us through the next rate
+        // window (Yahoo's tier is per-rolling-second).
+        // User reported: "21 holdings all 429."
+        const headers = browserHeaders(ua);
+        if (session) headers.Cookie = session.cookie;
+        let res = await fetch(`https://${host}${path}`, {
+          headers,
           next: { revalidate: 86400 },
         });
-        if (!res.ok) continue;
-        const data = (await res.json()) as YahooChart;
-        if (data.chart?.error) continue;
+        if (res.status === 429) {
+          await new Promise((r) => setTimeout(r, 750));
+          res = await fetch(`https://${host}${path}`, {
+            headers,
+            next: { revalidate: 86400 },
+          });
+        }
+        if (!res.ok) {
+          lastReason = `yahoo: ${host} returned ${res.status} ${res.statusText}`;
+          continue;
+        }
+        let data: YahooChart;
+        try {
+          data = (await res.json()) as YahooChart;
+        } catch (e) {
+          lastReason = `yahoo: ${host} returned non-JSON — ${e instanceof Error ? e.message : String(e)}`;
+          continue;
+        }
+        if (data.chart?.error) {
+          lastReason = `yahoo: ${host} chart.error ${data.chart.error.code}: ${data.chart.error.description}`;
+          continue;
+        }
         const result = data.chart?.result?.[0];
-        if (!result) continue;
+        if (!result) {
+          lastReason = `yahoo: ${host} returned empty chart.result`;
+          continue;
+        }
         const parsed = parseYahoo(symbol, result);
-        if (parsed) return parsed;
-      } catch {
-        /* try next */
+        if (parsed) return { ok: true, quote: parsed };
+        lastReason = `yahoo: ${host} parse failed (no close prices in payload)`;
+      } catch (e) {
+        lastReason = `yahoo: ${host} fetch threw — ${e instanceof Error ? e.message : String(e)}`;
       }
     }
   }
-  return null;
+  return { ok: false, reason: lastReason };
 }
 
 type YahooChart = {

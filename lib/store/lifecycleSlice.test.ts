@@ -70,6 +70,14 @@ function makeFakeStore(seed: Partial<LifecycleSliceContext> = {}) {
     subscription: "free",
     subscriptionCheckedAt: null,
     viewBasis: "face",
+    // Time-travel fields — added to LifecycleSliceContext when
+    // TIME_TRAVEL_SLICE_INITIAL was added to freshSlate's spread
+    // (audit round-2 fix). Tests default to inactive baseline.
+    timeTravelActive: false,
+    timeTravelDate: null,
+    baselineHousehold: null,
+    baselineAssumptions: null,
+    editingSnapshotT: null,
     ...seed,
   };
   return {

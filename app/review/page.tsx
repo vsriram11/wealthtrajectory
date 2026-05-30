@@ -33,8 +33,10 @@ import {
   weightedRealExcess,
 } from "@/lib/budget/budget";
 import { runHistoricalSequences } from "@/lib/projection/monteCarlo";
+import { memberFilteredSnapshots } from "@/lib/data/history";
 import { loadSnapshots, type Snapshot } from "@/lib/persistence/persistence";
 import { formatUSD, formatUSDCompact, formatPercent } from "@/lib/format";
+import { applyScenario } from "@/lib/insights/scenarios";
 import { AllocBar, KV, LeverageBar, Section, TaxBar } from "./_components";
 
 /**
@@ -63,11 +65,33 @@ export default function ReviewPage() {
   const liquidityView = useAppStore((s) => s.liquidityView);
 
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
+  // Audit fix (round-3 BLOCK #2): re-fetch on revision bump so
+  // the Annual Review picks up snapshot mutations from other
+  // tabs (SnapshotsManager edits, TimeTravelBanner saves, auto
+  // writes). Empty-deps version showed stale snapshot deltas
+  // until next mount.
+  const snapshotsRevision = useAppStore((s) => s.snapshotsRevision);
   useEffect(() => {
     void loadSnapshots().then((s) => setSnapshots(s));
-  }, []);
+  }, [snapshotsRevision]);
 
-  const effective = memberId
+  // Round-6 audit HIGH: Annual Review previously read base
+  // `assumptions` AND base household, ignoring the active scenario.
+  // A user with scenario "Aggressive savings" active would see the
+  // Scenarios section list it as "Active" while the headline figures
+  // (target, withdrawal rate, NW, MC success rate) reflected the
+  // BASE assumptions — internally inconsistent on a printable
+  // artifact people save + share. Resolve the active scenario here
+  // and feed its (household, assumptions) into every downstream
+  // computation. Surface the "Reflecting active scenario" note in
+  // the header so the reader knows the figures are NOT the base.
+  const scenarios = useAppStore((s) => s.scenarios);
+  const activeScenarioId = useAppStore((s) => s.activeScenarioId);
+  const activeScenario = activeScenarioId
+    ? scenarios.find((sc) => sc.id === activeScenarioId)
+    : null;
+
+  const baseEffective = memberId
     ? resolveAssumptionsForMember(assumptions, memberAssumptions, memberId)
     : effectiveHouseholdAssumptions(
         assumptions,
@@ -91,13 +115,29 @@ export default function ReviewPage() {
   // household's NW but only their own contributions — exactly
   // the kind of mismatch that erodes trust in a printable
   // artifact.)
-  const scopedHousehold = useMemo(() => {
+  const baseScopedHousehold = useMemo(() => {
     let h = memberId
       ? filterHousehold(household, memberId)
       : householdForRollups(household);
     if (liquidityView === "liquid") h = liquidHousehold(h);
     return h;
   }, [household, memberId, liquidityView]);
+
+  // Apply active scenario to BOTH household and assumptions, so every
+  // downstream value (NW, contributions, target, MC) reflects the
+  // same plan view the user is operating in. When no scenario is
+  // active, pass-through.
+  const { scopedHousehold, effective } = useMemo(() => {
+    if (!activeScenario) {
+      return { scopedHousehold: baseScopedHousehold, effective: baseEffective };
+    }
+    const applied = applyScenario(
+      baseScopedHousehold,
+      baseEffective,
+      activeScenario.overrides,
+    );
+    return { scopedHousehold: applied.household, effective: applied.assumptions };
+  }, [activeScenario, baseScopedHousehold, baseEffective]);
 
   const nw = householdNetWorth(scopedHousehold);
   const portfolio = computePortfolio(scopedHousehold);
@@ -156,15 +196,12 @@ export default function ReviewPage() {
     return flat.slice(0, 8);
   }, [scopedHousehold, nw]);
 
-  // Scenarios + goals — surface what the user has set up so the
+  // Goals + healthcare — surface what the user has set up so the
   // printable artifact captures their plan, not just the math.
-  const scenarios = useAppStore((s) => s.scenarios);
-  const activeScenarioId = useAppStore((s) => s.activeScenarioId);
+  // (Scenarios + activeScenario hoisted to the top so they can
+  // drive the household + assumptions resolution above.)
   const goals = useAppStore((s) => s.goals);
   const healthPlans = useAppStore((s) => s.healthPlans);
-  const activeScenario = activeScenarioId
-    ? scenarios.find((sc) => sc.id === activeScenarioId)
-    : null;
 
   // YoY change from snapshots. `renderedAt` anchors "one year ago"
   // at mount so the memo stays stable across re-renders — drifting
@@ -172,17 +209,24 @@ export default function ReviewPage() {
   // snapshot without changing what the user wanted to see.
   const [renderedAt] = useState<number>(() => Date.now());
   const yoy = useMemo(() => {
-    if (snapshots.length === 0) return null;
+    // Round-1 (snapshot audit) CRITICAL: pre-filter snapshots
+    // through the member chip so the YoY delta compares the same
+    // person's slice (or rollup) on both sides. Without this, a
+    // user filtered to "Alex" sees `nw` (Alex's slice) diffed
+    // against household-wide snapshot NW → fictional delta on a
+    // printable artifact users save + share.
+    const filteredSnaps = memberFilteredSnapshots(snapshots, memberId);
+    if (filteredSnaps.length === 0) return null;
     const target = renderedAt - 365 * 24 * 60 * 60 * 1000;
     let best: Snapshot | null = null;
-    for (const s of snapshots) {
+    for (const s of filteredSnaps) {
       if (s.t <= target && (!best || s.t > best.t)) best = s;
     }
     if (!best || best.netWorthUSD <= 0) return null;
     const delta = nw - best.netWorthUSD;
     const pct = delta / best.netWorthUSD;
     return { from: best.netWorthUSD, to: nw, delta, pct };
-  }, [snapshots, nw, renderedAt]);
+  }, [snapshots, nw, renderedAt, memberId]);
 
   // Independence math.
   const target = effective.targetNetWorthUSD;
@@ -299,6 +343,7 @@ export default function ReviewPage() {
             day: "numeric",
           })}
           {memberName ? ` · ${memberName}` : " · Household view"}
+          {activeScenario && ` · Scenario: ${activeScenario.name}`}
         </div>
       </header>
 

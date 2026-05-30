@@ -14,6 +14,7 @@
  */
 
 import { NumberField } from "@/app/_components/ui/NumberField";
+import { parseISODate } from "@/lib/dateInput";
 
 export function SectionHeader({
   title,
@@ -153,8 +154,15 @@ export function DateField({
                 onChange(null);
                 return;
               }
-              const t = new Date(v + "T00:00:00").getTime();
-              if (Number.isFinite(t)) onChange(t);
+              // Anchor to noon UTC (matches lib/dateInput.parseISODate)
+              // so the date doesn't drift by ±1 day in non-UTC
+              // timezones between save and reload. Round-4 audit
+              // WARN: was using `new Date(v + "T00:00:00")` which
+              // parses as LOCAL midnight; display path uses UTC,
+              // so a PST user editing "Acquired on" repeatedly
+              // would see the date shift back a day each save.
+              const t = parseISODate(v);
+              if (t !== null) onChange(t);
             }}
             className="rounded-md border border-border-strong bg-bg-surface px-2 py-1 text-sm text-text outline-none focus:border-accent"
           />

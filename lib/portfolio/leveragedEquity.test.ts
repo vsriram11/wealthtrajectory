@@ -403,3 +403,135 @@ describe("computeLeveragedEquityBuckets — deleveraging tax model", () => {
     expect(b.postTaxDeleverageToStocks2xUSD).toBe(90_000);
   });
 });
+
+describe("computeLeveragedEquityBuckets — consumedByBucketFunding composition", () => {
+  // Round-1 audit CRITICAL fix coverage. When the cash-bucket-
+  // funding engine sells leveraged equity for cash, the deleveraging
+  // restructure should NOT also tax the consumed portion — that's
+  // double-taxing the same holding. These tests pin the contract.
+
+  it("full consumption skips the holding entirely (no tax, no bucket routing)", () => {
+    const hh = householdWith([
+      equityHolding({
+        id: "h1",
+        symbol: "UPRO",
+        leverage: 3.0,
+        valueUSD: 100_000,
+      }),
+    ]);
+    const consumed = new Map<string, number>([["h1", 100_000]]);
+    const b = computeLeveragedEquityBuckets(hh, 0.2, 1.0, consumed);
+    expect(b.deleveragingTaxHitUSD).toBe(0);
+    expect(b.nonRecognizedLeveragedUSD).toBe(0);
+    expect(b.postTaxDeleverageToStocks2xUSD).toBe(0);
+    expect(b.nonRecognizedHoldings).toHaveLength(0);
+  });
+
+  it("partial consumption taxes only the REMAINING face", () => {
+    const hh = householdWith([
+      equityHolding({
+        id: "h1",
+        symbol: "UPRO",
+        leverage: 3.0,
+        valueUSD: 100_000,
+      }),
+    ]);
+    // Bucket funding sold $30k; remaining = $70k.
+    const consumed = new Map<string, number>([["h1", 30_000]]);
+    const b = computeLeveragedEquityBuckets(hh, 0.2, 1.0, consumed);
+    // Tax on $70k × 1.0 × 0.2 = $14k (NOT $20k that would result
+    // from taxing the full $100k).
+    expect(b.deleveragingTaxHitUSD).toBe(14_000);
+    expect(b.nonRecognizedLeveragedUSD).toBe(70_000);
+    expect(b.postTaxDeleverageToStocks2xUSD).toBe(56_000); // 70K - 14K
+    expect(b.nonRecognizedHoldings).toHaveLength(1);
+    expect(b.nonRecognizedHoldings[0].valueUSD).toBe(70_000);
+  });
+
+  it("undefined consumed map preserves the prior (pre-Round-1) contract", () => {
+    const hh = householdWith([
+      equityHolding({
+        id: "h1",
+        symbol: "UPRO",
+        leverage: 3.0,
+        valueUSD: 100_000,
+      }),
+    ]);
+    const b = computeLeveragedEquityBuckets(hh, 0.2, 1.0, undefined);
+    expect(b.deleveragingTaxHitUSD).toBe(20_000); // full face taxed
+    expect(b.nonRecognizedLeveragedUSD).toBe(100_000);
+  });
+
+  it("empty consumed map is equivalent to undefined (no-op)", () => {
+    const hh = householdWith([
+      equityHolding({
+        id: "h1",
+        symbol: "UPRO",
+        leverage: 3.0,
+        valueUSD: 100_000,
+      }),
+    ]);
+    const b = computeLeveragedEquityBuckets(hh, 0.2, 1.0, new Map());
+    expect(b.deleveragingTaxHitUSD).toBe(20_000);
+    expect(b.nonRecognizedLeveragedUSD).toBe(100_000);
+  });
+
+  it("consumed > valueUSD clamps to 0 (no negative balances)", () => {
+    const hh = householdWith([
+      equityHolding({
+        id: "h1",
+        symbol: "UPRO",
+        leverage: 3.0,
+        valueUSD: 100_000,
+      }),
+    ]);
+    // Pathological: caller claims 200k consumed from a 100k holding.
+    const consumed = new Map<string, number>([["h1", 200_000]]);
+    const b = computeLeveragedEquityBuckets(hh, 0.2, 1.0, consumed);
+    expect(b.deleveragingTaxHitUSD).toBe(0);
+    expect(b.nonRecognizedLeveragedUSD).toBe(0);
+  });
+
+  it("consumed entry for a RECOGNIZED 2x ETF reduces the 2x bucket face (no tax)", () => {
+    const hh = householdWith([
+      equityHolding({
+        id: "h1",
+        symbol: "SSO",
+        leverage: 2.0,
+        valueUSD: 100_000,
+      }),
+    ]);
+    const consumed = new Map<string, number>([["h1", 40_000]]);
+    const b = computeLeveragedEquityBuckets(hh, 0.2, 1.0, consumed);
+    expect(b.deleveragingTaxHitUSD).toBe(0); // recognized 2x → no deleverage tax
+    expect(b.stocks2xUSD).toBe(60_000); // 100K - 40K consumed
+  });
+
+  it("composes correctly across multiple leveraged holdings", () => {
+    const hh = householdWith([
+      equityHolding({
+        id: "h-tqqq",
+        symbol: "TQQQ",
+        leverage: 3.0,
+        valueUSD: 100_000,
+      }),
+      equityHolding({
+        id: "h-upro",
+        symbol: "UPRO",
+        leverage: 3.0,
+        valueUSD: 100_000,
+      }),
+    ]);
+    // Bucket funding fully drained TQQQ, partially drained UPRO.
+    const consumed = new Map<string, number>([
+      ["h-tqqq", 100_000],
+      ["h-upro", 30_000],
+    ]);
+    const b = computeLeveragedEquityBuckets(hh, 0.2, 1.0, consumed);
+    // Only UPRO remains, with $70k. Tax = $14k.
+    expect(b.nonRecognizedLeveragedUSD).toBe(70_000);
+    expect(b.deleveragingTaxHitUSD).toBe(14_000);
+    expect(b.nonRecognizedHoldings).toHaveLength(1);
+    expect(b.nonRecognizedHoldings[0].symbol).toBe("UPRO");
+  });
+});

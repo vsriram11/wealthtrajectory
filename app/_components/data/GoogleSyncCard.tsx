@@ -15,7 +15,11 @@ import {
   uploadBackup,
   type DriveBackupRef,
 } from "@/lib/sync/googleDrive";
-import { exportData, parseImport } from "@/lib/persistence/dataIO";
+import {
+  applyImportedPayload,
+  exportData,
+  parseImport,
+} from "@/lib/persistence/dataIO";
 import { pullFromDrive, pushToDrive } from "@/lib/sync/cloudSync";
 import {
   generateSessionId,
@@ -71,6 +75,9 @@ export function GoogleSyncCard() {
   const incomeStreams = useAppStore((s) => s.incomeStreams);
   const encryptionPassphrase = useAppStore((s) => s.encryptionPassphrase);
   const importPayload = useAppStore((s) => s.importPayload);
+  const bumpSnapshotsRevision = useAppStore(
+    (s) => s.bumpSnapshotsRevision,
+  );
   const setUser = useAppStore((s) => s.setUser);
   const setSyncState = useAppStore((s) => s.setGoogleSyncState);
 
@@ -117,21 +124,16 @@ export function GoogleSyncCard() {
           useAppStore.getState().encryptionPassphrase,
         );
         const parsed = parseImport(text);
-        importPayload({
-          household: parsed.household,
-          assumptions: parsed.assumptions,
-          scenarios: parsed.scenarios ?? [],
-          memberAssumptions: parsed.memberAssumptions,
-          preferredMemberId: parsed.preferredMemberId,
-          targetAllocation: parsed.targetAllocation,
-          glidePath: parsed.glidePath,
-          householdAnnualIncomeUSD: parsed.householdAnnualIncomeUSD,
-          goals: parsed.goals,
-          budgetItems: parsed.budgetItems,
-          incomeStreams: parsed.incomeStreams,
-          healthPlans: parsed.healthPlans,
-          healthImportanceWeights: parsed.healthImportanceWeights,
-        });
+        // Round-1 audit CRITICAL fix: applyImportedPayload bundles
+        // the store import AND the IDB snapshot mirror, so this
+        // first-cloud-pull path can't leave snapshot history
+        // stranded.
+        await applyImportedPayload(parsed, importPayload);
+        // R1-D10 audit CRITICAL fix: bump snapshot revision so
+        // History/Insights/Review consumers re-read after the
+        // first-cloud-pull. Only when the payload actually carried
+        // snapshots — see pullFromDrive comment.
+        if (parsed.snapshots !== undefined) bumpSnapshotsRevision();
         setSyncState({
           googleSyncing: false,
           googleLastSyncAt: Date.now(),
@@ -156,21 +158,15 @@ export function GoogleSyncCard() {
     if (step.kind !== "merging") return;
     try {
       const parsed = parseImport(step.cloudText);
-      importPayload({
-        household: parsed.household,
-        assumptions: parsed.assumptions,
-        scenarios: parsed.scenarios ?? [],
-        memberAssumptions: parsed.memberAssumptions,
-        preferredMemberId: parsed.preferredMemberId,
-        targetAllocation: parsed.targetAllocation,
-        glidePath: parsed.glidePath,
-        householdAnnualIncomeUSD: parsed.householdAnnualIncomeUSD,
-        goals: parsed.goals,
-        budgetItems: parsed.budgetItems,
-        incomeStreams: parsed.incomeStreams,
-        healthPlans: parsed.healthPlans,
-        healthImportanceWeights: parsed.healthImportanceWeights,
-      });
+      // Round-1 audit CRITICAL fix: useCloud is the "merge: prefer
+      // cloud" branch — must mirror Drive snapshots into IDB or the
+      // user keeps their old local snapshots while overwriting all
+      // other slices.
+      await applyImportedPayload(parsed, importPayload);
+      // R1-D10 audit CRITICAL fix: bump snapshot revision so
+      // History/Insights/Review consumers re-read after a
+      // merge-prefer-cloud import.
+      if (parsed.snapshots !== undefined) bumpSnapshotsRevision();
       setSyncState({ googleLastSyncAt: Date.now() });
       setStep({ kind: "idle" });
     } catch (e) {

@@ -80,6 +80,21 @@ describe("setAssumption", () => {
       { startMonthsAfterIndependence: 120, withdrawalRate: 0.035 },
     ]);
   });
+
+  it("assumedCapGainsFraction update flips the reference + persists the value", () => {
+    // The bucket-funding + deleveraging engines consume this via
+    // the same setAssumption generic setter. Pin that the slice
+    // accepts the new key, stores it intact, and produces a fresh
+    // reference so the PersistenceHydrator / CloudSyncer pick the
+    // change up (the load-bearing pattern documented in CLAUDE.md
+    // §2 — in-place mutation would silently skip the save).
+    const s = makeFakeStore();
+    const a = createAssumptionsSliceActions(s.set);
+    const before = s.state.assumptions;
+    a.setAssumption("assumedCapGainsFraction", 0.5);
+    expect(s.state.assumptions).not.toBe(before);
+    expect(s.state.assumptions.assumedCapGainsFraction).toBe(0.5);
+  });
 });
 
 describe("setMemberAssumption", () => {

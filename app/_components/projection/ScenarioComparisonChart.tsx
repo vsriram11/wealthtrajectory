@@ -4,7 +4,7 @@ import { useMemo } from "react";
 import { useAppStore } from "@/lib/store";
 import { runScenarios } from "@/lib/insights/scenarios";
 import { projectIndependence, type IndependenceProjection } from "@/lib/projection/independence";
-import { useActiveProjection } from "@/lib/projection/useActiveProjection";
+import { useScenarioNeutralProjection } from "@/lib/projection/useActiveProjection";
 import { formatUSDCompact, formatYearsMonths } from "@/lib/format";
 
 /**
@@ -13,15 +13,26 @@ import { formatUSDCompact, formatYearsMonths } from "@/lib/format";
  * one curve per defined scenario. Highlights where each crosses
  * the Independence target.
  *
- * Reads through useActiveProjection (filter-aware) so the comparison
- * is in the active member's slice. Always uses the active member
- * filter; never the active scenario (we're already drawing every
- * scenario on this chart, so the "active" one would be redundant /
- * confusing).
+ * Reads through `useScenarioNeutralProjection` (filter-aware,
+ * SCENARIO-NEUTRAL) so the comparison overlay sits on top of an
+ * explicit baseline rather than on top of whatever scenario the
+ * user happened to activate elsewhere.
+ *
+ * Bug history: this component used to call `useActiveProjection`,
+ * which silently applies the active scenario's overrides to its
+ * outputs. Effects: (1) the curve labeled "Baseline" was actually
+ * the active scenario's projection; (2) `runScenarios` then
+ * re-applied each scenario's overrides on top of the already-
+ * modified base — the ACTIVE scenario's overrides applied TWICE,
+ * making its curve diverge wildly, and other scenarios' curves
+ * landed in the wrong place. The user observed this as "switching
+ * scenarios makes the comparison plot stop showing all scenarios
+ * and mislabel baseline." Fixed by switching to the scenario-
+ * neutral hook.
  */
 export function ScenarioComparisonChart() {
   const scenarios = useAppStore((s) => s.scenarios);
-  const { household, assumptions } = useActiveProjection();
+  const { household, assumptions } = useScenarioNeutralProjection();
 
   const baseline = useMemo(
     () => projectIndependence(household, assumptions),

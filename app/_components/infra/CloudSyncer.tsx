@@ -10,6 +10,7 @@ import {
   uploadBackup,
 } from "@/lib/sync/googleDrive";
 import { exportData } from "@/lib/persistence/dataIO";
+import { loadSnapshots } from "@/lib/persistence/persistence";
 import { isDemoHousehold } from "@/lib/types";
 import {
   DriveUnreadableError,
@@ -44,6 +45,61 @@ export function CloudSyncer() {
       // isDemoHousehold checks for the hardcoded demo IDs that no
       // user-created household can produce.
       if (isDemoHousehold(state.household)) return;
+      // Time-travel session gate — same reasoning as the IDB gate
+      // in PersistenceHydrator. The in-memory household represents
+      // a HYPOTHETICAL past state the user is editing for the
+      // purpose of a backdated snapshot. Uploading those edits to
+      // Drive would overwrite every other device's view of the
+      // user's actual present-day holdings — catastrophic. The
+      // gate fires BEFORE the debounce timer starts so a queued
+      // upload from before-time-travel doesn't fire mid-session
+      // either (the cleanup path below also clears any pending
+      // timer when the subscription re-runs).
+      // Sync-in-progress gate (round-2 audit fix #5): when a
+      // PULL is in flight (pullFromDrive sets googleSyncing=true
+      // before its applyImportedPayload call), the cascade of
+      // slice changes that applyImportedPayload produces would
+      // otherwise schedule a queued upload — which fires after
+      // the pull completes, redundantly re-uploading what we
+      // just pulled. With multiple slice changes in the same
+      // import (household + assumptions + scenarios + ...), the
+      // subscribe fires N times and N upload attempts get
+      // queued. Gating on googleSyncing makes the import
+      // atomic from CloudSyncer's perspective: zero upload
+      // schedules during a pull, and the user's NEXT genuine
+      // edit triggers a fresh debounce normally.
+      if (state.googleSyncing) return;
+      if (state.timeTravelActive) {
+        // Cancel any in-flight debounce timer on entry. The
+        // fire-time gate at line ~110 already catches a fired
+        // timer, but cancelling here saves the round-trip and
+        // (critically) clears the `googleUploadScheduled` flag
+        // that AuthHydrator's tab-resume path watches — without
+        // this, a queued-then-entered session leaves the flag
+        // stuck true, blocking the resume pull until the
+        // session exits.
+        //
+        // CRITICAL: only call setGoogleSyncState when there's
+        // actually something to clear. Without this gate, the
+        // setGoogleSyncState call fires a Zustand commit, which
+        // re-triggers THIS subscribe, which sees timeTravelActive
+        // still true, which calls setGoogleSyncState again →
+        // infinite loop → "Maximum call stack size exceeded".
+        // User-reported regression from a structuredClone-mask
+        // (the previous structuredClone crash inside the slice
+        // action was preventing the set from committing, hiding
+        // this bug).
+        if (timer) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        if (state.googleUploadScheduled) {
+          useAppStore
+            .getState()
+            .setGoogleSyncState({ googleUploadScheduled: false });
+        }
+        return;
+      }
       if (
         state.household === prev.household &&
         state.assumptions === prev.assumptions &&
@@ -57,7 +113,13 @@ export function CloudSyncer() {
         state.budgetItems === prev.budgetItems &&
         state.incomeStreams === prev.incomeStreams &&
         state.healthPlans === prev.healthPlans &&
-        state.healthImportanceWeights === prev.healthImportanceWeights
+        state.healthImportanceWeights === prev.healthImportanceWeights &&
+        // Round-1-D3 audit CRITICAL fix: snapshots live in IDB, but
+        // the slice carries a monotonic revision counter that
+        // SnapshotsManager bumps after every create / edit / delete.
+        // Without this comparison the debounced uploader was blind
+        // to snapshot mutations.
+        state.snapshotsRevision === prev.snapshotsRevision
       ) {
         return;
       }
@@ -80,6 +142,16 @@ export function CloudSyncer() {
           return;
         }
         if (s.mode !== "real") {
+          s.setGoogleSyncState({ googleUploadScheduled: false });
+          return;
+        }
+        // Re-check the time-travel gate at fire time too — a debounce
+        // scheduled BEFORE the user entered time travel must not fire
+        // mid-session with the hypothetical state. The subscribe
+        // handler already clears the prior timer when state changes,
+        // but enterTimeTravel itself doesn't change any of the
+        // diffed slice references, so the existing timer may survive.
+        if (s.timeTravelActive) {
           s.setGoogleSyncState({ googleUploadScheduled: false });
           return;
         }
@@ -179,6 +251,14 @@ export function CloudSyncer() {
             const existing = await findBackupFile(token);
             if (existing) {
               const driveText = await downloadBackup(token, existing.id);
+              // Round-1-D1 audit CRITICAL fix: include local
+              // snapshot count in the outbound shrinkage check so
+              // the debounced CloudSyncer upload doesn't silently
+              // wipe Drive snapshots when local IDB is empty (fresh
+              // device that hasn't completed initial sync yet, but
+              // CloudSyncer's gate already requires googleLastSyncAt
+              // != null — still belt-and-suspenders).
+              const localSnapshotsForShrinkage = await loadSnapshots();
               const shrinkage = await checkShrinkageAgainstDrive(
                 driveText,
                 s.encryptionPassphrase,
@@ -190,6 +270,7 @@ export function CloudSyncer() {
                   healthPlans: s.healthPlans,
                   healthImportanceWeights: s.healthImportanceWeights,
                   memberAssumptions: s.memberAssumptions,
+                  snapshots: localSnapshotsForShrinkage,
                 },
               );
               if (shrinkage) {
@@ -237,6 +318,16 @@ export function CloudSyncer() {
             return;
           }
 
+          // CRITICAL: include snapshots in the Drive payload.
+          // Round-2 audit fix — the previous inline exportData
+          // call omitted the snapshots field, so every
+          // debounced auto-upload (the common path, fires after
+          // any state change) overwrote Drive with a snapshot-
+          // less backup. A subsequent device wiped/restored
+          // from Drive lost ALL snapshot history. pushToDrive
+          // (cloudSync.ts:460) does it right; this code path
+          // diverged silently.
+          const snapshotsForUpload = await loadSnapshots();
           const json = exportData({
             household: s.household,
             assumptions: s.assumptions,
@@ -251,6 +342,7 @@ export function CloudSyncer() {
             incomeStreams: s.incomeStreams,
             healthPlans: s.healthPlans,
             healthImportanceWeights: s.healthImportanceWeights,
+            snapshots: snapshotsForUpload,
           });
           // When the user has enabled end-to-end encryption (PRD §7.10),
           // wrap the payload in an fp-enc-v1 envelope before upload.

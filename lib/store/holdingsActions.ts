@@ -53,12 +53,31 @@ export type HoldingsActions = {
     priceUSD: number,
     opts?: { manual?: boolean },
   ) => void;
-  applyLivePrice: (symbol: string, priceUSD: number, pricedAt: number) => void;
+  applyLivePrice: (
+    symbol: string,
+    priceUSD: number,
+    pricedAt: number,
+    mode?: "live" | "historical",
+  ) => void;
   convertHoldingToLive: (
     holdingId: HoldingId,
     livePrice: number,
     pricedAt: number,
   ) => void;
+  /**
+   * Inverse of convertHoldingToLive: switch a live-priceable
+   * holding to manual price tracking, freezing its current dollar
+   * value. The user is saying "stop auto-refreshing this; I'll
+   * maintain it myself." The PriceRefresher loop honors
+   * `isManualPrice=true` and skips the holding from then on.
+   *
+   * UX motivation: previously the only way to stop a holding from
+   * live-updating was to delete + re-add it. A user editing
+   * historical values during time-travel had no way to make those
+   * values stick across reloads (the next live-refresh would
+   * overwrite shares × livePrice on whatever values IDB held).
+   */
+  convertHoldingToManual: (holdingId: HoldingId) => void;
   setHoldingStyleBox: (
     holdingId: HoldingId,
     styleBox: StyleBoxAllocation,
@@ -87,6 +106,10 @@ export type HoldingsActions = {
   ) => void;
   setHoldingIsPrimaryResidence: (holdingId: HoldingId, value: boolean) => void;
   setHoldingIsIlliquid: (holdingId: HoldingId, value: boolean) => void;
+  setHoldingExcludeFromCashBucketSale: (
+    holdingId: HoldingId,
+    value: boolean,
+  ) => void;
 };
 
 /** Cross-slice fields the holdings actions write to. */
@@ -168,8 +191,8 @@ export function createHoldingsActions(
         updateHoldingPrice(s, id, priceUSD, opts?.manual ?? true, Date.now()),
       ),
 
-    applyLivePrice: (symbol, priceUSD, pricedAt) =>
-      set((s) => applyLivePriceTo(s, symbol, priceUSD, pricedAt)),
+    applyLivePrice: (symbol, priceUSD, pricedAt, mode) =>
+      set((s) => applyLivePriceTo(s, symbol, priceUSD, pricedAt, mode)),
 
     convertHoldingToLive: (id, livePrice, pricedAt) =>
       set((s) =>
@@ -185,6 +208,17 @@ export function createHoldingsActions(
             isManualPrice: false,
             valueUSD: value,
           };
+        }),
+      ),
+
+    convertHoldingToManual: (id) =>
+      set((s) =>
+        mapHolding(s, id, (h) => {
+          if (!isLivePriceable(h)) return h;
+          // Just flip the manual flag — value, shares, lastPriceUSD
+          // are all preserved at whatever they are right now. The
+          // PriceRefresher will skip this holding from now on.
+          return { ...h, isManualPrice: true };
         }),
       ),
 
@@ -294,6 +328,17 @@ export function createHoldingsActions(
           // more specific flag). Both are honored by isLiquid().
           if (h.kind === "private_stock") return h;
           return { ...h, isIlliquid: value };
+        }),
+      ),
+
+    setHoldingExcludeFromCashBucketSale: (id, value) =>
+      set((s) =>
+        mapHolding(s, id, (h) => {
+          // private_stock is already excluded structurally (illiquid
+          // → not in the cash-bucket sale candidates). Flagging is
+          // a no-op there; preserve the existing shape.
+          if (h.kind === "private_stock") return h;
+          return { ...h, excludeFromCashBucketSale: value };
         }),
       ),
   };

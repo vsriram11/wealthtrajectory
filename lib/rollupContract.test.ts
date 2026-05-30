@@ -316,4 +316,163 @@ describe("rollup-include flag — full cascade through every rollup-touching sur
     expect(result.successRate).toBeGreaterThan(0);
     expect(result.successRate).toBeLessThanOrEqual(1);
   });
+
+  it("Historical snapshot buckets cascade through the includeInRollup flag (round-3 audit BLOCK fix)", async () => {
+    // Round-3 audit finding: HistoryTab applied only filterHousehold
+    // (member filter), not householdForRollups (rollup flag).
+    // Members with includeInRollup=false were silently INCLUDED
+    // in History CAGR/drawdown — contradicting NetWorthCard,
+    // AllocationPanel, Insights, etc. This test pins the
+    // includeInRollup cascade alongside the existing member-
+    // filter test.
+    const { buildAssetClassSeries } = await import(
+      "@/lib/portfolio/historicalReturns"
+    );
+    const { householdForRollups } = await import("@/lib/types");
+    const s = useAppStore.getState();
+    // Find a member to exclude. Demo persona has 2 members; pick the
+    // 2nd as the "exclude this" candidate.
+    expect(s.household.members.length).toBeGreaterThanOrEqual(2);
+    const excludeMember = s.household.members[1];
+    const householdWithExclusion = {
+      ...s.household,
+      members: s.household.members.map((m) =>
+        m.id === excludeMember.id ? { ...m, includeInRollup: false } : m,
+      ),
+    };
+    const snap = {
+      t: Date.UTC(2024, 0, 1, 12),
+      netWorthUSD: householdNetWorth(householdWithExclusion),
+      household: householdWithExclusion,
+    };
+    // Without householdForRollups, both members' holdings would
+    // be bucketed. With it, only the included member's holdings
+    // appear. Pre-fix: HistoryTab built buckets directly from
+    // snap.household → buckets included the excluded member.
+    const rolledUp = householdForRollups(householdWithExclusion);
+    const expectedBuckets = buildAssetClassSeries([
+      { ...snap, household: rolledUp },
+    ]);
+    const expectedTotal = Object.values(expectedBuckets).reduce(
+      (sum, series) => sum + (series?.[0]?.valueUSD ?? 0),
+      0,
+    );
+    // Sanity: the excluded member's value really did drop.
+    const unfilteredTotal = householdNetWorth(householdWithExclusion);
+    expect(expectedTotal).toBeLessThan(unfilteredTotal);
+  });
+
+  it("Historical snapshot buckets cascade through the member filter (audit-fix regression pin)", async () => {
+    // Audit finding #3: HistoryTab + buildAssetClassSeries iterated
+    // snap.household.accounts directly with no ownerId filter,
+    // silently showing household totals when the user filtered to
+    // one member. The fix applies filterHousehold to each snapshot
+    // before bucketing — this contract test pins the cascade in
+    // alongside every other rollup-aware collection.
+    const { buildAssetClassSeries } = await import(
+      "@/lib/portfolio/historicalReturns"
+    );
+    const { filterHousehold } = await import("@/lib/types");
+    const s = useAppStore.getState();
+    // Build a fake "historical snapshot" from the current
+    // household (the engine doesn't care that it's not really
+    // historical — it just needs snap.household to be present).
+    const snap = {
+      t: Date.UTC(2024, 0, 1, 12),
+      netWorthUSD: householdNetWorth(s.household),
+      household: s.household,
+    };
+    // Household-wide buckets — every member's holdings counted.
+    const householdBuckets = buildAssetClassSeries([snap]);
+    const householdTotal = Object.values(householdBuckets).reduce(
+      (sum, series) => sum + (series?.[0]?.valueUSD ?? 0),
+      0,
+    );
+    // Now per-member: take the FIRST member, scope to them.
+    const firstMemberId = s.household.members[0]?.id;
+    expect(firstMemberId).toBeDefined();
+    const scopedHousehold = filterHousehold(s.household, firstMemberId!);
+    const scopedSnap = {
+      ...snap,
+      household: scopedHousehold,
+      netWorthUSD: householdNetWorth(scopedHousehold),
+    };
+    const scopedBuckets = buildAssetClassSeries([scopedSnap]);
+    const scopedTotal = Object.values(scopedBuckets).reduce(
+      (sum, series) => sum + (series?.[0]?.valueUSD ?? 0),
+      0,
+    );
+    // The scoped total must be STRICTLY less than the household
+    // total (the demo persona has multi-member ownership) and
+    // strictly greater than zero (the first member must own
+    // something). The exact ratio depends on the demo data
+    // shape — we don't pin it.
+    expect(scopedTotal).toBeGreaterThan(0);
+    expect(scopedTotal).toBeLessThan(householdTotal);
+    // Defensive: no household.accounts owned by OTHER members
+    // leaked into the scoped output.
+    const otherMembers = s.household.members.filter(
+      (m) => m.id !== firstMemberId,
+    );
+    for (const acct of scopedHousehold.accounts) {
+      expect(otherMembers.some((m) => m.id === acct.ownerId)).toBe(false);
+    }
+  });
+
+  it("Health plans cascade through the includeInRollup flag (round-7 audit HIGH fix)", async () => {
+    // R3 audit: rollupHealthPlans takes a memberIds list to
+    // compute coverage, but HealthPanel was passing the RAW
+    // household.members ids — so a member with
+    // includeInRollup=false had their premium counted in the
+    // household total. Mirror the failure-driven contract:
+    // exclude a member with a plan and assert their premium
+    // drops out.
+    const { rollupHealthPlans } = await import(
+      "@/lib/health/healthPlans"
+    );
+    const sBefore = useAppStore.getState();
+    const jordanId = sBefore.household.members.find(
+      (m) => m.displayName === "Jordan",
+    )!.id;
+    // Seed a plan owned by Jordan so we have something to drop.
+    // Demo state may not include healthPlans by default; if it
+    // does, we add ours on top.
+    const seed = {
+      id: "plan-jordan-test" as never,
+      ownerId: jordanId as never,
+      name: "Test PPO",
+      monthlyPremiumUSD: 500,
+      coveredMemberIds: [jordanId] as never[],
+      deductibleUSD: 1000,
+      outOfPocketMaxUSD: 5000,
+      coinsuranceFraction: 0.2,
+      copayUSD: 30,
+      effectiveDate: "2025-01-01",
+    };
+    useAppStore.setState({
+      healthPlans: [...sBefore.healthPlans, seed as never],
+    });
+
+    // Activate-active baseline: Jordan IS included.
+    const sActive = useAppStore.getState();
+    const activeAll = Array.from(activeMemberIds(sActive.household));
+    const beforeRollup = rollupHealthPlans(
+      sActive.healthPlans.filter((p) => activeAll.includes(p.ownerId)),
+      activeAll,
+    );
+    expect(beforeRollup.totalMonthlyUSD).toBeGreaterThanOrEqual(500);
+
+    // Exclude Jordan → their plan must drop out.
+    useAppStore.getState().setMemberIncludeInRollup(jordanId, false);
+    const sExcluded = useAppStore.getState();
+    const activeAfter = Array.from(activeMemberIds(sExcluded.household));
+    const afterRollup = rollupHealthPlans(
+      sExcluded.healthPlans.filter((p) => activeAfter.includes(p.ownerId)),
+      activeAfter,
+    );
+    expect(afterRollup.totalMonthlyUSD).toBe(
+      beforeRollup.totalMonthlyUSD - 500,
+    );
+    expect(afterRollup.coveredMemberIds).not.toContain(jordanId);
+  });
 });

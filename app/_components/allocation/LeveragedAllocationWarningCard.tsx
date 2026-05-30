@@ -36,6 +36,19 @@ export function LeveragedAllocationWarningCard() {
   // tax-at-restructure differs materially between today and +5y /
   // +10y. The hook also surfaces the same `appliedFutureYears`
   // value for the header chip below.
+  //
+  // INTENTIONAL: this card shows the full pre-bucket-funding
+  // leveraged exposure + restructure tax. The MC card's
+  // cash-bucket override (which may consume some leveraged
+  // holdings for cash, reducing the deleveraging numbers) is a
+  // PER-RUN scenario; this card reflects the user's portfolio
+  // as-configured. So the deleveraging tax shown here may exceed
+  // what the MC simulator ultimately deducts. That's fine: this
+  // card answers "what's the AT-RETIREMENT restructure tax for
+  // my LEVERAGED ETFs?", not "what tax fires inside the MC
+  // simulator's bucket-funded scenario?". Documented in
+  // `computeLeveragedEquityBuckets`'s `consumedByBucketFunding`
+  // param doc.
   const { household, assumptions, appliedFutureYears } = useAllocationView();
   const buckets = useMemo(
     () =>

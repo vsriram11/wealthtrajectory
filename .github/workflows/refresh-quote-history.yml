@@ -1,0 +1,79 @@
+name: Refresh quote history
+
+# Runs the historical-price refresh pipeline:
+#   1. Re-builds the top-1000-by-AUM ETF universe via Nasdaq +
+#      Yahoo enrichment (commits `data/etf-universe.json` when it
+#      changes).
+#   2. Fetches 10y daily history for every ticker in the universe.
+#   3. Uploads 32 hash-sharded JSON files + a manifest to Vercel
+#      Blob.
+#
+# The Vercel quote API (`app/api/quote/[symbol]/route.ts`) consults
+# the manifest URL on each request and serves matching tickers
+# instantly from the CDN. Long-tail tickers (not in the universe)
+# fall through to the existing Yahoo+Finnhub dynamic path.
+#
+# Cadence: monthly. Free-tier safety analysis lives in
+# scripts/refresh-history.ts header.
+#
+# Required secrets:
+#   - BLOB_READ_WRITE_TOKEN: Vercel Blob read-write token (project
+#     settings → Storage → Blob → "Generate token").
+#
+# Manual trigger from the Actions UI is also supported via
+# workflow_dispatch.
+
+on:
+  schedule:
+    # 1st of each month at 09:00 UTC — runs from GitHub's IP pool
+    # (separate from Vercel's, so no rate-limit overlap).
+    - cron: "0 9 1 * *"
+  workflow_dispatch:
+
+# Avoid two refresh runs racing each other. cancel-in-progress is
+# explicitly FALSE — a new run waits for the in-flight one to
+# finish rather than killing it. Mid-run kill would publish a
+# partial shard set without updating the manifest (the shards
+# upload before the manifest swap), but since we use VERSIONED
+# paths the inconsistency is bounded to "unused versioned files
+# linger in Blob storage until cleanup" — readers stay consistent
+# via the still-pointing-at-old-version manifest. Better to let
+# the run complete and wait.
+concurrency:
+  group: refresh-quote-history
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Rebuild ETF universe (Nasdaq + Yahoo AUM)
+        run: npx tsx scripts/build-etf-universe.ts
+
+      - name: Commit universe drift (if any)
+        run: |
+          if ! git diff --quiet data/etf-universe.json; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add data/etf-universe.json
+            git commit -m "chore: refresh ETF universe (monthly cron)"
+            git push
+          else
+            echo "Universe unchanged."
+          fi
+
+      - name: Refresh historical prices → Vercel Blob shards
+        env:
+          BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
+        run: npx tsx scripts/refresh-history.ts

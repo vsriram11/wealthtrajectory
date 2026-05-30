@@ -36,7 +36,12 @@ import {
  * accounts.
  */
 
-export type WithdrawalBucket = "taxable" | "pre_tax" | "roth" | "hsa";
+export type WithdrawalBucket =
+  | "taxable"
+  | "pre_tax"
+  | "roth"
+  | "hsa"
+  | "education";
 
 export type WithdrawalRow = {
   bucket: WithdrawalBucket;
@@ -69,6 +74,9 @@ const BUCKET_PRIORITY: Record<WithdrawalBucket, number> = {
   pre_tax: 2,
   roth: 3,
   hsa: 4,
+  // Education last — these dollars legally can't fund retirement
+  // spending (529/Trump Account = beneficiary-locked).
+  education: 5,
 };
 
 const BUCKET_LABELS: Record<WithdrawalBucket, string> = {
@@ -76,6 +84,7 @@ const BUCKET_LABELS: Record<WithdrawalBucket, string> = {
   pre_tax: "Tax-deferred (401k / Trad IRA)",
   roth: "Roth (401k / IRA)",
   hsa: "HSA",
+  education: "Education (529 / Trump Account)",
 };
 
 const BUCKET_WHY: Record<WithdrawalBucket, string> = {
@@ -85,6 +94,8 @@ const BUCKET_WHY: Record<WithdrawalBucket, string> = {
     "Taxed as ordinary income on withdrawal. Pull at retirement-era bracket to flatten lifetime tax bill before RMDs at 73 force the issue.",
   roth: "Tax-free growth. Preserve as long as possible — the compounding here is the most valuable dollar-for-dollar in the portfolio.",
   hsa: "Tax-free for qualified medical expenses (which are common late in life). Save receipts now to reimburse later.",
+  education:
+    "Beneficiary-locked — these dollars can only pay for the beneficiary's qualified education (529) or the child's vested account (Trump). Excluded from the year-by-year retirement drawdown schedule; included here so the user sees the bucket exists but understands why it's not spendable for retirement.",
 };
 
 function bucketForAccount(a: Account): WithdrawalBucket {
@@ -93,10 +104,13 @@ function bucketForAccount(a: Account): WithdrawalBucket {
   if (t === "PRE_TAX") return "pre_tax";
   if (t === "ROTH") return "roth";
   if (t === "HSA") return "hsa";
-  // EDUCATION (529) — earmarked, not part of Independence drawdown.
-  // Mapped to "roth" so it's preserved last alongside truly
-  // protected money. Could be its own bucket later.
-  return "roth";
+  // EDUCATION (529 / Trump Account) — earmarked, beneficiary-locked,
+  // not part of retirement drawdown. Round-5 audit fix: previously
+  // collapsed into the Roth bucket, which silently inflated the
+  // schedule's tax-free runway by the 529 balance. Now lives in
+  // its own bucket so the card can display + EXCLUDE it from the
+  // drawdown engine.
+  return "education";
 }
 
 export function withdrawalSequence(
@@ -108,6 +122,7 @@ export function withdrawalSequence(
     pre_tax: emptyRow("pre_tax"),
     roth: emptyRow("roth"),
     hsa: emptyRow("hsa"),
+    education: emptyRow("education"),
   };
   for (const a of household.accounts) {
     const bucket = bucketForAccount(a);

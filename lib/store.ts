@@ -124,6 +124,12 @@ import {
   type LifecycleSliceActions,
   type LifecycleSliceState,
 } from "./store/lifecycleSlice";
+import {
+  TIME_TRAVEL_SLICE_INITIAL,
+  createTimeTravelSliceActions,
+  type TimeTravelSliceActions,
+  type TimeTravelSliceState,
+} from "./store/timeTravelSlice";
 
 // UI-state types live in `./store/uiTypes`. Re-exported here so
 // existing consumers that imported them from `@/lib/store` continue
@@ -154,7 +160,8 @@ export type AppState =
   ScenariosSliceState & ScenariosSliceActions &
   HouseholdSliceState & HouseholdSliceActions &
   HoldingsActions & AccountsActions & LiabilitiesActions & MembersActions &
-  LifecycleSliceState & LifecycleSliceActions & {
+  LifecycleSliceState & LifecycleSliceActions &
+  TimeTravelSliceState & TimeTravelSliceActions & {
   // Every field and action that used to live inline on AppState
   // is now owned by one of the slice intersections above. See
   // lib/store/*Slice.ts for per-slice ownership, including:
@@ -174,6 +181,7 @@ export type AppState =
   //   - Household + entity actions  HouseholdSliceState / Actions
   //   - Lifecycle (hydrate/import/switchToReal/resetToDemo) →
   //                                LifecycleSliceState / Actions
+  //   - Time-travel session       TimeTravelSliceState / Actions
   //
   // No fields or actions are declared here directly — the intent
   // is that every piece of state has exactly one slice that owns
@@ -225,7 +233,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   ...AUTH_SLICE_INITIAL,
   ...createAuthSliceActions(set),
   ...GOOGLE_SYNC_SLICE_INITIAL,
-  ...createGoogleSyncSliceActions(set),
+  ...createGoogleSyncSliceActions(set, get),
   ...ENCRYPTION_SLICE_INITIAL,
   ...createEncryptionSliceActions(set),
   ...createActivitySliceInitial(),
@@ -284,6 +292,15 @@ export const useAppStore = create<AppState>((set, get) => ({
     emptyHousehold: EMPTY_HOUSEHOLD,
     emptyAssumptions: EMPTY_ASSUMPTIONS,
   }),
+
+  // Time-travel (snapshot backdating) session — captures a
+  // baseline at enter, restores it at exit so the user can edit
+  // the live UI as a historical state without leaking changes
+  // into IDB or Drive. The persistence-gating lives in
+  // PersistenceHydrator + CloudSyncer (they early-return when
+  // `timeTravelActive` is set).
+  ...TIME_TRAVEL_SLICE_INITIAL,
+  ...createTimeTravelSliceActions(set),
 
   // Cross-slice overrides — small surface that needs awareness of
   // multiple slices. The MemberView slice provides a base

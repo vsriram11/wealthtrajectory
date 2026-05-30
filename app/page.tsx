@@ -24,6 +24,7 @@ import { EncryptionCard } from "./_components/data/EncryptionCard";
 import { DrawdownPhasesCard } from "./_components/projection/DrawdownPhasesCard";
 import { BackupDiscoverabilityBanner } from "./_components/data/BackupDiscoverabilityBanner";
 import { GoogleSyncCard } from "./_components/data/GoogleSyncCard";
+import { CalculatorsPage } from "./_components/shell/CalculatorsPage";
 import { GlossaryPage } from "./_components/shell/GlossaryPage";
 import { PlanPage } from "./_components/shell/PlanPage";
 import { ProjectionsPage } from "./_components/shell/ProjectionsPage";
@@ -33,6 +34,7 @@ import { EncryptionUnlockBanner } from "./_components/data/EncryptionUnlockBanne
 import { SyncShrinkageBanner } from "./_components/data/SyncShrinkageBanner";
 import { GlobalSyncBanner } from "./_components/data/GlobalSyncBanner";
 import { SignInOutcomeBanner } from "./_components/data/SignInOutcomeBanner";
+import { TimeTravelBanner } from "./_components/data/TimeTravelBanner";
 import { EmptyState } from "./_components/ui/EmptyState";
 import { QuickStart } from "./_components/data/QuickStart";
 import { HoldingCreator } from "./_components/holdings/HoldingCreator";
@@ -89,6 +91,7 @@ export default function Home() {
       <QuoteCloudSync />
       <ServiceWorkerRegistrar />
       <SessionEnforcer />
+      <TimeTravelBanner />
       <DemoHeader />
       <SignInOutcomeBanner />
       <EncryptionUnlockBanner />
@@ -144,6 +147,7 @@ export default function Home() {
       {page === "allocation" && <AllocationPage />}
       {page === "projections" && <ProjectionsPage />}
       {page === "plan" && <PlanPage />}
+      {page === "calculators" && <CalculatorsPage />}
       {page === "glossary" && <GlossaryPage />}
       {page === "data" && (
         <>

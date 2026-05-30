@@ -316,3 +316,100 @@ describe("resolveActiveProjection — active-scenario overlay", () => {
     expect(out.scenarioName).toBeNull();
   });
 });
+
+describe("resolveActiveProjection — scenario-neutral mode (ScenarioComparisonChart regression)", () => {
+  // User-reported bug: switching scenarios on the Scenarios tab
+  // caused the comparison plot to (a) mislabel baseline as the
+  // selected scenario AND (b) "stop showing all scenarios"
+  // (curves overlapped because the active scenario's overrides
+  // were applied to the chart's already-modified base, doubled,
+  // making it visually collapse). Root cause: chart called
+  // `useActiveProjection` which applies the active scenario.
+  //
+  // Fix: chart switched to `useScenarioNeutralProjection`, which
+  // calls `resolveActiveProjection` with `activeId: null`.
+  // Pin the contract: passing `activeId: null` returns the
+  // baseline household/assumptions regardless of how many
+  // scenarios are defined or which is "active in the store."
+
+  it("activeId: null returns the BASELINE projection — scenario overrides ignored", () => {
+    useAppStore.setState({
+      assumptions: {
+        targetNetWorthUSD: 2_000_000,
+        withdrawalRate: 0.04,
+        legacyFloorUSD: 0,
+        drawdownHorizonYears: 30,
+        expectedInflationRate: 0.025,
+      },
+      scenarios: [
+        {
+          id: "scn-bull",
+          name: "Bull case",
+          color: "#22c55e",
+          createdAt: 0,
+          overrides: {
+            targetNetWorthUSD: 5_000_000, // 2.5× baseline
+          },
+        },
+      ],
+      activeScenarioId: "scn-bull",
+    });
+
+    // With activeId: null, the scenario should NOT be applied —
+    // assumptions.targetNetWorthUSD must equal the baseline 2M,
+    // not the scenario's 5M.
+    const out = resolveActiveProjection({
+      ...snapshot(),
+      memberId: null,
+      liquidityView: "total",
+      activeId: null,
+    });
+    expect(out.assumptions.targetNetWorthUSD).toBe(2_000_000);
+    expect(out.scenarioName).toBeNull();
+  });
+
+  it("activeId: null vs activeId: <scenario>: outputs differ in scenario-affected fields", () => {
+    useAppStore.setState({
+      assumptions: {
+        targetNetWorthUSD: 2_000_000,
+        withdrawalRate: 0.04,
+        legacyFloorUSD: 0,
+        drawdownHorizonYears: 30,
+        expectedInflationRate: 0.025,
+      },
+      scenarios: [
+        {
+          id: "scn-bear",
+          name: "Bear case",
+          color: "#ef4444",
+          createdAt: 0,
+          overrides: { targetNetWorthUSD: 3_000_000 },
+        },
+      ],
+      activeScenarioId: "scn-bear",
+    });
+
+    const baseline = resolveActiveProjection({
+      ...snapshot(),
+      memberId: null,
+      liquidityView: "total",
+      activeId: null,
+    });
+    const withActive = resolveActiveProjection({
+      ...snapshot(),
+      memberId: null,
+      liquidityView: "total",
+      activeId: "scn-bear",
+    });
+    // These MUST be different on the overridden field — otherwise
+    // the scenario overlay does nothing, AND the
+    // ScenarioComparisonChart's "Baseline" curve would equal its
+    // "active scenario" curve (which is exactly the visual bug
+    // the user reported).
+    expect(baseline.assumptions.targetNetWorthUSD).not.toBe(
+      withActive.assumptions.targetNetWorthUSD,
+    );
+    expect(baseline.assumptions.targetNetWorthUSD).toBe(2_000_000);
+    expect(withActive.assumptions.targetNetWorthUSD).toBe(3_000_000);
+  });
+});
