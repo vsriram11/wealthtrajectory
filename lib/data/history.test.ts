@@ -457,6 +457,75 @@ describe("overlaySnapshots", () => {
     expect(out[2].netWorthUSD).toBe(1500); // interpolated half-way
     expect(out[3].netWorthUSD).toBe(2000); // live anchor pinned
   });
+
+  it("anchors a time-travel snapshot at shares × snap.lastPriceUSD instead of recorded NW (user-reported jump fix)", () => {
+    // The bug: time-travel save preserves valueUSD (today's
+    // price × shares) while updating lastPriceUSD to the
+    // historical close at the chosen snapshot date. The recorded
+    // snap.netWorthUSD therefore reflects today's prices on a
+    // past-dated row. Using it as the chart anchor produces a
+    // visible vertical jump from the back-projected pre-snapshot
+    // region (which uses past prices). Fix: anchor at
+    // shares × lastPriceUSD so the snap value reflects its
+    // actual stored DATE's prices.
+    const live: Household = {
+      id: "hh",
+      members: [{ id: "m1", displayName: "Tester" } as never],
+      accounts: [
+        {
+          id: "a1",
+          displayName: "Brokerage",
+          category: "BROKERAGE",
+          ownerId: "m1" as never,
+          monthlyContributionUSD: 0,
+          holdings: [
+            // Equity: live valueUSD reflects today's price; snap
+            // has historical lastPriceUSD pinned to the past date.
+            {
+              kind: "equity",
+              id: "VOO_ID" as never,
+              symbol: "VOO",
+              shares: 100,
+              // Snap's lastPriceUSD = historical close.
+              lastPriceUSD: 450,
+              lastPricedAt: 200,
+              isManualPrice: false,
+              enteredAsShares: false,
+              acquiredAt: null,
+              // Snap's valueUSD: TODAY's value preserved through
+              // time-travel save (R1 fix).
+              valueUSD: 50_000,
+              expectedRealCAGR: 0.07,
+              leverage: 1,
+              styleBox: { LARGE_BLEND: 1 } as never,
+              geography: { US: 1, DEVELOPED: 0, EMERGING: 0 },
+            } as never,
+          ],
+        },
+      ],
+      liabilities: [],
+    };
+    // Time-travel snap at t=200 with recorded NW = $50k (today's
+    // values pinned). But effective Dec-30 value is
+    // shares=100 × lastPriceUSD=$450 = $45k.
+    const tt: Snapshot = {
+      t: 200,
+      netWorthUSD: 50_000,
+      household: live,
+    };
+    const baseSeries: HistoryPoint[] = [
+      { t: 100, netWorthUSD: 0 },
+      { t: 200, netWorthUSD: 0 },
+      { t: 300, netWorthUSD: 0 },
+      { t: 400, netWorthUSD: 0 },
+    ];
+    const out = overlaySnapshots(baseSeries, [tt]);
+    // Anchor at t=200 must be effective NW ($45k), NOT
+    // recorded NW ($50k). Without the fix, the chart would
+    // anchor at $50k and create a $5k visible discontinuity
+    // against any back-projected region.
+    expect(out[1].netWorthUSD).toBe(45_000);
+  });
 });
 
 describe("reconstructHistory", () => {

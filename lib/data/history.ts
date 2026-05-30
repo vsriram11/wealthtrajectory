@@ -333,10 +333,14 @@ export function reconstructHistory(
         newlyAddedIds,
         newlyAddedLiabilityIds,
       ) + newlyAddedFlatUSD;
-    // Compute the snapshot's effective anchor NW: recorded NW +
-    // any backdated live holdings missing from the snapshot
-    // (mirrors overlaySnapshots' adjustForBackdated).
-    let snapAnchorNW = firstSnap.netWorthUSD;
+    // Compute the snapshot's effective anchor NW: shares ×
+    // snap.lastPriceUSD-based effective NW + any backdated live
+    // holdings missing from the snapshot. This MUST mirror
+    // overlaySnapshots' anchor computation so the smoothed pre-
+    // snap boundary actually meets the chart anchor (using
+    // s.netWorthUSD here while overlay uses effectiveSnapNW would
+    // produce a residual jump = time-travel-price-vs-live delta).
+    let snapAnchorNW = effectiveSnapNW(firstSnap);
     const snapIds = new Set<string>();
     for (const acct of firstSnap.household.accounts) {
       for (const h of acct.holdings ?? []) snapIds.add(h.id);
@@ -502,6 +506,68 @@ function earliestQuoteTimestamp(quotes: Record<string, Quote | null>): number | 
 }
 
 /**
+ * Compute a snapshot's "effective" chart anchor NW.
+ *
+ * The stored `snap.netWorthUSD` was computed via
+ * `householdNetWorth` at SAVE TIME — sum of valueUSDs minus
+ * liabilities. For ordinary auto-snaps, valueUSD reflects today's
+ * prices (which IS the save time), so the stored NW is correct
+ * for charting purposes.
+ *
+ * For TIME-TRAVEL snaps it's different. During a time-travel
+ * session the historical-price fetch updates each holding's
+ * `lastPriceUSD` to the historical close at the chosen date but
+ * leaves `valueUSD` alive — i.e. `valueUSD` reflects MAY 2026
+ * prices on a DEC 2025-dated row. The chart anchor then sits at
+ * "today's portfolio value pinned to a past date," creating a
+ * vertical discontinuity against the back-projected pre-snapshot
+ * region (which uses Dec 2025 prices via CAGR/quote interpolation).
+ *
+ * Fix: recompute the chart anchor using `shares × lastPriceUSD`
+ * for live-priceable holdings — the actual snapshot-date prices.
+ * For cash / real_estate / private_stock / other (kinds that
+ * don't fluctuate with market data) we keep `valueUSD`. For
+ * manual-priced live-priceable holdings, the lastPriceUSD IS the
+ * user-set price (which equals the value path), so `valueUSD`
+ * also works.
+ */
+function effectiveSnapNW(snap: Snapshot): number {
+  if (!snap.household) return snap.netWorthUSD;
+  let nw = 0;
+  for (const acct of snap.household.accounts) {
+    for (const h of acct.holdings) {
+      if (
+        h.kind === "cash" ||
+        h.kind === "real_estate" ||
+        h.kind === "private_stock" ||
+        h.kind === "other"
+      ) {
+        nw += h.valueUSD;
+        continue;
+      }
+      // Live-priceable kinds.
+      if (h.isManualPrice) {
+        nw += h.valueUSD;
+        continue;
+      }
+      if (
+        Number.isFinite(h.lastPriceUSD) &&
+        h.lastPriceUSD > 0 &&
+        Number.isFinite(h.shares)
+      ) {
+        nw += h.shares * h.lastPriceUSD;
+      } else {
+        nw += h.valueUSD;
+      }
+    }
+  }
+  for (const l of snap.household.liabilities) {
+    nw -= l.balanceUSD;
+  }
+  return nw;
+}
+
+/**
  * Overlay real net-worth snapshots onto a reconstructed series. For
  * each output bucket, prefer the most-recent snapshot at-or-before that
  * timestamp; fall back to the reconstructed value otherwise. The result
@@ -599,7 +665,12 @@ export function overlaySnapshots(
     }
     const anchors: Anchor[] = sorted.map((s) => ({
       t: s.t,
-      netWorthUSD: s.netWorthUSD + adjustForBackdated(s),
+      // Use effective NW (shares × snap.lastPriceUSD for
+      // live-priceable holdings) instead of the recorded
+      // `s.netWorthUSD` — for time-travel snaps, the recorded
+      // value was computed with TODAY's valueUSDs pinned to a
+      // PAST date, which creates a chart discontinuity.
+      netWorthUSD: effectiveSnapNW(s) + adjustForBackdated(s),
     }));
     // Add the live anchor. Two cases:
     //   1. There's no snapshot at the last-bucket t: append the
