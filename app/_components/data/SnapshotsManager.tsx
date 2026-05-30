@@ -15,6 +15,7 @@ import {
   householdForRollups,
   householdNetWorth,
 } from "@/lib/types";
+import { parseISODate } from "@/lib/dateInput";
 import { memberFilteredSnapshots } from "@/lib/data/history";
 import { formatUSD } from "@/lib/format";
 import { useActiveProjection } from "@/lib/projection/useActiveProjection";
@@ -839,10 +840,12 @@ function toISO(t: number): string {
 }
 
 function parseISO(s: string): number {
-  // Anchor to noon UTC so timezone wobble doesn't push the snapshot
-  // into the wrong calendar day.
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return NaN;
-  return new Date(`${s}T12:00:00Z`).getTime();
+  // Routes through the shared helper. Round-trip validation
+  // protects against silent overwrite: "2024-02-31" used to be
+  // accepted and silently shifted to March 2, overwriting any
+  // real March 2 snapshot. Now rejected → handler early-returns.
+  const t = parseISODate(s);
+  return t === null ? NaN : t;
 }
 
 function formatDate(t: number): string {

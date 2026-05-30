@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { isPastOrToday, parseISODate, todayISODate } from "@/lib/dateInput";
 import { useAppStore } from "@/lib/store";
 
 /**
@@ -137,28 +138,17 @@ export function EnterTimeTravelModal({
   );
 }
 
+// Local re-exports (renamed for compatibility with existing usage
+// inside the file). The shared `parseISODate` + `isPastOrToday`
+// helpers in lib/dateInput.ts are the source of truth — see that
+// file for the silent-overwrite history + round-trip semantics.
 function todayISO(): string {
-  return new Date().toISOString().slice(0, 10);
+  return todayISODate();
 }
 
 function isValidISO(s: string): boolean {
-  // 1. Shape: YYYY-MM-DD
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return false;
-  // 2. Parses to a finite timestamp (catches 2024-02-31 etc — JS
-  //    over-normalizes invalid dates so we round-trip-check).
-  const t = Date.parse(`${s}T12:00:00Z`);
-  if (!Number.isFinite(t)) return false;
-  const roundtrip = new Date(t).toISOString().slice(0, 10);
-  if (roundtrip !== s) return false;
-  // 3. Not in the future. CRITICAL: compare DATES not TIMESTAMPS —
-  //    the parsed t is anchored to noon UTC, and Date.now() is
-  //    wall clock. A user clicking before noon UTC would see
-  //    today's date parse to a future-noon, fail the gate, and
-  //    the Confirm button would silently stay disabled. Bug
-  //    surfaced by the user as "button is a no-op." Fix:
-  //    lexicographic date-string comparison against today's UTC
-  //    date. "Today" is always valid; "tomorrow" never is.
-  const todayUtc = new Date().toISOString().slice(0, 10);
-  if (s > todayUtc) return false;
-  return true;
+  // Combined check: well-formed shape, parseable, NOT in future,
+  // AND not over-normalized (e.g. 2024-02-31). All four conditions
+  // live in the shared helper now.
+  return parseISODate(s) !== null && isPastOrToday(s);
 }

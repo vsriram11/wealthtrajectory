@@ -8,6 +8,7 @@ import {
   type Snapshot,
 } from "@/lib/persistence/persistence";
 import { captureSnapshotAppState } from "@/lib/persistence/snapshotAppState";
+import { parseISODate } from "@/lib/dateInput";
 import { householdNetWorth } from "@/lib/types";
 
 /**
@@ -269,8 +270,10 @@ export function TimeTravelBanner() {
 }
 
 function parseISO(s: string): number {
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(s)) return NaN;
-  // Anchor to noon UTC — same convention SnapshotsManager uses so
-  // collision detection by `t` is consistent across entry paths.
-  return new Date(`${s}T12:00:00Z`).getTime();
+  // Delegates to the shared helper. Returns NaN (not null) for
+  // back-compat with existing callers that use `Number.isFinite`.
+  // Round-trip validation included — protects against silent
+  // overwrite on dates like "2024-02-31" (audit BLOCK fix).
+  const t = parseISODate(s);
+  return t === null ? NaN : t;
 }

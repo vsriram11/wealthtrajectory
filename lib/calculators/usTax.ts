@@ -508,10 +508,28 @@ function computeAMT(args: {
 
   const amtiExcess = Math.max(0, amti - amtExemption);
 
-  // Split AMTI excess into ordinary + LTCG portions. LTCG keeps
-  // its preferential rate even inside AMT.
-  const ltcgInExcess = Math.min(taxableLtcgUSD, amtiExcess);
-  const ordinaryInExcess = amtiExcess - ltcgInExcess;
+  // Form 6251 Part III split: ORDINARY portion of AMTI excess
+  // gets 26%/28% AMT rates; LTCG portion of AMTI excess gets the
+  // regular LTCG bracket schedule (0%/15%/20%) STACKED on top of
+  // the ordinary AMTI excess.
+  //
+  // Round-4 audit BLOCK fix: the prior implementation put LTCG
+  // at the BOTTOM of the excess (`min(taxableLtcgUSD, amtiExcess)`)
+  // and used a flat 15% rate. This was wrong in two directions:
+  //   - When AMTI excess < taxableLtcg, ALL the excess was
+  //     mis-attributed to LTCG, leaving ordinaryInExcess=0 and
+  //     understating TMT (no 26/28% applied to anything).
+  //   - The flat 15% rate overcharged the 0% LTCG bracket
+  //     (single ord < $48,350 → first LTCG dollars should be 0%)
+  //     and undercharged the 20% bracket (single ord > $533,400).
+  //
+  // Correct Form 6251 split:
+  //   ordinaryInExcess = max(0, amtiExcess - taxableLtcgUSD)
+  //   ltcgInExcess     = amtiExcess - ordinaryInExcess
+  // Then stack LTCG above ordinary using the existing applyBrackets
+  // helper, same way regular tax stacks LTCG above ordinary income.
+  const ordinaryInExcess = Math.max(0, amtiExcess - taxableLtcgUSD);
+  const ltcgInExcess = amtiExcess - ordinaryInExcess;
 
   // Apply 26%/28% to the ordinary portion.
   const breakpoint = AMT_RATE_BREAKPOINT_2025[filingStatus];
@@ -520,18 +538,15 @@ function computeAMT(args: {
   const tmtOrdinary =
     ordinaryAt26 * AMT_RATE_LOW + ordinaryAt28 * AMT_RATE_HIGH;
 
-  // LTCG portion: simplest correct approximation is to apply the
-  // weighted LTCG bracket schedule. For the AMT context we use
-  // the same LTCG brackets as regular tax (the IRS keeps LTCG
-  // preferential treatment for AMT). We treat it conservatively
-  // as 15% on the LTCG portion which matches the typical
-  // middle-bracket rate; high earners ($518k+) face 20% but this
-  // calculator's audience is the 0/15/20 LTCG zone — and being
-  // off by ~$1k on the rare 20%-bracket case is acceptable
-  // back-of-envelope precision.
-  // For a strict implementation we'd run the LTCG brackets here
-  // again — defer to a future refinement.
-  const tmtLtcg = ltcgInExcess * 0.15;
+  // LTCG portion uses the regular LTCG bracket schedule with
+  // `ordinaryInExcess` as the stacking floor (matches Form 6251
+  // Part III line 40+ — capital gains worksheet).
+  const ltcgSchedule = FEDERAL_LTCG_BRACKETS_2025[filingStatus];
+  const tmtLtcg = applyBrackets(
+    ltcgSchedule,
+    ltcgInExcess,
+    ordinaryInExcess,
+  ).tax;
 
   const tmt = tmtOrdinary + tmtLtcg;
   // AMT = excess of TMT over regular tax. Regular tax for this
