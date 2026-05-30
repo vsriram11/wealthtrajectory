@@ -25,6 +25,17 @@ function sleep(ms: number) {
 export function PriceRefresher() {
   const household = useAppStore((s) => s.household);
   const applyLivePrice = useAppStore((s) => s.applyLivePrice);
+  // Time-travel session gate (user-reported UX bug): while the
+  // user is editing a backdated session, the live-quote refresh
+  // was overwriting their manual price entries with CURRENT
+  // market prices — making it impossible to capture historical
+  // values. The whole point of the session is "the app as it
+  // looked on date D", so live quotes should NOT apply.
+  //
+  // Future enhancement: fetch HISTORICAL quotes for the chosen
+  // date instead of skipping refresh entirely. For now, freezing
+  // values to whatever the user enters is the correct UX.
+  const timeTravelActive = useAppStore((s) => s.timeTravelActive);
 
   // Track per-holding identity (not just the unique symbol set) so
   // adding a SECOND VOO doesn't skip the refresh — the previous
@@ -61,6 +72,10 @@ export function PriceRefresher() {
   }, [household.accounts]);
 
   useEffect(() => {
+    // Time-travel gate — skip the entire refresh pass while
+    // the user is in a backdated session. Manual price entries
+    // stay untouched.
+    if (timeTravelActive) return;
     const symbols = uniqueSymbols(household);
     if (symbols.length === 0) return;
     let cancelled = false;
@@ -68,6 +83,11 @@ export function PriceRefresher() {
       let lastWasNetwork = false;
       for (const s of symbols) {
         if (cancelled) return;
+        // Defense in depth: check the time-travel flag at each
+        // iteration too. The user could enter time-travel mid-
+        // refresh; we want to abort immediately rather than
+        // overwrite their nascent manual entries.
+        if (useAppStore.getState().timeTravelActive) return;
         if (lastWasNetwork) await sleep(NETWORK_SPACING_MS);
         const t0 =
           typeof performance !== "undefined" ? performance.now() : Date.now();
@@ -78,6 +98,10 @@ export function PriceRefresher() {
             : Date.now()) - t0;
         lastWasNetwork = elapsed > NETWORK_THRESHOLD_MS;
         if (cancelled) return;
+        // Fire-time gate (mirror of the subscribe-time check):
+        // catches the "entered time-travel during the in-flight
+        // network round-trip" race.
+        if (useAppStore.getState().timeTravelActive) return;
         if (q && q.currentPrice > 0) {
           applyLivePrice(s, q.currentPrice, q.fetchedAt);
         }
@@ -87,7 +111,7 @@ export function PriceRefresher() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [holdingsKey, applyLivePrice]);
+  }, [holdingsKey, applyLivePrice, timeTravelActive]);
 
   return null;
 }
