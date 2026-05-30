@@ -474,6 +474,19 @@ export function overlaySnapshots(
    * the chart and the headline NW consistent.
    */
   liveNetWorth?: number,
+  /**
+   * Optional live household. When supplied, each snapshot anchor's
+   * recorded `netWorthUSD` is AUGMENTED to include the valueUSD of
+   * any LIVE holdings that are backdated (`acquiredAt <= snap.t`)
+   * but absent from THIS snapshot's embedded household. Without
+   * this, a snapshot recorded BEFORE the user added a backdated
+   * holding produces a chart anchor that ignores the holding —
+   * even though the holding's acquiredAt claims it existed at the
+   * snapshot's time. The user sees the chart "forget" the
+   * backdated holding for any snapshot recorded before the user
+   * entered it. R-deep audit user-reported bug.
+   */
+  liveHousehold?: Household,
 ): HistoryPoint[] {
   // Round-1 audit MED: don't drop legitimate zero/negative-NW
   // snapshots here. A user underwater (high mortgage, low assets)
@@ -496,9 +509,39 @@ export function overlaySnapshots(
   if (usable.length > 0 || liveAnchorEnabled) {
     type Anchor = { t: number; netWorthUSD: number };
     const sorted = [...usable].sort((a, b) => a.t - b.t);
+    // Per-snapshot adjustment: if a LIVE holding has
+    // acquiredAt <= snap.t but the snapshot's embedded household
+    // doesn't contain it (snapshot was recorded BEFORE the user
+    // added the holding), add the holding's valueUSD to this
+    // snapshot's anchor NW. Without this, snapshots recorded
+    // before a backdated entry produce chart anchors that ignore
+    // the holding — even though the user claims it existed then.
+    function adjustForBackdated(snap: Snapshot): number {
+      let extra = 0;
+      if (!liveHousehold || !snap.household) return extra;
+      const snapIds = new Set<string>();
+      for (const acct of snap.household.accounts) {
+        for (const h of acct.holdings ?? []) {
+          snapIds.add(h.id);
+        }
+      }
+      for (const acct of liveHousehold.accounts) {
+        for (const h of acct.holdings ?? []) {
+          if (snapIds.has(h.id)) continue;
+          const acquiredAt =
+            "acquiredAt" in h
+              ? (h.acquiredAt as number | null | undefined)
+              : null;
+          if (acquiredAt == null || acquiredAt > snap.t) continue;
+          if (!Number.isFinite(h.valueUSD) || h.valueUSD <= 0) continue;
+          extra += h.valueUSD;
+        }
+      }
+      return extra;
+    }
     const anchors: Anchor[] = sorted.map((s) => ({
       t: s.t,
-      netWorthUSD: s.netWorthUSD,
+      netWorthUSD: s.netWorthUSD + adjustForBackdated(s),
     }));
     // Add the live anchor. Two cases:
     //   1. There's no snapshot at the last-bucket t: append the

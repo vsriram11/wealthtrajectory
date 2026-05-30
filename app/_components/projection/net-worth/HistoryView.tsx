@@ -159,6 +159,14 @@ export function HistoryView({
         // card (and so a stale snapshot or out-of-date quote history
         // can't drop the right edge to ~$0).
         netWorth,
+        // Live household for the backdated-holding augmentation:
+        // snapshots recorded BEFORE the user added a backdated
+        // holding get their anchor NW bumped up to include the
+        // holding (per acquiredAt). User-reported bug: time-travel
+        // snapshot at Dec 2025 contains a private stock added in
+        // May 2026, but older auto-snapshots from Aug/Oct 2025
+        // don't — making the chart's Aug-Dec region understate.
+        household,
       ),
     [household, quotes, range, filteredSnapshots, netWorth],
   );

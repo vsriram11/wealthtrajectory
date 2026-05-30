@@ -348,6 +348,102 @@ describe("overlaySnapshots", () => {
     expect(out).toEqual(base);
   });
 
+  it("augments a snapshot's anchor NW with backdated live holdings missing from that snapshot (user-reported bug)", () => {
+    // User scenario: added a private_stock in May 2026 with
+    // acquiredAt=2021. There's an auto-snapshot at t=200 recorded
+    // BEFORE the holding was added (so its embedded household
+    // doesn't contain it), and a time-travel snapshot at t=400
+    // recorded AFTER (so its household DOES contain it). The
+    // chart's anchor for the t=200 snapshot should still INCLUDE
+    // the private_stock — because the holding's acquiredAt claims
+    // it existed at t=200.
+    const live: Household = {
+      id: "hh",
+      members: [{ id: "m1", displayName: "Tester" } as never],
+      accounts: [
+        {
+          id: "a1",
+          displayName: "Brokerage",
+          category: "BROKERAGE",
+          ownerId: "m1" as never,
+          monthlyContributionUSD: 0,
+          holdings: [
+            // VOO present everywhere (in both snapshots + live).
+            {
+              kind: "equity",
+              id: "VOO_ID" as never,
+              symbol: "VOO",
+              shares: 100,
+              lastPriceUSD: 500,
+              lastPricedAt: 1_700_000_000_000,
+              isManualPrice: false,
+              enteredAsShares: false,
+              acquiredAt: null,
+              valueUSD: 50_000,
+              expectedRealCAGR: 0.07,
+              leverage: 1,
+              styleBox: { LARGE_BLEND: 1 } as never,
+              geography: { US: 1, DEVELOPED: 0, EMERGING: 0 },
+            } as never,
+            // Private stock backdated to t=50, added in live ONLY.
+            {
+              kind: "private_stock",
+              id: "PRIV_ID" as never,
+              displayName: "Cool startup",
+              shares: 1000,
+              lastPriceUSD: 100,
+              lastPricedAt: null,
+              isManualPrice: true,
+              enteredAsShares: false,
+              acquiredAt: 50,
+              valueUSD: 100_000,
+              expectedRealCAGR: 0.05,
+              isIlliquid: true,
+            } as never,
+          ],
+        },
+      ],
+      liabilities: [],
+    };
+    // Snapshot at t=200: only VOO. NW = $50k.
+    const snapEarly: Snapshot = {
+      t: 200,
+      netWorthUSD: 50_000,
+      household: {
+        ...live,
+        accounts: [
+          {
+            ...live.accounts[0],
+            holdings: [live.accounts[0].holdings[0]],
+          },
+        ],
+      },
+    };
+    // Snapshot at t=400: VOO + private. NW = $150k.
+    const snapLate: Snapshot = {
+      t: 400,
+      netWorthUSD: 150_000,
+      household: live,
+    };
+    const baseSeries: HistoryPoint[] = [
+      { t: 100, netWorthUSD: 0 },
+      { t: 200, netWorthUSD: 0 },
+      { t: 300, netWorthUSD: 0 },
+      { t: 400, netWorthUSD: 0 },
+    ];
+    // Without the live-household pass: t=200 anchor is $50k, t=400
+    // is $150k → interpolated t=300 = $100k. Chart "loses" the
+    // private stock for the Aug-Dec region.
+    // WITH live-household: t=200 anchor adjusted to $50k + $100k
+    // backdated private = $150k. Interpolated t=300 between
+    // [200, 150k] and [400, 150k] = $150k. Chart shows private
+    // stock consistently from t=200 onward.
+    const out = overlaySnapshots(baseSeries, [snapEarly, snapLate], undefined, live);
+    expect(out[1].netWorthUSD).toBe(150_000); // t=200 anchor augmented
+    expect(out[2].netWorthUSD).toBe(150_000); // t=300 interpolated flat
+    expect(out[3].netWorthUSD).toBe(150_000); // t=400 anchor unchanged
+  });
+
   it("liveNetWorth acts as a right-edge anchor: interpolates between last snapshot and live (no flat plateau)", () => {
     // Snapshot at t=200 with NW=$1000, live NW=$2000 pinned at
     // last bucket t=400. Bucket at t=300 sits half-way between
