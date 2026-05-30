@@ -81,6 +81,44 @@ async function fetchNasdaqUniverse(): Promise<string[]> {
   return tickers;
 }
 
+async function sleep(ms: number): Promise<void> {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * Retry-with-backoff wrapper for transient Yahoo errors. The
+ * crumb / quote endpoints regularly 429 from shared CI IPs
+ * (GitHub Actions runners are heavily throttled by Yahoo's WAF,
+ * same as Vercel's). A handful of seconds of backoff usually
+ * clears the rolling window; we try 5 attempts with exponential
+ * backoff before giving up.
+ */
+async function withRetry<T>(
+  label: string,
+  fn: () => Promise<T>,
+  maxAttempts = 5,
+): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      const msg = e instanceof Error ? e.message : String(e);
+      // Only retry on 429 / 5xx. Permanent errors (parse failure,
+      // 404, malformed response) bubble immediately.
+      if (!/HTTP (429|5\d\d)/.test(msg)) throw e;
+      if (attempt === maxAttempts) break;
+      const backoffMs = 1000 * Math.pow(2, attempt); // 2, 4, 8, 16, 32s
+      console.warn(
+        `  ${label} attempt ${attempt}/${maxAttempts} failed (${msg}); retrying in ${backoffMs}ms…`,
+      );
+      await sleep(backoffMs);
+    }
+  }
+  throw lastErr;
+}
+
 async function getYahooSession(): Promise<{ cookie: string; crumb: string }> {
   const cookieRes = await fetch("https://fc.yahoo.com/", {
     headers: browserHeaders(),
@@ -121,12 +159,17 @@ async function fetchAumBatch(
   url.searchParams.set("symbols", symbols.join(","));
   url.searchParams.set("fields", "symbol,netAssets,longName,quoteType");
   url.searchParams.set("crumb", session.crumb);
-  const res = await fetch(url.toString(), {
-    headers: browserHeaders({ Cookie: session.cookie }),
+  const res = await withRetry(`AUM batch ${symbols[0]}…`, async () => {
+    const r = await fetch(url.toString(), {
+      headers: browserHeaders({ Cookie: session.cookie }),
+    });
+    if (!r.ok) {
+      throw new Error(
+        `Yahoo quote batch ${symbols[0]}…: HTTP ${r.status}`,
+      );
+    }
+    return r;
   });
-  if (!res.ok) {
-    throw new Error(`Yahoo quote batch ${symbols[0]}…: HTTP ${res.status}`);
-  }
   const json = (await res.json()) as {
     quoteResponse?: {
       result?: Array<{ symbol?: string; netAssets?: number }>;
@@ -175,10 +218,54 @@ async function main() {
   const universe = await fetchNasdaqUniverse();
 
   // Stage 2: AUM enrichment.
-  const session = await getYahooSession();
+  //
+  // Yahoo's session/quote endpoints rate-limit shared CI IPs
+  // hard (GitHub Actions runners + Vercel are both flagged).
+  // If we can't establish a session at all, fall back to KEEPING
+  // the existing universe.json: it was built from a recent
+  // successful run, the top ETFs by AUM are stable across months,
+  // and the downstream refresh-history step doesn't need crumb
+  // auth. A transient Yahoo outage shouldn't fail the entire
+  // pipeline.
+  let session: { cookie: string; crumb: string } | null = null;
+  try {
+    session = await withRetry("Yahoo session", getYahooSession);
+  } catch (e) {
+    console.warn(
+      `Yahoo session unreachable after retries (${e instanceof Error ? e.message : e}); keeping existing universe.json without re-ranking.`,
+    );
+  }
+
+  if (!session) {
+    // Verify the existing file is at least readable + sane; if
+    // not, fail loud so the operator notices.
+    try {
+      const existing = JSON.parse(
+        await (await import("node:fs/promises")).readFile(OUTPUT_PATH, "utf8"),
+      ) as { tickers?: string[] };
+      if (!existing.tickers || existing.tickers.length < 100) {
+        throw new Error(`existing universe.json has only ${existing.tickers?.length ?? 0} tickers — refusing to keep`);
+      }
+      console.log(
+        `Keeping existing universe (${existing.tickers.length} tickers); no rewrite this run.`,
+      );
+      return;
+    } catch (e) {
+      throw new Error(
+        `Yahoo session failed AND existing universe.json unusable: ${e instanceof Error ? e.message : e}`,
+      );
+    }
+  }
+
   const enriched = await enrichWithAum(universe, session);
 
   // Stage 3: sort by AUM, take top N.
+  if (enriched.length === 0) {
+    console.warn(
+      "AUM enrichment returned 0 results (Yahoo rate-limited every batch); keeping existing universe.",
+    );
+    return;
+  }
   enriched.sort((a, b) => b.netAssets - a.netAssets);
   const top = enriched.slice(0, TOP_N).map((r) => r.symbol);
   console.log(`Top by AUM: ${top.length} tickers`);
