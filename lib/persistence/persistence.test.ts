@@ -810,3 +810,103 @@ describe("Snapshot.appState — back-compat + per-member preservation", () => {
     ).toBe(4_000);
   });
 });
+
+describe("Time-travel session persistence — round-trip + lifecycle", () => {
+  it("returns null when no session has been saved", async () => {
+    const { loadTimeTravelSession } = await freshModule();
+    const out = await loadTimeTravelSession();
+    expect(out).toBeNull();
+  });
+
+  it("round-trips a full session (household + baseline + editing target)", async () => {
+    const { loadTimeTravelSession, saveTimeTravelSession } =
+      await freshModule();
+    const baselineHh: Household = {
+      ...EMPTY_HH,
+      id: "hh-baseline" as never,
+    };
+    const editedHh: Household = {
+      ...EMPTY_HH,
+      id: "hh-edited" as never,
+    };
+    await saveTimeTravelSession({
+      timeTravelDate: "2023-06-15",
+      editingSnapshotT: 1_700_000_000_000,
+      household: editedHh,
+      assumptions: ASSUMP,
+      baselineHousehold: baselineHh,
+      baselineAssumptions: ASSUMP,
+    });
+    const out = await loadTimeTravelSession();
+    expect(out).not.toBeNull();
+    expect(out!.timeTravelDate).toBe("2023-06-15");
+    expect(out!.editingSnapshotT).toBe(1_700_000_000_000);
+    expect(out!.household.id).toBe("hh-edited");
+    expect(out!.baselineHousehold.id).toBe("hh-baseline");
+    expect(out!.savedAt).toBeGreaterThan(0);
+  });
+
+  it("clearTimeTravelSession wipes the row independently of the live state", async () => {
+    const {
+      clearTimeTravelSession,
+      loadRealState,
+      loadTimeTravelSession,
+      saveRealState,
+      saveTimeTravelSession,
+    } = await freshModule();
+    await saveRealState({ household: EMPTY_HH, assumptions: ASSUMP });
+    await saveTimeTravelSession({
+      timeTravelDate: "2023-06-15",
+      editingSnapshotT: null,
+      household: EMPTY_HH,
+      assumptions: ASSUMP,
+      baselineHousehold: EMPTY_HH,
+      baselineAssumptions: ASSUMP,
+    });
+    await clearTimeTravelSession();
+    // Session is gone — but the live state remains untouched.
+    expect(await loadTimeTravelSession()).toBeNull();
+    expect(await loadRealState()).not.toBeNull();
+  });
+
+  it("clearRealState ALSO removes any persisted session (wipe is atomic)", async () => {
+    const {
+      clearRealState,
+      loadTimeTravelSession,
+      saveRealState,
+      saveTimeTravelSession,
+    } = await freshModule();
+    await saveRealState({ household: EMPTY_HH, assumptions: ASSUMP });
+    await saveTimeTravelSession({
+      timeTravelDate: "2023-06-15",
+      editingSnapshotT: null,
+      household: EMPTY_HH,
+      assumptions: ASSUMP,
+      baselineHousehold: EMPTY_HH,
+      baselineAssumptions: ASSUMP,
+    });
+    await clearRealState();
+    expect(await loadTimeTravelSession()).toBeNull();
+  });
+
+  it("rejects a session row whose schemaVersion is from a future client", async () => {
+    const { loadTimeTravelSession, saveTimeTravelSession } =
+      await freshModule();
+    await saveTimeTravelSession({
+      timeTravelDate: "2023-06-15",
+      editingSnapshotT: null,
+      household: EMPTY_HH,
+      assumptions: ASSUMP,
+      baselineHousehold: EMPTY_HH,
+      baselineAssumptions: ASSUMP,
+    });
+    const { default: Dexie } = await import("dexie");
+    const db = new Dexie("WealthTrajectory");
+    db.version(2).stores({ kv: "key", snapshots: "t" });
+    const row = await db.table("kv").get("time-travel-session");
+    row.value.schemaVersion = 999;
+    await db.table("kv").put(row);
+    db.close();
+    expect(await loadTimeTravelSession()).toBeNull();
+  });
+});

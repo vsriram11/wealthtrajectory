@@ -3,10 +3,13 @@
 import { useEffect } from "react";
 import { useAppStore } from "@/lib/store";
 import {
+  clearTimeTravelSession,
   loadRealState,
+  loadTimeTravelSession,
   maybeRecordMonthlySnapshot,
   maybeRecordSnapshot,
   saveRealState,
+  saveTimeTravelSession,
 } from "@/lib/persistence/persistence";
 import { captureSnapshotAppState } from "@/lib/persistence/snapshotAppState";
 import { householdNetWorth } from "@/lib/types";
@@ -42,6 +45,26 @@ export function PersistenceHydrator() {
         // (which would silently wipe IDB data on a slow disk read).
         useAppStore.setState({ hydrated: true });
       }
+      // After the live state lands, check for a persisted
+      // time-travel session. If found, restore it on top of the
+      // hydrated state — the user picks up exactly where they
+      // left off, banner and all, with their edits intact.
+      // User-reported gap: "enter time travel snapshot mode, exit
+      // the app, come back a few mins later, values changed."
+      // Without persistence the session was silently discarded on
+      // tab close.
+      const session = await loadTimeTravelSession();
+      if (cancelled) return;
+      if (session) {
+        useAppStore.getState().restoreTimeTravelSession({
+          timeTravelDate: session.timeTravelDate,
+          editingSnapshotT: session.editingSnapshotT,
+          household: session.household,
+          assumptions: session.assumptions,
+          baselineHousehold: session.baselineHousehold,
+          baselineAssumptions: session.baselineAssumptions,
+        });
+      }
     })();
     return () => {
       cancelled = true;
@@ -51,25 +74,19 @@ export function PersistenceHydrator() {
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | null = null;
     let snapTimer: ReturnType<typeof setTimeout> | null = null;
+    let sessionTimer: ReturnType<typeof setTimeout> | null = null;
     const unsub = useAppStore.subscribe((state, prev) => {
       if (state.mode !== "real") return;
       // Time-travel session gate — when active, the household /
       // assumptions in memory represent a HYPOTHETICAL past state
       // the user is editing for the purpose of taking a backdated
-      // snapshot. Persisting them to IDB would clobber the live
-      // present-day state on next load (and the auto-snapshot
-      // path would record a duplicate at today's date with the
-      // edited values). Both writes must be muted until the user
-      // exits the session (which restores the baseline).
+      // snapshot. The live state (REAL_KEY) must stay untouched;
+      // BUT the session itself is persisted to a SEPARATE IDB key
+      // so the user can resume it after closing the tab.
       if (state.timeTravelActive) {
-        // Critical: cancel any in-flight timers when entering
-        // time-travel. Without this, a save/snapshot scheduled
-        // 249ms ago would fire 1ms later with a CLOSED-OVER
-        // pre-time-travel `state` reference — which the
-        // fire-time gate catches via getState()...active... but
-        // see the fire-time fix below: we now read fresh state
-        // at fire time too, so the closure is no longer
-        // load-bearing. Belt-and-suspenders.
+        // Cancel any in-flight live-state save / snap timers —
+        // they were scheduled by the pre-time-travel state change
+        // (or the entry transition) and must not run now.
         if (timer) {
           clearTimeout(timer);
           timer = null;
@@ -78,7 +95,38 @@ export function PersistenceHydrator() {
           clearTimeout(snapTimer);
           snapTimer = null;
         }
+        // Schedule the session-record save (debounced). Persists
+        // the live edit state + baseline so reload restores
+        // exactly where the user left off.
+        if (sessionTimer) clearTimeout(sessionTimer);
+        sessionTimer = setTimeout(() => {
+          const fresh = useAppStore.getState();
+          if (!fresh.timeTravelActive) return;
+          if (fresh.mode !== "real") return;
+          if (!fresh.timeTravelDate) return;
+          if (!fresh.baselineHousehold || !fresh.baselineAssumptions) return;
+          void saveTimeTravelSession({
+            timeTravelDate: fresh.timeTravelDate,
+            editingSnapshotT: fresh.editingSnapshotT,
+            household: fresh.household,
+            assumptions: fresh.assumptions,
+            baselineHousehold: fresh.baselineHousehold,
+            baselineAssumptions: fresh.baselineAssumptions,
+          });
+        }, 250);
         return;
+      }
+      // Transition out of time-travel mode (Exit / Save snapshot):
+      // wipe the persisted session record so a future reload
+      // doesn't re-enter the just-finished session. Detected via
+      // the prev→state transition; runs regardless of the diff
+      // check below.
+      if (prev.timeTravelActive && !state.timeTravelActive) {
+        if (sessionTimer) {
+          clearTimeout(sessionTimer);
+          sessionTimer = null;
+        }
+        void clearTimeTravelSession();
       }
       if (
         state.household === prev.household &&
@@ -153,10 +201,52 @@ export function PersistenceHydrator() {
         })();
       }, 1500);
     });
+    // Flush the pending session save on tab-hide / pagehide so a
+    // user who closes the tab during the 250ms debounce window
+    // doesn't lose their last few edits. `visibilitychange` fires
+    // reliably on every browser including mobile Safari (where
+    // `beforeunload` is unreliable). We fire-and-forget the IDB
+    // put — the browser doesn't wait for IDB to flush before
+    // closing, but in practice the put completes anyway. Worst
+    // case: the user loses the last <250ms of edits, which is no
+    // worse than the pre-session-persistence behavior.
+    const flushSession = () => {
+      if (sessionTimer) {
+        clearTimeout(sessionTimer);
+        sessionTimer = null;
+      }
+      const fresh = useAppStore.getState();
+      if (!fresh.timeTravelActive) return;
+      if (fresh.mode !== "real") return;
+      if (!fresh.timeTravelDate) return;
+      if (!fresh.baselineHousehold || !fresh.baselineAssumptions) return;
+      void saveTimeTravelSession({
+        timeTravelDate: fresh.timeTravelDate,
+        editingSnapshotT: fresh.editingSnapshotT,
+        household: fresh.household,
+        assumptions: fresh.assumptions,
+        baselineHousehold: fresh.baselineHousehold,
+        baselineAssumptions: fresh.baselineAssumptions,
+      });
+    };
+    const onVis = () => {
+      if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+        flushSession();
+      }
+    };
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", onVis);
+      window.addEventListener("pagehide", flushSession);
+    }
     return () => {
       if (timer) clearTimeout(timer);
       if (snapTimer) clearTimeout(snapTimer);
+      if (sessionTimer) clearTimeout(sessionTimer);
       unsub();
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", onVis);
+        window.removeEventListener("pagehide", flushSession);
+      }
     };
   }, []);
 

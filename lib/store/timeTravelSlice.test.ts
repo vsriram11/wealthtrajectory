@@ -12,6 +12,7 @@ type Ctx = TimeTravelSliceState & {
   household: Household;
   assumptions: Assumptions;
   mode: "demo" | "real";
+  selectedMemberId: string | null;
 };
 
 function makeFakeStore(seed: Partial<Ctx> = {}) {
@@ -23,6 +24,7 @@ function makeFakeStore(seed: Partial<Ctx> = {}) {
     // Individual tests override seed.mode to verify the demo
     // refusal path.
     mode: "real",
+    selectedMemberId: null,
     ...seed,
   };
   return {
@@ -385,5 +387,60 @@ describe("Time-travel slice — mode behavior (user-reported no-op fix)", () => 
     expect(s.state.timeTravelActive).toBe(true);
     expect(s.state.timeTravelDate).toBe("2024-01-01");
     expect(s.state.baselineHousehold).not.toBeNull();
+  });
+});
+
+describe("Time-travel slice — restoreTimeTravelSession (resume across reload)", () => {
+  const RESUMED_HH: Household = {
+    id: "resumed-hh",
+    members: [{ id: "m1", displayName: "Resumed" } as never],
+    accounts: [],
+    liabilities: [],
+  };
+  const ORIGINAL_HH: Household = {
+    id: "original-hh",
+    members: [{ id: "m1", displayName: "Original" } as never],
+    accounts: [],
+    liabilities: [],
+  };
+
+  it("loads the saved session's household + baseline into live state", () => {
+    const s = makeFakeStore({ mode: "real" });
+    const a = createTimeTravelSliceActions(s.set);
+    a.restoreTimeTravelSession({
+      timeTravelDate: "2023-06-15",
+      editingSnapshotT: 1_700_000_000_000,
+      household: RESUMED_HH,
+      assumptions: s.state.assumptions,
+      baselineHousehold: ORIGINAL_HH,
+      baselineAssumptions: s.state.assumptions,
+    });
+    expect(s.state.timeTravelActive).toBe(true);
+    expect(s.state.timeTravelDate).toBe("2023-06-15");
+    expect(s.state.editingSnapshotT).toBe(1_700_000_000_000);
+    // Live state IS the saved session's edited household.
+    expect(s.state.household).toBe(RESUMED_HH);
+    // Baseline points at the pre-session live state so Exit
+    // restores cleanly.
+    expect(s.state.baselineHousehold).toBe(ORIGINAL_HH);
+  });
+
+  it("refuses to overwrite an already-active session in memory", () => {
+    const s = makeFakeStore({ mode: "real" });
+    const a = createTimeTravelSliceActions(s.set);
+    // Active session in memory (e.g. user entered freshly).
+    a.enterTimeTravel("2024-01-01");
+    const liveBefore = s.state.household;
+    a.restoreTimeTravelSession({
+      timeTravelDate: "2023-06-15",
+      editingSnapshotT: null,
+      household: RESUMED_HH,
+      assumptions: s.state.assumptions,
+      baselineHousehold: ORIGINAL_HH,
+      baselineAssumptions: s.state.assumptions,
+    });
+    // Memory wins — the disk record is ignored.
+    expect(s.state.timeTravelDate).toBe("2024-01-01");
+    expect(s.state.household).toBe(liveBefore);
   });
 });

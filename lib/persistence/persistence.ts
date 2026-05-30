@@ -161,6 +161,11 @@ export type SnapshotAppState = {
 
 const SCHEMA_VERSION = 2;
 const REAL_KEY = "real-state";
+// Time-travel session record. Lives in the same `kv` table under a
+// dedicated key so the live state stays untouched while a session is
+// active. Persisted across tab close so the user can resume editing
+// historical values on reopen instead of losing them silently.
+const TIME_TRAVEL_SESSION_KEY = "time-travel-session";
 
 type KvRow = { key: string; value: PersistedRealState };
 type SnapshotRow = {
@@ -320,9 +325,93 @@ export async function clearRealState(): Promise<void> {
   if (!handle) return;
   try {
     await handle.kv.delete(REAL_KEY);
+    await handle.kv.delete(TIME_TRAVEL_SESSION_KEY);
     await handle.snapshots.clear();
   } catch (e) {
     console.warn("WealthTrajectory: failed to clear state", e);
+  }
+}
+
+/**
+ * The persisted form of a time-travel session. Lives in a dedicated
+ * `kv` row so the user's live state (REAL_KEY) stays untouched while
+ * editing historical values. Resuming on app reopen is the load-
+ * bearing UX: a user reported that closing the tab during a backdate
+ * session silently discarded everything they typed; the resume path
+ * makes the session feel like a real editor (work persists across
+ * reloads).
+ *
+ * What's persisted:
+ *   - `household` / `assumptions`: the LIVE edit state inside the
+ *     session (every change the user has made so far).
+ *   - `baselineHousehold` / `baselineAssumptions`: the pre-session
+ *     state, needed by exit-discard to restore on Exit.
+ *   - `timeTravelDate`: the backdate the user chose.
+ *   - `editingSnapshotT`: non-null when the session was launched
+ *     from an existing snapshot (Save overwrites that row directly
+ *     without prompting).
+ */
+export type PersistedTimeTravelSession = {
+  schemaVersion: number;
+  timeTravelDate: string;
+  editingSnapshotT: number | null;
+  household: Household;
+  assumptions: Assumptions;
+  baselineHousehold: Household;
+  baselineAssumptions: Assumptions;
+  savedAt: number;
+};
+
+export async function loadTimeTravelSession(): Promise<PersistedTimeTravelSession | null> {
+  const handle = getDB();
+  if (!handle) return null;
+  try {
+    const row = await handle.kv.get(TIME_TRAVEL_SESSION_KEY);
+    if (!row) return null;
+    const v = row.value as PersistedTimeTravelSession | undefined;
+    if (!v || v.schemaVersion !== SCHEMA_VERSION) return null;
+    if (
+      !v.timeTravelDate ||
+      !v.household ||
+      !v.assumptions ||
+      !v.baselineHousehold ||
+      !v.baselineAssumptions
+    ) {
+      return null;
+    }
+    return v;
+  } catch (e) {
+    console.warn("WealthTrajectory: failed to load time-travel session", e);
+    return null;
+  }
+}
+
+export async function saveTimeTravelSession(
+  session: Omit<PersistedTimeTravelSession, "schemaVersion" | "savedAt">,
+): Promise<void> {
+  const handle = getDB();
+  if (!handle) return;
+  try {
+    await handle.kv.put({
+      key: TIME_TRAVEL_SESSION_KEY,
+      value: {
+        ...session,
+        schemaVersion: SCHEMA_VERSION,
+        savedAt: Date.now(),
+      },
+    });
+  } catch (e) {
+    console.warn("WealthTrajectory: failed to save time-travel session", e);
+  }
+}
+
+export async function clearTimeTravelSession(): Promise<void> {
+  const handle = getDB();
+  if (!handle) return;
+  try {
+    await handle.kv.delete(TIME_TRAVEL_SESSION_KEY);
+  } catch (e) {
+    console.warn("WealthTrajectory: failed to clear time-travel session", e);
   }
 }
 

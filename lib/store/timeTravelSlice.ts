@@ -124,6 +124,25 @@ export type TimeTravelSliceActions = {
     date: string;
   }) => void;
   /**
+   * Resume a previously-persisted time-travel session on app load.
+   * Mirrors enterTimeTravel/enterTimeTravelEditingSnapshot but
+   * accepts the full session record (live state + baseline +
+   * editing target) instead of synthesizing them from scratch.
+   *
+   * Called once from PersistenceHydrator after a successful
+   * loadTimeTravelSession. The user sees the banner appear
+   * automatically as if they never left — same date, same edits,
+   * same baseline ready for Exit.
+   */
+  restoreTimeTravelSession: (session: {
+    timeTravelDate: string;
+    editingSnapshotT: number | null;
+    household: Household;
+    assumptions: Assumptions;
+    baselineHousehold: Household;
+    baselineAssumptions: Assumptions;
+  }) => void;
+  /**
    * Restore the captured baseline into household + assumptions,
    * clear the baseline, deactivate. Safe to call when not active
    * (no-op). Used by both the "Exit" and "Save and exit" paths —
@@ -179,6 +198,11 @@ type Ctx = TimeTravelSliceState & {
   // entering a session that would leak hypothetical edits into
   // a real user's next-load IDB state).
   mode: "demo" | "real";
+  // Reset on snapshot-edit entry / session resume: the snapshot
+  // (or persisted session) household may have a different member
+  // roster than the live state, so the live selectedMemberId may
+  // point at a member who isn't in scope.
+  selectedMemberId: string | null;
 };
 
 export function createTimeTravelSliceActions(
@@ -271,6 +295,33 @@ export function createTimeTravelSliceActions(
           },
         } as Partial<Ctx>;
       }),
+    restoreTimeTravelSession: (session) =>
+      set((s) => {
+        // Refuse re-entry if a session is already active in memory
+        // (e.g. PersistenceHydrator double-fire). The persisted
+        // session is the authoritative source; don't overwrite a
+        // freshly-entered live session with the disk record.
+        if (s.timeTravelActive) return {};
+        return {
+          timeTravelActive: true,
+          timeTravelDate: session.timeTravelDate,
+          editingSnapshotT: session.editingSnapshotT,
+          household: session.household,
+          assumptions: session.assumptions,
+          baselineHousehold: session.baselineHousehold,
+          baselineAssumptions: session.baselineAssumptions,
+          // Reset the selected member because the session's
+          // household may have a different roster than the live
+          // state we just hydrated.
+          selectedMemberId: null,
+          timeTravelPriceStatus: {
+            appliedSymbols: [],
+            clampedSymbols: [],
+            failedSymbols: [],
+          },
+        } as Partial<Ctx>;
+      }),
+
     exitTimeTravelDiscard: () =>
       set((s) => {
         if (!s.timeTravelActive) return {};
