@@ -192,15 +192,15 @@ export function PriceRefresher() {
         }
         const r = priceAtDetailed(q, targetMs);
         if (r === null) {
-          // Empty history → use the upstream's diagnostic reason
-          // when available (typically a Finnhub free-tier or
-          // Yahoo rate-limit message). The plain "0 history
-          // points" message was unhelpful — the user couldn't
-          // tell whether to enter manually, retry later, or
-          // configure their own API key.
+          // The reason intentionally does NOT include the
+          // symbol name — TimeTravelBanner groups failures by
+          // identical reason and lists the affected symbols
+          // separately. Including the symbol here would defeat
+          // the grouping (each holding becomes its own one-of-N
+          // block, blowing out the page height — user-reported).
           const reason = q.error
-            ? `Historical data unavailable for ${s}: ${q.error}`
-            : `Historical data unavailable for ${s} (upstream returned no history). Enter manually below.`;
+            ? q.error
+            : "Upstream returned no history. Enter the per-share price manually in the holding editor.";
           recordTimeTravelPriceOutcome(s, "failed", reason);
           continue;
         }

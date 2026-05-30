@@ -753,20 +753,23 @@ function taxComponents(result: ReturnType<typeof computeUsTax>): Array<{
       key: "amt",
       label: "Alternative Minimum Tax (AMT)",
       amount: result.federal.amtUSD,
-      // The note surfaces AMTI + exemption so a curious user
-      // can see WHY AMT is or isn't due. Shown even when
-      // amount=0 so the line stays visible (consistent with
-      // other zero-when-not-applicable lines like SE tax).
-      note:
-        result.federal.amtUSD > 0
-          ? `TMT $${Math.round(
-              result.federal.tmtUSD,
-            ).toLocaleString()} exceeds regular tax`
-          : `AMTI $${Math.round(
-              result.federal.amtiUSD,
-            ).toLocaleString()}, exemption $${Math.round(
-              result.federal.amtExemptionUSD,
-            ).toLocaleString()} — no AMT due`,
+      // The note ALWAYS shows TMT so the user sees how close
+      // they are to the AMT cliff (round-5 audit fix). When
+      // AMT > 0, it shows the excess of TMT over regular tax;
+      // when AMT = 0, it shows the headroom (how much MORE TMT
+      // could rise before triggering AMT). For ISO-exposed
+      // users, this is the key "how close am I?" diagnostic.
+      note: (() => {
+        const tmt = Math.round(result.federal.tmtUSD);
+        const regularIncomeTax = Math.round(
+          result.federal.ordinaryTaxUSD + result.federal.ltcgTaxUSD,
+        );
+        if (result.federal.amtUSD > 0) {
+          return `TMT $${tmt.toLocaleString()} exceeds regular income tax $${regularIncomeTax.toLocaleString()}`;
+        }
+        const headroom = regularIncomeTax - tmt;
+        return `TMT $${tmt.toLocaleString()} vs regular $${regularIncomeTax.toLocaleString()} — headroom $${Math.max(0, headroom).toLocaleString()}`;
+      })(),
       color: "bg-orange-400",
     },
     {

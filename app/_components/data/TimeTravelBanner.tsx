@@ -366,7 +366,12 @@ function PriceStatusLine({
             • Price lookup failed for {failed} holding
             {failed === 1 ? "" : "s"} — tap to see why
           </summary>
-          <div className="mt-1 ml-2 space-y-1">
+          {/* Scroll cap (user-reported): with 21+ holdings the
+              uncapped details panel pushed page content far
+              off-screen. max-h + overflow-y-auto keeps the
+              banner section bounded and lets the user scroll
+              within it. */}
+          <div className="mt-1 ml-2 max-h-48 space-y-1 overflow-y-auto pr-1">
             {Array.from(failuresByReason.entries()).map(([reason, syms]) => (
               <div
                 key={reason}
@@ -376,7 +381,7 @@ function PriceStatusLine({
                   {reason}
                 </div>
                 <div className="text-[10px] opacity-80">
-                  Symbols: {syms.join(", ")}
+                  Symbols ({syms.length}): {syms.join(", ")}
                 </div>
               </div>
             ))}

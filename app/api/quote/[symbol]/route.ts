@@ -378,7 +378,14 @@ async function tryYahoo(
   for (const host of HOSTS) {
     for (const ua of UA_VARIATIONS) {
       try {
-        const res = await fetch(`https://${host}${path}`, {
+        // 429-retry path: when Yahoo returns "Too Many Requests"
+        // on the first attempt, wait briefly + retry once. Vercel's
+        // shared IP pool gets rate-limited aggressively by Yahoo
+        // across all users on the same warm instance; a single
+        // 750ms backoff often gets us through the next rate
+        // window (Yahoo's tier is per-rolling-second).
+        // User reported: "21 holdings all 429."
+        let res = await fetch(`https://${host}${path}`, {
           headers: {
             "User-Agent": ua,
             Accept: "application/json,text/plain,*/*",
@@ -388,6 +395,19 @@ async function tryYahoo(
           },
           next: { revalidate: 86400 },
         });
+        if (res.status === 429) {
+          await new Promise((r) => setTimeout(r, 750));
+          res = await fetch(`https://${host}${path}`, {
+            headers: {
+              "User-Agent": ua,
+              Accept: "application/json,text/plain,*/*",
+              "Accept-Language": "en-US,en;q=0.9",
+              Referer: "https://finance.yahoo.com/",
+              Origin: "https://finance.yahoo.com",
+            },
+            next: { revalidate: 86400 },
+          });
+        }
         if (!res.ok) {
           lastReason = `yahoo: ${host} returned ${res.status} ${res.statusText}`;
           continue;

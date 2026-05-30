@@ -973,4 +973,151 @@ describe("computeFederalTax — AMT (Alternative Minimum Tax)", () => {
     expect(r.amtUSD).toBe(0);
     expect(Number.isFinite(r.totalFederalTaxUSD)).toBe(true);
   });
+
+  // ── Round-5 deferred audit: boundary + symmetry + additivity ──
+
+  it("MFJ AMT equals 2× single MFS AMT at identical total income (no MFS-split advantage)", () => {
+    // MFS breakpoint is half of MFJ by IRS design — splitting an
+    // MFJ return into two MFS returns should NOT reduce AMT.
+    // Pin this so a future MFS-breakpoint edit can't break it.
+    const mfj = computeFederalTax(
+      baseInputs({
+        filingStatus: "mfj",
+        income: { ...EMPTY_INCOME, wagesUSD: 600_000 },
+        isoBargainElementUSD: 1_000_000,
+      }),
+    );
+    const mfs = computeFederalTax(
+      baseInputs({
+        filingStatus: "mfs",
+        income: { ...EMPTY_INCOME, wagesUSD: 300_000 },
+        isoBargainElementUSD: 500_000,
+      }),
+    );
+    // TMT (the bracket math output) should match: MFJ TMT ===
+    // 2 × MFS TMT within float tolerance.
+    expect(mfj.tmtUSD).toBeCloseTo(2 * mfs.tmtUSD, 0);
+  });
+
+  it("ISO bargain element + PAB interest add linearly to AMTI (no double-count, no interaction)", () => {
+    const baseline = computeFederalTax(
+      baseInputs({
+        income: { ...EMPTY_INCOME, wagesUSD: 200_000 },
+      }),
+    );
+    const isoOnly = computeFederalTax(
+      baseInputs({
+        income: { ...EMPTY_INCOME, wagesUSD: 200_000 },
+        isoBargainElementUSD: 100_000,
+      }),
+    );
+    const pabOnly = computeFederalTax(
+      baseInputs({
+        income: { ...EMPTY_INCOME, wagesUSD: 200_000 },
+        privateActivityBondInterestUSD: 50_000,
+      }),
+    );
+    const both = computeFederalTax(
+      baseInputs({
+        income: { ...EMPTY_INCOME, wagesUSD: 200_000 },
+        isoBargainElementUSD: 100_000,
+        privateActivityBondInterestUSD: 50_000,
+      }),
+    );
+    // AMTI delta from ISO alone:
+    const isoAmtiDelta = isoOnly.amtiUSD - baseline.amtiUSD;
+    // AMTI delta from PAB alone:
+    const pabAmtiDelta = pabOnly.amtiUSD - baseline.amtiUSD;
+    // Combined delta = sum (linearity holds).
+    expect(both.amtiUSD - baseline.amtiUSD).toBeCloseTo(
+      isoAmtiDelta + pabAmtiDelta,
+      0,
+    );
+  });
+
+  it("phase-out boundary: exemption full at threshold − $1, reduced by $0.25 at threshold + $1", () => {
+    // Single phase-out starts at $626,350. At AMTI = $626,349,
+    // exemption = full $88,100. At AMTI = $626,351, exemption =
+    // $88,100 − ($1 × 0.25) = $88,099.75.
+    //
+    // We can't directly construct AMTI = X (it's derived from
+    // wages - deductions + preferences), so engineer wages
+    // that put AMTI close to the boundary, then verify the
+    // exemption tier reflects the boundary.
+    const single = process.env.STANDARD_DEDUCTION_2025_SINGLE
+      ? Number(process.env.STANDARD_DEDUCTION_2025_SINGLE)
+      : STANDARD_DEDUCTION_2025.single;
+    // Wages such that taxable ordinary = phaseoutStart − 1 → AMTI
+    // also = phaseoutStart − 1 (no LTCG, no preferences).
+    const wagesAtBoundary = 626_350 - 1 + single;
+    const below = computeFederalTax(
+      baseInputs({ income: { ...EMPTY_INCOME, wagesUSD: wagesAtBoundary } }),
+    );
+    expect(below.amtExemptionUSD).toBe(88_100);
+    // Wages 2 over: amti = phaseoutStart + 1 → exemption reduced
+    // by 0.25 × 1 = 0.25.
+    const above = computeFederalTax(
+      baseInputs({
+        income: { ...EMPTY_INCOME, wagesUSD: wagesAtBoundary + 2 },
+      }),
+    );
+    expect(above.amtExemptionUSD).toBeCloseTo(88_100 - 0.25, 2);
+  });
+
+  it("26%/28% breakpoint: $1 below = all 26%; $1 above = 26% then 28%", () => {
+    // Construct AMTI excess straddling the $239,100 breakpoint.
+    // Use ISO bargain element to inflate AMTI cleanly.
+    // taxableOrdinary = 0 + ISO = AMTI = $239,100 + exemption $88,100 = $327,200
+    // Wages such that taxableOrdinary ~ 0 + std ded.
+    const single = STANDARD_DEDUCTION_2025.single;
+    // At excess = 239,100 (just at top of 26% bucket): all 26%.
+    const at = computeFederalTax(
+      baseInputs({
+        income: { ...EMPTY_INCOME, wagesUSD: single }, // wages = std ded → taxableOrdinary = 0
+        isoBargainElementUSD: 239_100 + 88_100,
+      }),
+    );
+    // tmt_ordinary = 239,100 * 0.26 = 62,166
+    expect(at.tmtUSD).toBeCloseTo(62_166, 0);
+    // At excess = 239,101: first 239,100 at 26%, next $1 at 28%.
+    const over = computeFederalTax(
+      baseInputs({
+        income: { ...EMPTY_INCOME, wagesUSD: single },
+        isoBargainElementUSD: 239_101 + 88_100,
+      }),
+    );
+    // delta = 0.28
+    expect(over.tmtUSD - at.tmtUSD).toBeCloseTo(0.28, 2);
+  });
+
+  it("NIIT applies on top of AMT (independent §1411 tax)", () => {
+    // ISO trigger creates AMT + LTCG triggers NIIT.
+    // Verify total = ordinary + LTCG + FICA + NIIT + AMT (no
+    // substitution of AMT for any other tax).
+    const r = computeFederalTax(
+      baseInputs({
+        filingStatus: "mfj",
+        income: {
+          ...EMPTY_INCOME,
+          wagesUSD: 500_000,
+          longTermCapGainsUSD: 100_000,
+        },
+        isoBargainElementUSD: 300_000,
+      }),
+    );
+    expect(r.amtUSD).toBeGreaterThan(0);
+    expect(r.niitUSD).toBeGreaterThan(0);
+    // Sum reconciles to within $1 (float).
+    const reconciled =
+      r.ordinaryTaxUSD +
+      r.ltcgTaxUSD +
+      r.ficaSsUSD +
+      r.ficaMedicareUSD +
+      r.additionalMedicareUSD +
+      r.seTaxUSD +
+      r.niitUSD +
+      r.amtUSD -
+      r.amtCreditUsedUSD;
+    expect(reconciled).toBeCloseTo(r.totalFederalTaxUSD, 1);
+  });
 });

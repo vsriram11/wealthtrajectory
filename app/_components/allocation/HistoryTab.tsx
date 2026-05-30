@@ -337,13 +337,23 @@ function RealEstateCard({ snapshots }: { snapshots: Snapshot[] }) {
                 </dd>
               </div>
             </dl>
-            {row.totalPaydown > 0 && (
-              <p className="mt-2 text-[10px] leading-snug text-text-dim">
-                *Equity CAGR ignores your paydown as capital
-                contribution and overstates return on leveraged
-                positions. IRR is the honest money-weighted answer.
-              </p>
-            )}
+            {/* Footnote logic — round-5 audit fix: only show
+                the "equity CAGR overstates" caveat when it
+                actually overstates IRR (typical leveraged
+                paydown case). For cash-out refi where the user
+                pocketed capital, IRR can EXCEED equity CAGR,
+                and the original footnote would mislead. */}
+            {row.totalPaydown > 0 &&
+              row.equityCAGRPctAnnual != null &&
+              row.irrPctAnnual != null &&
+              row.equityCAGRPctAnnual > row.irrPctAnnual + 0.005 && (
+                <p className="mt-2 text-[10px] leading-snug text-text-dim">
+                  *Equity CAGR ignores your paydown as capital
+                  contribution and overstates return on leveraged
+                  positions. IRR is the honest money-weighted
+                  answer.
+                </p>
+              )}
           </li>
         ))}
       </ul>
