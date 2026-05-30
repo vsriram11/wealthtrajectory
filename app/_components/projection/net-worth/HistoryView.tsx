@@ -366,34 +366,50 @@ function CompositionAtPoint({
     other: 0,
   };
   let snapshotNetWorth = 0;
-  if (snap) {
-    for (const account of snap.household.accounts) {
-      for (const holding of account.holdings) {
-        totalsByKind[holding.kind] =
-          (totalsByKind[holding.kind] ?? 0) + holding.valueUSD;
-        snapshotNetWorth += holding.valueUSD;
+  // Track the IDs included from the base composition so the
+  // backdated-merge loop below can avoid double-counting.
+  const baseIds = new Set<string>();
+
+  // Base composition = the snap's household (if a snap covers t)
+  // or the LIVE household (pre-first-snap region). Without the
+  // live fallback, hovering on any bucket BEFORE the first snap
+  // produced an empty pill — the user saw nothing for pre-Dec 30
+  // dates even though their backdated holdings claim to have
+  // existed then.
+  const baseHousehold = snap?.household ?? household;
+  for (const account of baseHousehold.accounts) {
+    for (const holding of account.holdings) {
+      // For pre-snap buckets (baseHousehold = live), filter by
+      // acquiredAt: don't include holdings the user hadn't
+      // acquired yet at this point in time. For snap-composition
+      // buckets, the snap is authoritative — every holding in it
+      // is valid at the snap's t by definition.
+      if (!snap) {
+        const acquiredAt =
+          "acquiredAt" in holding
+            ? (holding.acquiredAt as number | null | undefined)
+            : null;
+        // Holdings without acquiredAt (cash / "other" / etc.)
+        // are treated as always-held; user has no way to set an
+        // acquisition date on those.
+        if (acquiredAt != null && acquiredAt > t) continue;
       }
+      totalsByKind[holding.kind] =
+        (totalsByKind[holding.kind] ?? 0) + holding.valueUSD;
+      snapshotNetWorth += holding.valueUSD;
+      baseIds.add(holding.id);
     }
   }
 
-  // Merge backdated holdings from the LIVE household — those
-  // present today with `acquiredAt <= t` but ABSENT from EVERY
-  // rich snapshot. Mirrors the `newlyAddedFlatUSD` path in
-  // history.ts that adds these to the NW total; without the
-  // mirror here, the pill would exclude them (asymmetry
-  // user-reported: backdated private_stock added in May 2026
-  // showed up in the NW total but not the composition).
-  const idsInSnapshotHistory = new Set<string>();
-  for (const r of rich) {
-    for (const acct of r.household.accounts) {
-      for (const h of acct.holdings ?? []) {
-        idsInSnapshotHistory.add(h.id);
-      }
-    }
-  }
+  // Merge backdated holdings from the LIVE household that are
+  // missing from the base composition (e.g. snap was recorded
+  // BEFORE the user added a holding with acquiredAt predating
+  // the snap). Avoids the asymmetry where NW total via
+  // newlyAddedFlatUSD includes the holding but the pill excludes
+  // it.
   for (const acct of household.accounts) {
     for (const h of acct.holdings ?? []) {
-      if (idsInSnapshotHistory.has(h.id)) continue;
+      if (baseIds.has(h.id)) continue;
       const acquiredAt =
         "acquiredAt" in h ? (h.acquiredAt as number | null | undefined) : null;
       // The holding must claim to have existed at-or-before the
