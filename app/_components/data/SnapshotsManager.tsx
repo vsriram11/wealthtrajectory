@@ -280,7 +280,7 @@ export function SnapshotsManager() {
 
   /**
    * Round-5 audit CRITICAL: two-stage delete confirm. First click
-   * arms the row (button label flips to "Confirm delete"); second
+   * arms the row (button label flips to "Confirm"); second
    * click within 4 seconds actually deletes. Auto-disarms on
    * timeout. Prevents permanent data loss from a misclick on the
    * wrong row (Edit + Delete are visually adjacent).
@@ -785,14 +785,17 @@ export function SnapshotsManager() {
                             {formatUSD(s.netWorthUSD)}
                           </div>
                         </div>
-                        <div className="flex items-center gap-1.5">
-                          {/* Edit in time-travel mode — only for
-                              composition-bearing snapshots (no
-                              point editing the holdings of a
-                              lightweight NW-only row). Disabled
-                              while ALREADY in time-travel
-                              (slice refuses re-entry too — UI
-                              gate matches). */}
+                        {/* Compact action row: icon-only for the
+                            time-travel-edit affordance (would
+                            otherwise wrap to two lines on mobile
+                            and overlap the FULL badge per the
+                            user-reported screenshot), short
+                            labels for Edit / Del. Tight gap +
+                            reduced horizontal padding to keep
+                            everything on one line at iPhone-mini
+                            widths. aria-labels carry the full
+                            semantic for screen readers. */}
+                        <div className="flex items-center gap-1">
                           {s.household && (
                             <button
                               type="button"
@@ -807,11 +810,11 @@ export function SnapshotsManager() {
                                 });
                               }}
                               disabled={busy || timeTravelActive}
-                              className="rounded border border-amber-300/40 bg-amber-300/10 px-2.5 py-1.5 text-[11px] text-amber-300 disabled:opacity-40 active:opacity-70"
+                              className="rounded border border-amber-300/40 bg-amber-300/10 px-2 py-1.5 text-[14px] leading-none text-amber-300 disabled:opacity-40 active:opacity-70"
                               aria-label={`Re-enter time-travel mode to edit the holdings on the snapshot from ${formatDate(s.t)}`}
                               title="Re-enter time-travel to edit this snapshot's holdings"
                             >
-                              Time-travel edit
+                              ⏪
                             </button>
                           )}
                           <button
@@ -822,14 +825,15 @@ export function SnapshotsManager() {
                             type="button"
                             onClick={() => handleStartEdit(s)}
                             disabled={busy}
-                            className="rounded border border-border-strong bg-bg-elevated px-2.5 py-1.5 text-[11px] text-text-muted disabled:opacity-40 active:opacity-70 hover:text-text"
+                            className="rounded border border-border-strong bg-bg-elevated px-2 py-1.5 text-[11px] text-text-muted disabled:opacity-40 active:opacity-70 hover:text-text"
                             aria-label={`Edit snapshot scalar fields (date, NW, label) from ${formatDate(s.t)}, ${formatUSD(s.netWorthUSD)}`}
+                            title="Edit date / net worth / label"
                           >
                             Edit
                           </button>
                           {/* Round-5 audit CRITICAL: two-stage
                               confirm. First click arms (label
-                              flips to "Confirm delete"); second
+                              flips to "Confirm"); second
                               click within 4s actually deletes.
                               Auto-disarms on timeout (effect
                               above). aria-label includes the row
@@ -838,7 +842,7 @@ export function SnapshotsManager() {
                             type="button"
                             onClick={() => handleDeleteClick(s.t)}
                             disabled={busy}
-                            className={`rounded border px-2.5 py-1.5 text-[11px] font-medium disabled:opacity-40 active:opacity-70 ${
+                            className={`rounded border px-2 py-1.5 text-[11px] font-medium disabled:opacity-40 active:opacity-70 ${
                               pendingDelete === s.t
                                 ? "border-negative bg-negative text-bg"
                                 : "border-negative/40 bg-bg-surface text-negative"
@@ -848,10 +852,13 @@ export function SnapshotsManager() {
                                 ? `Confirm delete of snapshot from ${formatDate(s.t)}`
                                 : `Delete snapshot from ${formatDate(s.t)}, ${formatUSD(s.netWorthUSD)}`
                             }
+                            title={
+                              pendingDelete === s.t
+                                ? "Tap to confirm deletion"
+                                : "Delete this snapshot"
+                            }
                           >
-                            {pendingDelete === s.t
-                              ? "Confirm delete"
-                              : "Delete"}
+                            {pendingDelete === s.t ? "Confirm" : "Del"}
                           </button>
                         </div>
                       </div>
