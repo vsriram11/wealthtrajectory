@@ -240,7 +240,11 @@ export function HistoryView({
           (not raw `snapshots`) so the composition pie matches the
           line above when a member chip is active. */}
       {hovered && (
-        <CompositionAtPoint t={hovered.t} snapshots={filteredSnapshots} />
+        <CompositionAtPoint
+          t={hovered.t}
+          snapshots={filteredSnapshots}
+          household={household}
+        />
       )}
 
       <div className="mt-2">
@@ -307,9 +311,19 @@ export function HistoryView({
 function CompositionAtPoint({
   t,
   snapshots,
+  household,
 }: {
   t: number;
   snapshots: Snapshot[];
+  /**
+   * The LIVE household. Used to merge in backdated holdings whose
+   * `acquiredAt` predates the latest at-or-before snapshot but that
+   * are missing from EVERY past snapshot (newly added today).
+   * Without this merge, NW total includes the holding (history.ts
+   * does this via newlyAddedFlatUSD) but the composition pill
+   * excludes it — the chart numbers wouldn't reconcile.
+   */
+  household: Household;
 }) {
   // Find the rich snapshot at-or-before t (if any).
   const rich = snapshots
@@ -322,7 +336,6 @@ function CompositionAtPoint({
       break;
     }
   }
-  if (!snap) return null;
 
   const totalsByKind: Record<string, number> = {
     equity: 0,
@@ -335,11 +348,44 @@ function CompositionAtPoint({
     other: 0,
   };
   let snapshotNetWorth = 0;
-  for (const account of snap.household.accounts) {
-    for (const holding of account.holdings) {
-      totalsByKind[holding.kind] =
-        (totalsByKind[holding.kind] ?? 0) + holding.valueUSD;
-      snapshotNetWorth += holding.valueUSD;
+  if (snap) {
+    for (const account of snap.household.accounts) {
+      for (const holding of account.holdings) {
+        totalsByKind[holding.kind] =
+          (totalsByKind[holding.kind] ?? 0) + holding.valueUSD;
+        snapshotNetWorth += holding.valueUSD;
+      }
+    }
+  }
+
+  // Merge backdated holdings from the LIVE household — those
+  // present today with `acquiredAt <= t` but ABSENT from EVERY
+  // rich snapshot. Mirrors the `newlyAddedFlatUSD` path in
+  // history.ts that adds these to the NW total; without the
+  // mirror here, the pill would exclude them (asymmetry
+  // user-reported: backdated private_stock added in May 2026
+  // showed up in the NW total but not the composition).
+  const idsInSnapshotHistory = new Set<string>();
+  for (const r of rich) {
+    for (const acct of r.household.accounts) {
+      for (const h of acct.holdings ?? []) {
+        idsInSnapshotHistory.add(h.id);
+      }
+    }
+  }
+  for (const acct of household.accounts) {
+    for (const h of acct.holdings ?? []) {
+      if (idsInSnapshotHistory.has(h.id)) continue;
+      const acquiredAt =
+        "acquiredAt" in h ? (h.acquiredAt as number | null | undefined) : null;
+      // The holding must claim to have existed at-or-before the
+      // bucket's t. A holding added today with acquiredAt=null
+      // (no historical claim) only appears at today's bucket
+      // (the live-NW pin) and shouldn't pollute past compositions.
+      if (acquiredAt == null || acquiredAt > t) continue;
+      if (!Number.isFinite(h.valueUSD) || h.valueUSD <= 0) continue;
+      totalsByKind[h.kind] = (totalsByKind[h.kind] ?? 0) + h.valueUSD;
+      snapshotNetWorth += h.valueUSD;
     }
   }
   if (snapshotNetWorth <= 0) return null;
@@ -366,7 +412,10 @@ function CompositionAtPoint({
         ))}
       </div>
       <div className="mt-1 flex flex-wrap gap-x-2 gap-y-0.5 text-[10px] text-text-dim">
-        <span>Composition on {new Date(snap.t).toLocaleDateString()}</span>
+        <span>
+          Composition on{" "}
+          {snap ? new Date(snap.t).toLocaleDateString() : "live"}
+        </span>
         {segments.map((s, i) => (
           <span key={i} className="flex items-center gap-1">
             <span

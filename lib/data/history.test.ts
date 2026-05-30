@@ -258,16 +258,28 @@ describe("overlaySnapshots", () => {
     expect(out[3].netWorthUSD).toBe(1234);
   });
 
-  it("walks forward through multiple snapshots", () => {
+  it("linearly interpolates between consecutive snapshot anchors (jaggedness fix)", () => {
+    // User-reported visual bug fix: the chart used to render
+    // flat plateaus between snapshots (every bucket whose t >=
+    // snap.t got snap.NW until the next snap arrived). The new
+    // semantic treats snapshots as anchors and interpolates
+    // linearly between them, so the chart smoothly connects
+    // recorded values.
     const snapshots: Snapshot[] = [
       { t: 150, netWorthUSD: 5000 },
       { t: 350, netWorthUSD: 9000 },
     ];
     const out = overlaySnapshots(base, snapshots);
-    expect(out[0].netWorthUSD).toBe(1000); // before first snapshot
-    expect(out[1].netWorthUSD).toBe(5000); // t=200 ≥ 150
-    expect(out[2].netWorthUSD).toBe(5000); // t=300 ≥ 150
-    expect(out[3].netWorthUSD).toBe(9000); // t=400 ≥ 350
+    // Pre-first-anchor bucket: untouched (reconstructed).
+    expect(out[0].netWorthUSD).toBe(1000);
+    // Between anchors: linear blend.
+    // t=200 → frac=(200-150)/200 = 0.25 → 5000 + 4000*0.25 = 6000
+    expect(out[1].netWorthUSD).toBe(6000);
+    // t=300 → frac=0.75 → 5000 + 4000*0.75 = 8000
+    expect(out[2].netWorthUSD).toBe(8000);
+    // Post-last-anchor bucket: held at last anchor (live-NW pin
+    // would override; no liveNetWorth supplied here).
+    expect(out[3].netWorthUSD).toBe(9000);
   });
 
   it("renders zero / negative-NW snapshots (user-intentional underwater state)", () => {
@@ -283,9 +295,12 @@ describe("overlaySnapshots", () => {
     ];
     const out = overlaySnapshots(base, snapshots);
     expect(out[0].netWorthUSD).toBe(1000);
+    // Bucket exactly at anchor t=200 → pinned.
     expect(out[1].netWorthUSD).toBe(1500);
-    expect(out[2].netWorthUSD).toBe(1500);
-    // Bucket at t=400 now gets the $0 overlay (user-intentional).
+    // Bucket t=300 between [200, 1500] and [380, 0]:
+    // frac=(300-200)/180=0.5556 → 1500 + (0-1500)*0.5556 ≈ 666.67
+    expect(out[2].netWorthUSD).toBeCloseTo(666.6667, 3);
+    // Bucket t=400 post-dates the last anchor (380): held at 0.
     expect(out[3].netWorthUSD).toBe(0);
   });
 
@@ -331,6 +346,20 @@ describe("overlaySnapshots", () => {
   it("liveNetWorth ignored when not finite", () => {
     const out = overlaySnapshots(base, [], NaN);
     expect(out).toEqual(base);
+  });
+
+  it("liveNetWorth acts as a right-edge anchor: interpolates between last snapshot and live (no flat plateau)", () => {
+    // Snapshot at t=200 with NW=$1000, live NW=$2000 pinned at
+    // last bucket t=400. Bucket at t=300 sits half-way between
+    // [200, 1000] and [400, 2000] → 1500 (interpolated). The
+    // PREVIOUS behavior would have held flat at $1000 until t=400
+    // then snapped to $2000 — that's the user-reported staircase.
+    const snapshots: Snapshot[] = [{ t: 200, netWorthUSD: 1000 }];
+    const out = overlaySnapshots(base, snapshots, 2000);
+    expect(out[0].netWorthUSD).toBe(1000); // pre-anchor, untouched
+    expect(out[1].netWorthUSD).toBe(1000); // exactly at snap
+    expect(out[2].netWorthUSD).toBe(1500); // interpolated half-way
+    expect(out[3].netWorthUSD).toBe(2000); // live anchor pinned
   });
 });
 

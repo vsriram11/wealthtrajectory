@@ -416,26 +416,83 @@ export function overlaySnapshots(
   // any finite value is user-intentional and renders.
   const usable = snapshots.filter((s) => Number.isFinite(s.netWorthUSD));
   let out = series;
-  if (usable.length > 0) {
-    const sorted = [...usable].sort((a, b) => a.t - b.t);
-    let i = 0;
-    out = series.map((p) => {
-      while (i + 1 < sorted.length && sorted[i + 1].t <= p.t) i++;
-      const snap = sorted[i];
-      if (snap.t > p.t) return p;
-      return { t: p.t, netWorthUSD: snap.netWorthUSD };
-    });
-  }
-  if (
+  // Build the anchor list: every snapshot is an anchor the chart
+  // MUST pass through. The live-NW (today's headline) is ALSO an
+  // anchor when supplied — pinned at the last bucket's `t`. This
+  // way the post-last-snapshot region interpolates toward today
+  // instead of holding flat at a stale snapshot, AND the post-hoc
+  // last-bucket pin (the original semantic) is preserved.
+  const lastBucketT = series.length > 0 ? series[series.length - 1].t : null;
+  const liveAnchorEnabled =
     liveNetWorth != null &&
     Number.isFinite(liveNetWorth) &&
-    out.length > 0
-  ) {
-    const lastIdx = out.length - 1;
-    out = [
-      ...out.slice(0, lastIdx),
-      { t: out[lastIdx].t, netWorthUSD: liveNetWorth },
-    ];
+    lastBucketT != null;
+  if (usable.length > 0 || liveAnchorEnabled) {
+    type Anchor = { t: number; netWorthUSD: number };
+    const sorted = [...usable].sort((a, b) => a.t - b.t);
+    const anchors: Anchor[] = sorted.map((s) => ({
+      t: s.t,
+      netWorthUSD: s.netWorthUSD,
+    }));
+    // Add the live anchor. Two cases:
+    //   1. There's no snapshot at the last-bucket t: append the
+    //      live anchor at the right edge.
+    //   2. There IS a snapshot at (or after) the last-bucket t:
+    //      the live anchor OVERRIDES it at the right edge — live
+    //      headline NW is authoritative for "now" even if the
+    //      most recent snapshot row has a stale value.
+    if (liveAnchorEnabled) {
+      // Drop any snapshots whose t >= lastBucketT — they'd
+      // either be redundant (== lastBucketT) or post-date the
+      // visible window (> lastBucketT), and either way the live
+      // anchor should win at the right edge.
+      while (
+        anchors.length > 0 &&
+        anchors[anchors.length - 1].t >= (lastBucketT as number)
+      ) {
+        anchors.pop();
+      }
+      anchors.push({
+        t: lastBucketT as number,
+        netWorthUSD: liveNetWorth as number,
+      });
+    }
+    // User-reported visual bug: chart looked like a staircase —
+    // flat plateaus between adjacent snapshots interrupted by
+    // abrupt vertical steps. Root cause: the previous algorithm
+    // forced EVERY bucket whose t >= snap.t to that snap's
+    // recorded NW until the next snap arrived. The smoother
+    // semantic: anchors are points the chart MUST pass through;
+    // between two anchors, blend linearly so the line connects
+    // them without inventing a flat run.
+    out = series.map((p) => {
+      // Find surrounding anchors: `lo` = latest anchor with t <=
+      // p.t, `hi` = earliest anchor with t >= p.t.
+      let lo: Anchor | null = null;
+      let hi: Anchor | null = null;
+      for (let i = 0; i < anchors.length; i++) {
+        if (anchors[i].t <= p.t) lo = anchors[i];
+        if (anchors[i].t >= p.t && hi === null) hi = anchors[i];
+        if (hi !== null) break;
+      }
+      // Bucket pre-dates every anchor: use reconstructed value.
+      if (lo === null) return p;
+      // Bucket post-dates every anchor (shouldn't happen when
+      // live anchor is enabled and lastBucketT is the rightmost,
+      // but guard).
+      if (hi === null) return { t: p.t, netWorthUSD: lo.netWorthUSD };
+      // Bucket exactly at an anchor: pin.
+      if (hi.t === lo.t) {
+        return { t: p.t, netWorthUSD: lo.netWorthUSD };
+      }
+      // Strictly between two anchors: linear interpolation on the
+      // time axis. (lo.t < p.t < hi.t guaranteed by the search.)
+      const span = hi.t - lo.t;
+      const frac = (p.t - lo.t) / span;
+      const nw =
+        lo.netWorthUSD + (hi.netWorthUSD - lo.netWorthUSD) * frac;
+      return { t: p.t, netWorthUSD: nw };
+    });
   }
   return out;
 }
