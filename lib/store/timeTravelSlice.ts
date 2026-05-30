@@ -74,8 +74,12 @@ export type TimeTravelSliceState = {
     /**
      * Symbols where getQuote returned null OR a non-finite
      * price (upstream failure, unavailable symbol, etc).
+     * Each entry is `{symbol, reason}` so the banner can show
+     * the upstream diagnostic — critical when Yahoo/Finnhub
+     * are flaky and the user needs to see "yahoo: 401
+     * Unauthorized" or "finnhub: no API key" to diagnose.
      */
-    failedSymbols: string[];
+    failedSymbols: Array<{ symbol: string; reason: string }>;
   };
 };
 
@@ -102,10 +106,16 @@ export type TimeTravelSliceActions = {
    * a single symbol. Called by PriceRefresher's historical-mode
    * effect. The TimeTravelBanner reads these flags to surface
    * "auto-filled: 3 / needs manual: 5" status to the user.
+   *
+   * `reason` is the upstream diagnostic message (e.g. "yahoo:
+   * 401 Unauthorized | finnhub: no API key") — REQUIRED on
+   * "failed" so the banner can surface actionable diagnostic
+   * info. Ignored on "applied" and "clamped".
    */
   recordTimeTravelPriceOutcome: (
     symbol: string,
     outcome: "applied" | "clamped" | "failed",
+    reason?: string,
   ) => void;
 };
 
@@ -212,28 +222,29 @@ export function createTimeTravelSliceActions(
           },
         };
       }),
-    recordTimeTravelPriceOutcome: (symbol, outcome) =>
+    recordTimeTravelPriceOutcome: (symbol, outcome, reason) =>
       set((s) => {
         if (!s.timeTravelActive) return {};
         const sym = symbol.toUpperCase();
         const cur = s.timeTravelPriceStatus;
-        // De-dup: only add to the list for this outcome if the
-        // symbol isn't already there. A symbol can move BETWEEN
-        // lists (e.g. failed → applied on retry) so we remove
-        // from the other two lists first.
-        const without = (arr: string[]) => arr.filter((x) => x !== sym);
+        // De-dup: a symbol that moves outcomes (e.g. failed →
+        // applied on retry) only appears in the latest bucket.
+        const withoutStr = (arr: string[]) => arr.filter((x) => x !== sym);
+        const withoutFailed = (
+          arr: Array<{ symbol: string; reason: string }>,
+        ) => arr.filter((x) => x.symbol !== sym);
         const next = {
-          appliedSymbols: without(cur.appliedSymbols),
-          clampedSymbols: without(cur.clampedSymbols),
-          failedSymbols: without(cur.failedSymbols),
+          appliedSymbols: withoutStr(cur.appliedSymbols),
+          clampedSymbols: withoutStr(cur.clampedSymbols),
+          failedSymbols: withoutFailed(cur.failedSymbols),
         };
-        next[
-          outcome === "applied"
-            ? "appliedSymbols"
-            : outcome === "clamped"
-              ? "clampedSymbols"
-              : "failedSymbols"
-        ].push(sym);
+        if (outcome === "applied") next.appliedSymbols.push(sym);
+        else if (outcome === "clamped") next.clampedSymbols.push(sym);
+        else
+          next.failedSymbols.push({
+            symbol: sym,
+            reason: reason ?? "no reason reported",
+          });
         return { timeTravelPriceStatus: next };
       }),
   };

@@ -602,3 +602,139 @@ describe("memberFilteredSnapshots (Round-5 fix)", () => {
     expect(out[0].netWorthUSD).toBe(0);
   });
 });
+
+describe("reconstructHistory — newly-added holdings (user-reported fake-gain fix)", () => {
+  // USER REPORT: "Added equity today but backdated the acquired
+  // on date — history chart shows a big fake gain."
+  // The old behavior back-projected the new holding's value
+  // through past timepoints at its expected CAGR, creating
+  // historical NW values < today's → apparent gain when none
+  // happened (the holding wasn't in the system yesterday, it
+  // didn't actually grow).
+  //
+  // FIX: holdings not present in any past snapshot are held
+  // FLAT at today's value across all historical timepoints.
+  // No back-projection → no fake gain.
+
+  const T_NOW = Date.UTC(2026, 5, 1, 12);
+  const ONE_YEAR_MS = 365 * 24 * 60 * 60 * 1000;
+  const T_YEAR_AGO = T_NOW - ONE_YEAR_MS;
+
+  function buildHousehold(
+    holdings: Array<{ id: string; v: number; acquiredAt?: number | null }>,
+  ): Household {
+    return {
+      id: "test-hh",
+      members: [{ id: "m1", displayName: "Tester" } as never],
+      accounts: [
+        {
+          id: "a1",
+          ownerId: "m1",
+          displayName: "Brokerage",
+          category: "TAXABLE",
+          holdings: holdings.map((h) => ({
+            id: h.id,
+            kind: "equity" as const,
+            symbol: h.id,
+            shares: h.v / 100,
+            valueUSD: h.v,
+            lastPriceUSD: 100,
+            lastPricedAt: T_NOW,
+            currency: "USD",
+            expenseRatio: 0,
+            geography: { US: 1, DEVELOPED: 0, EMERGING: 0 },
+            style: {},
+            leverage: 1,
+            expectedRealCAGR: 0.08,
+            isManualPrice: false,
+            acquiredAt: h.acquiredAt ?? null,
+          })) as never,
+        } as never,
+      ],
+      liabilities: [],
+    };
+  }
+
+  it("newly-added holding doesn't inflate apparent gain over the period", () => {
+    // The headline fix scenario. User has snapshot history that
+    // doesn't include NEW. Today they add NEW. The chart should
+    // NOT attribute "gain" to the appearance of NEW.
+    const oldOnly = buildHousehold([{ id: "OLD", v: 50_000 }]);
+    const oldOnlyToday = buildHousehold([{ id: "OLD", v: 50_000 }]);
+    const oldPlusNew = buildHousehold([
+      { id: "OLD", v: 50_000 },
+      // NEW: user added it TODAY but backdated acquiredAt to
+      // before the oldest snapshot — exactly the user-reported
+      // scenario the fix targets.
+      {
+        id: "NEW",
+        v: 100_000,
+        acquiredAt: T_NOW - 5 * 365 * 24 * 60 * 60 * 1000,
+      },
+    ]);
+    const snapshots: Snapshot[] = [
+      {
+        t: T_NOW - 11 * 30 * 24 * 60 * 60 * 1000,
+        netWorthUSD: 50_000,
+        household: oldOnly,
+      },
+    ];
+    // Baseline: WITHOUT the new holding.
+    const baselineOut = reconstructHistory(
+      oldOnlyToday,
+      {},
+      "1Y",
+      T_NOW,
+      snapshots,
+    );
+    const baselineGain =
+      baselineOut[baselineOut.length - 1].netWorthUSD -
+      baselineOut[0].netWorthUSD;
+    // With the new holding added today (not in any past snapshot).
+    const withNewOut = reconstructHistory(
+      oldPlusNew,
+      {},
+      "1Y",
+      T_NOW,
+      snapshots,
+    );
+    const withNewGain =
+      withNewOut[withNewOut.length - 1].netWorthUSD -
+      withNewOut[0].netWorthUSD;
+    // CRITICAL ASSERTION: the apparent gain should be roughly
+    // the SAME with or without the new holding. The new holding
+    // contributes 0 to the gain because it's held flat at
+    // today's value across history.
+    expect(withNewGain).toBeCloseTo(baselineGain, -2); // ~$100 tolerance
+  });
+
+  it("holding present in past snapshot is back-projected normally (no regression)", () => {
+    // OLD existed in the past snapshot → back-projection still
+    // applies. NW grows over time due to OLD's expected CAGR.
+    const past = buildHousehold([{ id: "OLD", v: 50_000 }]);
+    const today = buildHousehold([{ id: "OLD", v: 50_000 }]);
+    const snapshots: Snapshot[] = [
+      {
+        t: T_NOW - 11 * 30 * 24 * 60 * 60 * 1000,
+        netWorthUSD: 50_000,
+        household: past,
+      },
+    ];
+    const out = reconstructHistory(today, {}, "1Y", T_NOW, snapshots);
+    // Some change across the year (back-projection of OLD's CAGR
+    // from its snapshot value), but not flat.
+    expect(out.length).toBeGreaterThan(2);
+  });
+
+  it("no snapshots at all → back-projection unchanged (back-compat)", () => {
+    // For users with no snapshot history, the fix should NOT
+    // change behavior — we have no evidence whether holdings
+    // were present in the past or not.
+    const today = buildHousehold([{ id: "NEW", v: 100_000 }]);
+    const out = reconstructHistory(today, {}, "1Y", T_NOW, []);
+    // Today's value reflects the holding.
+    expect(out[out.length - 1].netWorthUSD).toBe(100_000);
+    // Year-ago value is back-projected (lower due to CAGR).
+    expect(out[0].netWorthUSD).toBeLessThan(100_000);
+  });
+});

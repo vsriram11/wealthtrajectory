@@ -75,12 +75,26 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
   // LRU + IDB), so subsequent requests pay nothing extra.
   const range = req.nextUrl.searchParams.get("range") === "max" ? "max" : "5y";
 
-  let parsed = await tryFinnhub(symbol, range);
+  // Track upstream diagnostic reasons so the response payload
+  // carries an `error` string when both fail — surfaced in the
+  // UI banner so the user can diagnose (Yahoo IP blocked, no
+  // Finnhub key, rate-limited, etc).
+  const finnhubResult = await tryFinnhub(symbol, range);
+  let parsed: ParsedQuote | null = null;
   let source = "finnhub";
-
-  if (!parsed) {
-    parsed = await tryYahoo(symbol, range);
-    if (parsed) source = "yahoo";
+  let finnhubReason: string | null = null;
+  let yahooReason: string | null = null;
+  if (finnhubResult.ok) {
+    parsed = finnhubResult.quote;
+  } else {
+    finnhubReason = finnhubResult.reason;
+    const yahooResult = await tryYahoo(symbol, range);
+    if (yahooResult.ok) {
+      parsed = yahooResult.quote;
+      source = "yahoo";
+    } else {
+      yahooReason = yahooResult.reason;
+    }
   }
 
   if (parsed) {
@@ -143,6 +157,15 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
   //
   // no-store cache so a future request retries upstream
   // immediately rather than serving this empty payload back.
+  // Compose the diagnostic error message — both upstream
+  // reasons separated by ` | ` so the UI can show both.
+  const errorParts: string[] = [];
+  if (finnhubReason) errorParts.push(finnhubReason);
+  if (yahooReason) errorParts.push(yahooReason);
+  const error =
+    errorParts.length > 0
+      ? errorParts.join(" | ")
+      : "unknown — both upstream attempts returned ok=false with no reason";
   return json(
     {
       symbol,
@@ -151,6 +174,7 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
       name: null,
       history: [],
       unavailable: true,
+      error,
       asOf: Date.now(),
     },
     200,
@@ -166,16 +190,27 @@ type ParsedQuote = {
   history: Array<{ t: number; p: number }>;
 };
 
+/**
+ * Result discriminator: success returns the parsed quote;
+ * failure returns a diagnostic reason. Surfaced via the
+ * `unavailable: true` payload + propagated to the UI banner so
+ * the user can see EXACTLY why a price lookup failed (which is
+ * critical when scrapers get blocked by upstream — Yahoo
+ * actively blocks Vercel IP ranges, Finnhub free tier rate-
+ * limits, etc).
+ */
+type UpstreamResult =
+  | { ok: true; quote: ParsedQuote }
+  | { ok: false; reason: string };
+
 async function tryFinnhub(
   symbol: string,
   range: "5y" | "max" = "5y",
-): Promise<ParsedQuote | null> {
+): Promise<UpstreamResult> {
   const key = process.env.FINNHUB_API_KEY;
-  if (!key) return null;
-  // Per-instance rate limit safety belt: pretend the call failed if
-  // we'd otherwise overshoot the upstream cap. Caller falls through
-  // to Yahoo or LRU.
-  if (!canCallFinnhub()) return null;
+  if (!key) return { ok: false, reason: "finnhub: no FINNHUB_API_KEY env var" };
+  if (!canCallFinnhub())
+    return { ok: false, reason: "finnhub: rate-limit safety belt (≥55/min)" };
 
   const enc = encodeURIComponent(symbol);
   let currentPrice: number | null = null;
@@ -188,12 +223,25 @@ async function tryFinnhub(
       `https://finnhub.io/api/v1/quote?symbol=${enc}&token=${key}`,
       { next: { revalidate: 3600 } },
     );
-    if (!quoteRes.ok) return null;
+    if (!quoteRes.ok) {
+      return {
+        ok: false,
+        reason: `finnhub: quote ${quoteRes.status} ${quoteRes.statusText}`,
+      };
+    }
     const q = (await quoteRes.json()) as { c?: number; pc?: number; t?: number };
-    if (typeof q.c !== "number" || q.c <= 0) return null;
+    if (typeof q.c !== "number" || q.c <= 0) {
+      return {
+        ok: false,
+        reason: `finnhub: quote returned c=${JSON.stringify(q.c)} (invalid symbol?)`,
+      };
+    }
     currentPrice = q.c;
-  } catch {
-    return null;
+  } catch (e) {
+    return {
+      ok: false,
+      reason: `finnhub: quote fetch threw — ${e instanceof Error ? e.message : String(e)}`,
+    };
   }
 
   try {
@@ -213,7 +261,7 @@ async function tryFinnhub(
       }
     }
   } catch {
-    /* skip */
+    /* skip profile failure — currentPrice is enough */
   }
 
   const history: Array<{ t: number; p: number }> = [];
@@ -221,10 +269,6 @@ async function tryFinnhub(
     if (canCallFinnhub()) {
       recordFinnhubCall();
       const now = Math.floor(Date.now() / 1000);
-      // Finnhub historical candles: 5y default; for range="max"
-      // we request 30y (Finnhub's free tier caps at varying
-      // depths per symbol, but 30y covers most public-equity
-      // inception dates that ordinary users care about).
       const fromOffsetSec =
         range === "max"
           ? 30 * 365 * 24 * 60 * 60
@@ -256,23 +300,32 @@ async function tryFinnhub(
   }
 
   return {
-    symbol,
-    currentPrice,
-    currency,
-    name,
-    history,
+    ok: true,
+    quote: {
+      symbol,
+      currentPrice,
+      currency,
+      name,
+      history,
+    },
   };
 }
 
 async function tryYahoo(
   symbol: string,
   range: "5y" | "max" = "5y",
-): Promise<ParsedQuote | null> {
+): Promise<UpstreamResult> {
   // Yahoo's range=max goes back to symbol inception (often
   // 20-40+ years for major equities). Default 5y for live
   // refresh; max for time-travel sessions.
   const yahooRange = range === "max" ? "max" : "5y";
   const path = `/v8/finance/chart/${encodeURIComponent(symbol)}?range=${yahooRange}&interval=1d&includePrePost=false`;
+  // Track the LAST observed failure across all 4 (host × UA)
+  // attempts so the caller has a concrete reason to surface.
+  // Yahoo blocks Vercel IP ranges aggressively, so the typical
+  // failure is a 401/403/429 — surfacing the status code makes
+  // it instantly diagnosable.
+  let lastReason = "yahoo: no attempt made";
   for (const host of HOSTS) {
     for (const ua of UA_VARIATIONS) {
       try {
@@ -286,19 +339,35 @@ async function tryYahoo(
           },
           next: { revalidate: 86400 },
         });
-        if (!res.ok) continue;
-        const data = (await res.json()) as YahooChart;
-        if (data.chart?.error) continue;
+        if (!res.ok) {
+          lastReason = `yahoo: ${host} returned ${res.status} ${res.statusText}`;
+          continue;
+        }
+        let data: YahooChart;
+        try {
+          data = (await res.json()) as YahooChart;
+        } catch (e) {
+          lastReason = `yahoo: ${host} returned non-JSON — ${e instanceof Error ? e.message : String(e)}`;
+          continue;
+        }
+        if (data.chart?.error) {
+          lastReason = `yahoo: ${host} chart.error ${data.chart.error.code}: ${data.chart.error.description}`;
+          continue;
+        }
         const result = data.chart?.result?.[0];
-        if (!result) continue;
+        if (!result) {
+          lastReason = `yahoo: ${host} returned empty chart.result`;
+          continue;
+        }
         const parsed = parseYahoo(symbol, result);
-        if (parsed) return parsed;
-      } catch {
-        /* try next */
+        if (parsed) return { ok: true, quote: parsed };
+        lastReason = `yahoo: ${host} parse failed (no close prices in payload)`;
+      } catch (e) {
+        lastReason = `yahoo: ${host} fetch threw — ${e instanceof Error ? e.message : String(e)}`;
       }
     }
   }
-  return null;
+  return { ok: false, reason: lastReason };
 }
 
 type YahooChart = {

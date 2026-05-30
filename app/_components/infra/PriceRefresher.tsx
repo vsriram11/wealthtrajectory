@@ -171,18 +171,35 @@ export function PriceRefresher() {
         // engineering standpoint." Auto-fill is best-effort;
         // manual entry is the load-bearing path.
         if (!q) {
-          recordTimeTravelPriceOutcome(s, "failed");
+          recordTimeTravelPriceOutcome(
+            s,
+            "failed",
+            "getQuote returned null (network error or fetch threw — see browser console)",
+          );
+          continue;
+        }
+        // Surface the API's diagnostic error string when the
+        // upstream marked the response unavailable. This is
+        // typically "yahoo: 401 Unauthorized | finnhub: no API
+        // key" — actionable info the user can use to diagnose.
+        if (q.unavailable) {
+          recordTimeTravelPriceOutcome(
+            s,
+            "failed",
+            q.error ?? "upstream unavailable (no reason reported)",
+          );
           continue;
         }
         const r = priceAtDetailed(q, targetMs);
         if (r === null) {
-          recordTimeTravelPriceOutcome(s, "failed");
+          recordTimeTravelPriceOutcome(
+            s,
+            "failed",
+            `priceAt returned null — quote had ${q.history.length} history points`,
+          );
           continue;
         }
         if (r.clamped) {
-          // Out of available history window. Don't apply (would
-          // silently use the oldest available sample as if it
-          // were the target-date price). Mark for manual entry.
           recordTimeTravelPriceOutcome(s, "clamped");
           continue;
         }
@@ -191,7 +208,11 @@ export function PriceRefresher() {
           appliedSymbols.current.add(s);
           recordTimeTravelPriceOutcome(s, "applied");
         } else {
-          recordTimeTravelPriceOutcome(s, "failed");
+          recordTimeTravelPriceOutcome(
+            s,
+            "failed",
+            `priceAt returned ${r.price} (non-positive)`,
+          );
         }
       }
     })();

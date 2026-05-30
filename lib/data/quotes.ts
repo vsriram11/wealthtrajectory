@@ -10,6 +10,16 @@ export type Quote = {
   history: QuoteHistoryPoint[];
   fetchedAt: number;
   unavailable?: boolean;
+  /**
+   * Diagnostic reason captured from the upstream API route when
+   * the fetch fell through to `unavailable: true`. Concatenates
+   * Finnhub + Yahoo failure reasons (e.g. "finnhub: no
+   * FINNHUB_API_KEY env var | yahoo: query1 returned 401
+   * Unauthorized"). Surfaced in the time-travel banner so users
+   * can diagnose why historical prices aren't loading without
+   * opening DevTools.
+   */
+  error?: string;
 };
 
 type QuoteRow = { symbol: string; quote: Quote };
@@ -124,6 +134,11 @@ export async function getQuote(
       memCache.set(symbol, fresh);
       void writeCache(symbol, fresh);
     }
+    // Return the fresh quote even when it's unavailable — the
+    // caller (PriceRefresher historical-mode loop) needs the
+    // `error` field to surface a diagnostic in the time-travel
+    // banner. Previously this fell through to `return null` and
+    // the error was lost.
     return fresh;
   }
   if (cached) return cached;
@@ -151,6 +166,7 @@ async function fetchFresh(
     const data = (await res.json()) as Omit<Quote, "fetchedAt"> & {
       asOf?: number;
       unavailable?: boolean;
+      error?: string;
     };
     return {
       symbol: data.symbol,
@@ -160,6 +176,7 @@ async function fetchFresh(
       history: Array.isArray(data.history) ? data.history : [],
       fetchedAt: data.asOf ?? Date.now(),
       unavailable: data.unavailable === true,
+      ...(typeof data.error === "string" ? { error: data.error } : {}),
     };
   } catch (e) {
     console.warn(`quote fetch failed for ${symbol}`, e);

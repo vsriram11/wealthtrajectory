@@ -208,10 +208,12 @@ describe("Time-travel slice — recordTimeTravelPriceOutcome (manual-entry surfa
     a.enterTimeTravel("2020-01-01");
     a.recordTimeTravelPriceOutcome("VOO", "applied");
     a.recordTimeTravelPriceOutcome("BTC-USD", "clamped");
-    a.recordTimeTravelPriceOutcome("PRIVATE", "failed");
+    a.recordTimeTravelPriceOutcome("PRIVATE", "failed", "yahoo: 401");
     expect(s.state.timeTravelPriceStatus.appliedSymbols).toEqual(["VOO"]);
     expect(s.state.timeTravelPriceStatus.clampedSymbols).toEqual(["BTC-USD"]);
-    expect(s.state.timeTravelPriceStatus.failedSymbols).toEqual(["PRIVATE"]);
+    expect(s.state.timeTravelPriceStatus.failedSymbols).toEqual([
+      { symbol: "PRIVATE", reason: "yahoo: 401" },
+    ]);
   });
 
   it("de-duplicates: a symbol that moves outcomes only appears in the latest bucket", () => {

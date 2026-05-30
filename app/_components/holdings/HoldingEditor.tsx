@@ -81,6 +81,12 @@ function EditorBody({ holding, onClose }: { holding: Holding; onClose: () => voi
   const setHoldingPrice = useAppStore((s) => s.setHoldingPrice);
   const applyLivePrice = useAppStore((s) => s.applyLivePrice);
   const setHoldingCAGR = useAppStore((s) => s.setHoldingCAGR);
+  // Time-travel awareness: change copy + behavior of the
+  // price-refresh affordance so it doesn't mislead users into
+  // thinking the editor is pulling current market data while
+  // they're editing a backdated session.
+  const timeTravelActive = useAppStore((s) => s.timeTravelActive);
+  const timeTravelDate = useAppStore((s) => s.timeTravelDate);
   const setHoldingLeverage = useAppStore((s) => s.setHoldingLeverage);
   const setHoldingStyleBox = useAppStore((s) => s.setHoldingStyleBox);
   const setHoldingGeography = useAppStore((s) => s.setHoldingGeography);
@@ -104,15 +110,89 @@ function EditorBody({ holding, onClose }: { holding: Holding; onClose: () => voi
         ? holding.name
         : holding.symbol;
 
+  // Surface refresh errors visibly — silent no-op was a
+  // user-reported bug. When the upstream returns null OR
+  // unavailable, the user sees a concrete diagnostic instead
+  // of "nothing happened."
+  const [refreshError, setRefreshError] = useState<string | null>(null);
+
   const refreshPrice = async () => {
     if (!isLivePriceable(holding)) return;
     setRefreshing(true);
+    setRefreshError(null);
     try {
-      const { getQuote } = await import("@/lib/data/quotes");
-      const q = await getQuote(holding.symbol);
-      if (q && q.currentPrice > 0) {
-        applyLivePrice(holding.symbol, q.currentPrice, q.fetchedAt);
+      const { getQuote, priceAtDetailed } = await import("@/lib/data/quotes");
+      // Time-travel awareness: pull HISTORICAL closing price for
+      // the chosen backdate (range=max to access multi-decade
+      // history when available). Live-mode keeps the original
+      // current-price behavior.
+      if (timeTravelActive && timeTravelDate) {
+        const { parseISODate } = await import("@/lib/dateInput");
+        const targetMs = parseISODate(timeTravelDate);
+        if (targetMs === null) {
+          setRefreshError(`Invalid backdate "${timeTravelDate}".`);
+          return;
+        }
+        const q = await getQuote(holding.symbol, { range: "max" });
+        if (!q) {
+          setRefreshError(
+            `Couldn't fetch ${holding.symbol}: network error (see browser console).`,
+          );
+          return;
+        }
+        if (q.unavailable) {
+          setRefreshError(
+            `Couldn't fetch ${holding.symbol}: ${q.error ?? "upstream unavailable"}.`,
+          );
+          return;
+        }
+        const r = priceAtDetailed(q, targetMs);
+        if (r === null) {
+          setRefreshError(
+            `No historical data for ${holding.symbol} — enter price manually below.`,
+          );
+          return;
+        }
+        if (r.clamped) {
+          setRefreshError(
+            `Historical data for ${holding.symbol} doesn't extend back to ${timeTravelDate}. Enter price manually below.`,
+          );
+          return;
+        }
+        if (r.price > 0) {
+          applyLivePrice(holding.symbol, r.price, targetMs, "historical");
+        } else {
+          setRefreshError(
+            `Got non-positive historical price for ${holding.symbol}.`,
+          );
+        }
+        return;
       }
+      // Live-mode path (unchanged behavior, now with visible errors).
+      const q = await getQuote(holding.symbol);
+      if (!q) {
+        setRefreshError(
+          `Couldn't fetch ${holding.symbol}: network error (see browser console).`,
+        );
+        return;
+      }
+      if (q.unavailable) {
+        setRefreshError(
+          `Couldn't fetch ${holding.symbol}: ${q.error ?? "upstream unavailable"}.`,
+        );
+        return;
+      }
+      if (q.currentPrice > 0) {
+        applyLivePrice(holding.symbol, q.currentPrice, q.fetchedAt);
+      } else {
+        setRefreshError(
+          `Got non-positive price (${q.currentPrice}) for ${holding.symbol}.`,
+        );
+      }
+    } catch (e) {
+      setRefreshError(
+        `Refresh threw: ${e instanceof Error ? e.message : String(e)}`,
+      );
     } finally {
       setRefreshing(false);
     }
@@ -182,7 +262,14 @@ function EditorBody({ holding, onClose }: { holding: Holding; onClose: () => voi
                 : formatUSD(holding.valueUSD)
           }
         />
-        {isPricedHolding(holding) && !holding.isManualPrice && (
+        {/* Shares + Price + Refresh affordance shown for ALL priced
+            holdings (live AND manual), not just live. User report:
+            "manual entry screen that only lets me input value (not
+            shares and price, feel like that could be an option as
+            well)." Manual-priced holdings now get the same editor
+            controls; entering Shares or Price recomputes Value
+            from the relationship V = shares × price. */}
+        {isPricedHolding(holding) && (
           <>
             <FieldNumber
               label={holding.kind === "crypto" ? "Units" : "Shares"}
@@ -192,9 +279,13 @@ function EditorBody({ holding, onClose }: { holding: Holding; onClose: () => voi
               precision={6}
               onChange={(v) => setHoldingShares(holding.id, v)}
               help={
-                holding.kind === "crypto"
-                  ? "Editing units re-prices the position at the current per-unit price"
-                  : "Editing shares re-prices the position at the current market price"
+                timeTravelActive
+                  ? holding.kind === "crypto"
+                    ? "Editing units re-prices the position at the historical per-unit price you set below"
+                    : "Editing shares re-prices the position at the historical price you set below"
+                  : holding.kind === "crypto"
+                    ? "Editing units re-prices the position at the current per-unit price"
+                    : "Editing shares re-prices the position at the current market price"
               }
             />
             <FieldNumber
@@ -205,24 +296,44 @@ function EditorBody({ holding, onClose }: { holding: Holding; onClose: () => voi
               min={0}
               onChange={(v) => setHoldingPrice(holding.id, v, { manual: true })}
               help={
-                holding.lastPricedAt
-                  ? `Last refreshed ${formatRelative(holding.lastPricedAt)}`
-                  : "Tap Refresh to pull live"
+                timeTravelActive
+                  ? `Enter the per-share price as of ${timeTravelDate ?? "the backdate"}. Value = shares × price.`
+                  : holding.lastPricedAt
+                    ? `Last refreshed ${formatRelative(holding.lastPricedAt)}`
+                    : "Tap Refresh to pull live"
               }
             />
             {isLivePriceable(holding) && (
-              <div className="flex items-center justify-between rounded-xl border border-border bg-bg-elevated px-4 py-2.5 text-[11px]">
-                <span className="text-text-muted">
-                  Auto-refreshing from live data
-                </span>
-                <button
-                  type="button"
-                  onClick={refreshPrice}
-                  disabled={refreshing}
-                  className="rounded-md border border-border-strong bg-bg-surface px-2.5 py-1 text-[11px] font-medium text-accent disabled:opacity-50 active:opacity-70"
-                >
-                  {refreshing ? "Refreshing…" : "Refresh price"}
-                </button>
+              <div className="flex flex-col gap-2 rounded-xl border border-border bg-bg-elevated px-4 py-2.5 text-[11px]">
+                <div className="flex items-center justify-between">
+                  <span className="text-text-muted">
+                    {timeTravelActive
+                      ? `Backdated to ${timeTravelDate ?? "history"} (historical close)`
+                      : "Auto-refreshing from live data"}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={refreshPrice}
+                    disabled={refreshing}
+                    className="rounded-md border border-border-strong bg-bg-surface px-2.5 py-1 text-[11px] font-medium text-accent disabled:opacity-50 active:opacity-70"
+                  >
+                    {refreshing
+                      ? timeTravelActive
+                        ? "Fetching historical…"
+                        : "Refreshing…"
+                      : timeTravelActive
+                        ? "Fetch historical price"
+                        : "Refresh price"}
+                  </button>
+                </div>
+                {refreshError && (
+                  <div
+                    role="alert"
+                    className="rounded-md border border-negative/40 bg-negative/10 px-2 py-1 text-[10px] leading-snug text-negative break-words"
+                  >
+                    {refreshError}
+                  </div>
+                )}
               </div>
             )}
           </>

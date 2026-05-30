@@ -298,49 +298,75 @@ function PriceStatusLine({
   priceStatus: {
     appliedSymbols: string[];
     clampedSymbols: string[];
-    failedSymbols: string[];
+    failedSymbols: Array<{ symbol: string; reason: string }>;
   };
 }) {
   const applied = priceStatus.appliedSymbols.length;
-  const needsManual =
-    priceStatus.clampedSymbols.length + priceStatus.failedSymbols.length;
+  const clamped = priceStatus.clampedSymbols.length;
+  const failed = priceStatus.failedSymbols.length;
+  const needsManual = clamped + failed;
   if (applied === 0 && needsManual === 0) return null;
+
+  // Group failed symbols by their reason so duplicates collapse
+  // (e.g., "yahoo: 401" applies to all 8 holdings → show once
+  // with the symbol list, not 8 repetitions).
+  const failuresByReason = new Map<string, string[]>();
+  for (const f of priceStatus.failedSymbols) {
+    const existing = failuresByReason.get(f.reason) ?? [];
+    existing.push(f.symbol);
+    failuresByReason.set(f.reason, existing);
+  }
+
   return (
     <div className="mt-1 text-[11px] font-normal text-bg/90">
       {applied > 0 && (
-        <span>
-          ✓ {applied} ticker{applied === 1 ? "" : "s"} auto-filled to{" "}
-          {priceStatus.appliedSymbols[0]
-            ? priceStatus.appliedSymbols.join(", ")
-            : ""}{" "}
-          historical close.
-        </span>
+        <div>
+          ✓ {applied} ticker{applied === 1 ? "" : "s"} auto-filled
+          ({priceStatus.appliedSymbols.slice(0, 5).join(", ")}
+          {priceStatus.appliedSymbols.length > 5
+            ? `, +${priceStatus.appliedSymbols.length - 5} more`
+            : ""}
+          ).
+        </div>
       )}
       {needsManual > 0 && (
-        <span className="ml-1 font-semibold">
-          {applied > 0 ? " " : ""}
-          ✏ Edit{" "}
-          {needsManual} holding{needsManual === 1 ? "" : "s"}{" "}
-          manually
-          {priceStatus.clampedSymbols.length > 0 && (
-            <span className="font-normal">
-              {" "}
-              (historical data unavailable for{" "}
-              {priceStatus.clampedSymbols.slice(0, 3).join(", ")}
-              {priceStatus.clampedSymbols.length > 3 ? "…" : ""})
-            </span>
-          )}
-          {priceStatus.failedSymbols.length > 0 &&
-            priceStatus.clampedSymbols.length === 0 && (
-              <span className="font-normal">
-                {" "}
-                (price lookup failed for{" "}
-                {priceStatus.failedSymbols.slice(0, 3).join(", ")}
-                {priceStatus.failedSymbols.length > 3 ? "…" : ""})
-              </span>
-            )}
+        <div className="font-semibold">
+          ✏ Edit {needsManual} holding{needsManual === 1 ? "" : "s"}{" "}
+          manually.
+        </div>
+      )}
+      {clamped > 0 && (
+        <div className="font-normal">
+          • Outside available history window:{" "}
+          {priceStatus.clampedSymbols.slice(0, 5).join(", ")}
+          {priceStatus.clampedSymbols.length > 5
+            ? `, +${priceStatus.clampedSymbols.length - 5} more`
+            : ""}
           .
-        </span>
+        </div>
+      )}
+      {failed > 0 && (
+        <details className="font-normal">
+          <summary className="cursor-pointer">
+            • Price lookup failed for {failed} holding
+            {failed === 1 ? "" : "s"} — tap to see why
+          </summary>
+          <div className="mt-1 ml-2 space-y-1">
+            {Array.from(failuresByReason.entries()).map(([reason, syms]) => (
+              <div
+                key={reason}
+                className="rounded border border-bg/30 bg-bg/10 px-2 py-1"
+              >
+                <div className="font-mono text-[10px] break-words">
+                  {reason}
+                </div>
+                <div className="text-[10px] opacity-80">
+                  Symbols: {syms.join(", ")}
+                </div>
+              </div>
+            ))}
+          </div>
+        </details>
       )}
     </div>
   );

@@ -143,15 +143,82 @@ export function reconstructHistory(
     .filter((s): s is Snapshot & { household: Household } => !!s.household)
     .sort((a, b) => a.t - b.t);
 
+  // USER-REPORTED BUG: adding a holding today with `acquiredAt`
+  // set to a backdate (e.g. 2021) made the history chart show
+  // a large fake gain — the back-projection algorithm treated
+  // the holding as if it actually grew at its expected CAGR
+  // through the past year, when in reality the holding wasn't
+  // in the system until today. The "+8.8%" wasn't real, it was
+  // the algorithmic back-projection of holdings that didn't
+  // exist in the user's recorded history.
+  //
+  // FIX: identify holdings that aren't present in any past
+  // snapshot. Pass those IDs to composeNetWorthAt so it can
+  // hold them FLAT at today's value across all historical
+  // timepoints (instead of back-projecting them via CAGR).
+  // The holding still contributes to historical NW — just at
+  // its constant present-day value — so the chart shows it
+  // without inventing growth that didn't happen.
+  // USER-REPORTED BUG: adding a holding TODAY with `acquiredAt`
+  // backdated to e.g. 2021 made the history chart show a fake
+  // +8.8% gain. The back-projection treated the holding as
+  // having actually grown for a year, when it just appeared.
+  //
+  // TARGETED FIX: detect the EXACT scenario — a holding whose
+  // user-claimed `acquiredAt` PREDATES the oldest snapshot, but
+  // the holding is missing from EVERY snapshot. That mismatch
+  // ("I claim I had this back then but my snapshots don't show
+  // it") is the user-intent signal that calls for the flat-line
+  // treatment.
+  //
+  // This is narrower than "any holding missing from snapshots"
+  // (which would break the pruned-snapshot test where the user
+  // legitimately captured a smaller composition at a past
+  // moment in time — those holdings SHOULD be excluded from
+  // that snapshot's window, not flat-lined).
+  let newlyAddedFlatUSD = 0;
+  const newlyAddedIds = new Set<string>();
+  if (richSnapshots.length > 0) {
+    const oldestSnapshotT = richSnapshots[0].t;
+    const idsInSnapshotHistory = new Set<string>();
+    for (const snap of richSnapshots) {
+      for (const acct of snap.household.accounts) {
+        for (const h of acct.holdings ?? []) {
+          idsInSnapshotHistory.add(h.id);
+        }
+      }
+    }
+    for (const acct of household.accounts) {
+      for (const h of acct.holdings ?? []) {
+        if (idsInSnapshotHistory.has(h.id)) continue;
+        // Trigger condition: user-claimed acquisition predates
+        // the snapshot record. They're saying "I had this back
+        // then" but the snapshots disagree. Flat-line to avoid
+        // attributing fake gain. `acquiredAt` only exists on
+        // priced + real-estate kinds; cash/other don't have it,
+        // and they're already skipped earlier in the
+        // back-projection (held flat at face value).
+        const acquiredAt =
+          "acquiredAt" in h ? (h.acquiredAt as number | null | undefined) : null;
+        const claimedOld =
+          acquiredAt != null && acquiredAt < oldestSnapshotT;
+        if (claimedOld && Number.isFinite(h.valueUSD)) {
+          newlyAddedIds.add(h.id);
+          newlyAddedFlatUSD += h.valueUSD;
+        }
+      }
+    }
+  }
+
   const days = Math.max(2, Math.ceil((now - start) / MS_PER_DAY));
   const out: HistoryPoint[] = [];
   for (let i = 0; i <= days; i++) {
     const t = start + (i * (now - start)) / days;
-    // Pick the composition source: the latest snapshot at-or-before t
-    // (if any), otherwise the current household.
     const compSnap = pickCompositionSnapshot(richSnapshots, t);
     const composition = compSnap?.household ?? household;
-    const nw = composeNetWorthAt(composition, quotes, t, now);
+    const nw =
+      composeNetWorthAt(composition, quotes, t, now, newlyAddedIds) +
+      newlyAddedFlatUSD;
     out.push({ t, netWorthUSD: nw });
   }
   return out;
@@ -175,6 +242,15 @@ function composeNetWorthAt(
   quotes: Record<string, Quote | null>,
   t: number,
   now: number,
+  /**
+   * IDs of holdings that exist in the current household but were
+   * NEVER in any past snapshot — "newly added to the system."
+   * For these, hold the value FLAT at today's lastPriceUSD×shares
+   * across all historical timepoints. Prevents fake-gain bug
+   * where a holding added today with backdated `acquiredAt` got
+   * back-projected via CAGR (inventing growth that didn't happen).
+   */
+  newlyAddedIds: Set<string> = new Set(),
 ): number {
   const cashTotal = sumCash(household);
   const liabilitiesTotal = household.liabilities.reduce(
@@ -198,6 +274,12 @@ function composeNetWorthAt(
       )
         continue;
       if (h.acquiredAt != null && h.acquiredAt > t) continue;
+      // Newly-added IDs are accounted for via the OUTER flat
+      // contribution in reconstructHistory — skip them here to
+      // avoid double-counting when iterating the LIVE household.
+      // (Snapshot-composition iteration won't see these IDs by
+      // construction, so this branch only fires on the live path.)
+      if (newlyAddedIds.has(h.id)) continue;
       const q = quotes[h.symbol.toUpperCase()];
       let price: number;
       if (q && q.history.length > 0) {
