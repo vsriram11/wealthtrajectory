@@ -177,26 +177,15 @@ describe("Time-travel slice — exitTimeTravelDiscard", () => {
   });
 });
 
-describe("Time-travel slice — mode gate (audit fix)", () => {
-  it("refuses enterTimeTravel when mode === 'demo' (DevTools / slice-level defense)", () => {
-    // Audit fix: SnapshotsManager's UI button is gated on
-    // mode==="real", but the slice action is publicly callable
-    // via useAppStore.getState().enterTimeTravel(...). Without
-    // this slice-level gate, a DevTools-curious demo user could
-    // enter a time-travel session with no persistence backing
-    // (PersistenceHydrator/CloudSyncer both gate on
-    // mode==="real") and leave the banner visible while the
-    // app silently muted their edits.
+describe("Time-travel slice — mode behavior (user-reported no-op fix)", () => {
+  it("allows enterTimeTravel regardless of mode (slice gate removed — UI gate is load-bearing)", () => {
+    // The previous slice-level mode==="real" gate caused a
+    // user-visible no-op when clicking "Enter time-travel mode"
+    // from the modal (root cause unclear — possibly stale mode
+    // in the Zustand callback). The SnapshotsManager UI gate
+    // prevents the modal from even opening in demo mode, so
+    // removing the slice gate doesn't open a new attack surface.
     const s = makeFakeStore({ mode: "demo" });
-    const a = createTimeTravelSliceActions(s.set);
-    a.enterTimeTravel("2024-01-01");
-    expect(s.state.timeTravelActive).toBe(false);
-    expect(s.state.timeTravelDate).toBeNull();
-    expect(s.state.baselineHousehold).toBeNull();
-  });
-
-  it("ALLOWS enterTimeTravel when mode === 'real' (happy path)", () => {
-    const s = makeFakeStore({ mode: "real" });
     const a = createTimeTravelSliceActions(s.set);
     a.enterTimeTravel("2024-01-01");
     expect(s.state.timeTravelActive).toBe(true);

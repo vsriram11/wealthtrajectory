@@ -87,6 +87,67 @@ describe("buildAssetClassSeries", () => {
     ]);
   });
 
+  it("constant-composition fix: holdings ONLY in last snapshot are excluded from CAGR series (user-reported bug)", () => {
+    // User-reported: "added position with acquiredAt 2021 — shows
+    // in CAGR between yesterday and today, which is wrong."
+    // Root cause: a holding present only in the LAST snapshot
+    // inflated the latest bucket value while leaving earlier
+    // buckets unchanged, producing huge spurious CAGR.
+    // Fix: bucket sums only include holdings whose ID appears in
+    // BOTH first and last composition-bearing snapshots.
+    const snaps: Snapshot[] = [
+      // Yesterday: only h1 in stocks.
+      snap(T0, [{ id: "h1", cls: "equity", v: 100_000 }]),
+      // Today: user added h2 (with acquiredAt long ago, but it's
+      // only NOW in the snapshot system).
+      snap(T0 + YEAR, [
+        { id: "h1", cls: "equity", v: 110_000 },
+        { id: "h2", cls: "equity", v: 50_000 },
+      ]),
+    ];
+    const buckets = buildAssetClassSeries(snaps);
+    // The equity series should reflect ONLY h1 (the common
+    // holding), so the CAGR is computed on $100K → $110K (10%)
+    // not on $100K → $160K (60% — wildly wrong).
+    expect(buckets.equity).toEqual([
+      { t: T0, valueUSD: 100_000 },
+      { t: T0 + YEAR, valueUSD: 110_000 },
+    ]);
+  });
+
+  it("constant-composition fix: holdings ONLY in first snapshot are excluded too (sold mid-window)", () => {
+    // Symmetric case: a holding sold between snapshots should
+    // also be excluded from the constant-composition series.
+    const snaps: Snapshot[] = [
+      snap(T0, [
+        { id: "h1", cls: "equity", v: 100_000 },
+        { id: "h_sold", cls: "equity", v: 50_000 },
+      ]),
+      // h_sold is gone — user sold the position.
+      snap(T0 + YEAR, [{ id: "h1", cls: "equity", v: 110_000 }]),
+    ];
+    const buckets = buildAssetClassSeries(snaps);
+    // Series uses only h1 (the common holding).
+    expect(buckets.equity).toEqual([
+      { t: T0, valueUSD: 100_000 },
+      { t: T0 + YEAR, valueUSD: 110_000 },
+    ]);
+  });
+
+  it("constant-composition fix: single snapshot returns full composition (no intersection to compute)", () => {
+    // Edge case: with only one snapshot, the "intersection" is
+    // the snapshot's own holdings. Bucket sums include everything.
+    const snaps: Snapshot[] = [
+      snap(T0, [
+        { id: "h1", cls: "equity", v: 100_000 },
+        { id: "h2", cls: "equity", v: 50_000 },
+      ]),
+    ];
+    expect(buildAssetClassSeries(snaps).equity).toEqual([
+      { t: T0, valueUSD: 150_000 },
+    ]);
+  });
+
   it("sorts snapshots ascending by t before bucketing", () => {
     const snaps: Snapshot[] = [
       snap(T0 + YEAR, [{ id: "h1", cls: "equity", v: 60_000 }]),

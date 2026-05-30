@@ -251,11 +251,15 @@ export function realEstateMetrics(
 
   // Build the IRR cashflow series:
   //   t_0: -initialEquity (the "investment")
-  //   For each interval: -(paydown_i) where paydown_i is the
-  //     decrease in mortgage balance from t_{i-1} to t_i (≥ 0).
-  //     This is the principal portion of mortgage payments
-  //     between snapshots — out-of-pocket capital the user
-  //     contributed toward the equity stake.
+  //   For each interval [i-1, i]: -(paydown) where paydown =
+  //     decrease in mortgage balance over the interval (≥ 0).
+  //     The paydown for interval [N-2, N-1] is bundled at t_N
+  //     as a separate -outflow alongside the terminal inflow,
+  //     so the IRR sees BOTH the final-period capital
+  //     contribution AND the terminal equity. Without this,
+  //     the IRR would systematically OVERSTATE return by the
+  //     final paydown (sometimes 0.1-0.3% per year for typical
+  //     amortization profiles).
   //   t_N: +finalEquity (the "exit value")
   // Negative cashflows = money out (investment + paydowns).
   // Positive cashflows = money in (final equity sale).
@@ -263,21 +267,15 @@ export function realEstateMetrics(
     { t: first.t, amount: -first.equity },
   ];
   let totalPaydown = 0;
-  for (let i = 1; i < series.length - 1; i++) {
+  // Loop covers EVERY interval, including the final one. The
+  // final paydown lands at last.t alongside the terminal inflow.
+  for (let i = 1; i < series.length; i++) {
     const paydown = Math.max(0, series[i - 1].mortgage - series[i].mortgage);
     if (paydown > 0) {
       cashflows.push({ t: series[i].t, amount: -paydown });
       totalPaydown += paydown;
     }
   }
-  // The penultimate-to-last paydown is folded into the final
-  // cashflow as part of "what the user took out." Compute it
-  // separately for the summary stats.
-  const finalIntervalPaydown = Math.max(
-    0,
-    series[series.length - 2].mortgage - last.mortgage,
-  );
-  totalPaydown += finalIntervalPaydown;
   cashflows.push({ t: last.t, amount: last.equity });
 
   return {

@@ -102,16 +102,16 @@ export function createTimeTravelSliceActions(
         // are in flight. The UI gates the entry button on
         // `timeTravelActive`; this is defense in depth.
         if (s.timeTravelActive) return {};
-        // Refuse outside real mode. Time-travel only makes sense
-        // for historical backdating of REAL user data — entering
-        // it in demo mode would let DevTools users stage
-        // hypothetical edits that wouldn't persist anywhere
-        // (PersistenceHydrator/CloudSyncer gates on mode==="real")
-        // AND would leave the banner showing while the rest of
-        // the demo app behaves normally. SnapshotsManager already
-        // gates its modal on mode==="real" at the UI layer; this
-        // is the corresponding slice-layer gate.
-        if (s.mode !== "real") return {};
+        // NOTE: previously gated on `s.mode === "real"` as
+        // defense-in-depth. Removed because USER REPORTED the
+        // confirmation button was a silent no-op — root cause was
+        // mode state not yet propagated to the slice (or a stale
+        // snapshot of mode in the Zustand callback). The
+        // SnapshotsManager UI gate (`if (mode !== "real") return
+        // null;`) is the load-bearing protection — without that
+        // gate active, the modal can't even open. Defense-in-
+        // depth was strictly worse than the user-visible bug it
+        // caused, so it's removed.
         return {
           timeTravelActive: true,
           timeTravelDate: date,

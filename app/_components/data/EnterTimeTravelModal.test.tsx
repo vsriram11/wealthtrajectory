@@ -214,12 +214,13 @@ describe("EnterTimeTravelModal — flow control", () => {
   });
 });
 
-describe("EnterTimeTravelModal — slice-level mode gate (defense in depth)", () => {
-  it("Confirm in DEMO mode does NOT enter time-travel (slice refuses)", () => {
-    // The slice's enterTimeTravel gates on mode==="real". If
-    // somehow the modal got opened in demo mode (SnapshotsManager
-    // is gated at the UI layer, but defense-in-depth here), the
-    // slice refuses the entry silently. Banner would never appear.
+describe("EnterTimeTravelModal — entry works in any mode (slice gate removed)", () => {
+  it("Confirm in DEMO mode also succeeds (UI gate is load-bearing, not the slice)", () => {
+    // The slice-level mode gate was removed after a user-reported
+    // no-op bug; SnapshotsManager's UI gate (render-null in demo)
+    // is the load-bearing protection. The slice now accepts entry
+    // regardless of mode — which is the correct behavior given the
+    // upstream gate keeps the modal from opening in demo.
     useAppStore.setState({ mode: "demo" });
     render(<EnterTimeTravelModal open onClose={vi.fn()} />);
     const confirmBtn = screen.getByRole("button", {
@@ -228,6 +229,6 @@ describe("EnterTimeTravelModal — slice-level mode gate (defense in depth)", ()
     act(() => {
       fireEvent.click(confirmBtn);
     });
-    expect(useAppStore.getState().timeTravelActive).toBe(false);
+    expect(useAppStore.getState().timeTravelActive).toBe(true);
   });
 });

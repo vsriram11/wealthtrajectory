@@ -54,17 +54,73 @@ export type BucketSeries = Partial<Record<AssetClass, ClassSeries>>;
  * (t, valueUSD) points sorted ascending by t. Rows without
  * `household` are skipped (we'd have no way to know the per-class
  * split). Empty buckets are omitted from the result.
+ *
+ * CONSTANT COMPOSITION (user-reported fix): only sum holdings
+ * whose `id` appears in BOTH the first AND last snapshot. New
+ * holdings added mid-window — including positions the user added
+ * to the system with `acquiredAt` in the past — would otherwise
+ * inflate the latest bucket value while leaving earlier buckets
+ * unchanged, producing an absurdly large CAGR. User flag:
+ * "added position with acquiredAt 2021 — shows in CAGR between
+ * yesterday and today, which is wrong." Fix: anchor the bucket
+ * computation to the intersection of {first-snap holding ids,
+ * last-snap holding ids}, giving a true "apples to apples" series.
  */
 export function buildAssetClassSeries(snapshots: Snapshot[]): BucketSeries {
   const byClass = new Map<AssetClass, ClassSeries>();
   // Sort defensively — callers usually pass loadSnapshots() output
   // which is already sorted, but we shouldn't assume.
   const sorted = [...snapshots].sort((a, b) => a.t - b.t);
-  for (const snap of sorted) {
+  const composition = sorted.filter((s) => s.household);
+  if (composition.length < 2) {
+    // Single-snapshot case: just bucket whatever holdings are
+    // present. Composition stability is irrelevant when there's
+    // only one data point. Caller (e.g. summarizeClassReturns)
+    // will skip series < 2 points downstream anyway.
+    const single = composition[0];
+    if (single?.household) {
+      const bucketTotals = new Map<AssetClass, number>();
+      for (const acct of single.household.accounts) {
+        for (const h of acct.holdings ?? []) {
+          const cls = holdingClass(h);
+          const v = Number.isFinite(h.valueUSD) ? h.valueUSD : 0;
+          bucketTotals.set(cls, (bucketTotals.get(cls) ?? 0) + v);
+        }
+      }
+      for (const [cls, v] of bucketTotals) {
+        byClass.set(cls, [{ t: single.t, valueUSD: v }]);
+      }
+    }
+    const out: BucketSeries = {};
+    for (const [cls, series] of byClass) out[cls] = series;
+    return out;
+  }
+  // Compute the intersection: holding IDs present in BOTH the
+  // first AND the last composition-bearing snapshot. These are
+  // the holdings whose price-trajectory we can compute "constant
+  // composition" CAGR on.
+  const idsIn = (snap: Snapshot): Set<string> => {
+    const out = new Set<string>();
+    if (!snap.household) return out;
+    for (const acct of snap.household.accounts) {
+      for (const h of acct.holdings ?? []) {
+        out.add(h.id);
+      }
+    }
+    return out;
+  };
+  const firstIds = idsIn(composition[0]);
+  const lastIds = idsIn(composition[composition.length - 1]);
+  const commonIds = new Set<string>();
+  for (const id of firstIds) {
+    if (lastIds.has(id)) commonIds.add(id);
+  }
+  for (const snap of composition) {
     if (!snap.household) continue;
     const bucketTotals = new Map<AssetClass, number>();
     for (const acct of snap.household.accounts) {
       for (const h of acct.holdings ?? []) {
+        if (!commonIds.has(h.id)) continue;
         const cls = holdingClass(h);
         const v = Number.isFinite(h.valueUSD) ? h.valueUSD : 0;
         bucketTotals.set(cls, (bucketTotals.get(cls) ?? 0) + v);
