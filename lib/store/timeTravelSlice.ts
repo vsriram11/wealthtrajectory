@@ -236,20 +236,40 @@ export function createTimeTravelSliceActions(
         // restores cleanly). Load the snapshot's household +
         // assumptions into the live store so the editor picks
         // up exactly where the snapshot left off.
+        //
+        // DEEP-CLONE the snapshot's household + assumptions:
+        // the snapshot object is held by reference in
+        // SnapshotsManager's React state AND in the Dexie cache.
+        // Without a clone, editing any holding during the
+        // session mutates the snapshot in place — visible after
+        // Exit (no save) when the user re-opens the row and sees
+        // discarded edits, and corrupts the IDB cache row.
+        //
+        // structuredClone is SAFE here: the snapshot was loaded
+        // from IDB so it's plain serializable data — none of the
+        // Proxy/cycle hazards that forced enterTimeTravel to use
+        // by-reference baselines on live state.
         return {
           timeTravelActive: true,
           timeTravelDate: snap.date,
           baselineHousehold: s.household,
           baselineAssumptions: s.assumptions,
           editingSnapshotT: snap.t,
-          household: snap.household,
-          ...(snap.assumptions ? { assumptions: snap.assumptions } : {}),
+          household: structuredClone(snap.household),
+          ...(snap.assumptions
+            ? { assumptions: structuredClone(snap.assumptions) }
+            : {}),
+          // Reset the selected member — the snapshot's member
+          // roster can differ from live state, so the live
+          // selectedMemberId may point at a stranger. Drop to
+          // null (Household view) and let the user re-select.
+          selectedMemberId: null,
           timeTravelPriceStatus: {
             appliedSymbols: [],
             clampedSymbols: [],
             failedSymbols: [],
           },
-        };
+        } as Partial<Ctx>;
       }),
     exitTimeTravelDiscard: () =>
       set((s) => {

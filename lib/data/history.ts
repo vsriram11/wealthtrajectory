@@ -1,8 +1,9 @@
 import type { Quote } from "@/lib/data/quotes";
-import { priceAt } from "@/lib/data/quotes";
+import { priceAtDetailed } from "@/lib/data/quotes";
 import type { Snapshot } from "@/lib/persistence/persistence";
 import {
   filterHousehold,
+  householdForRollups,
   householdNetWorth,
   type Account,
   type Holding,
@@ -38,9 +39,32 @@ export function memberFilteredSnapshots(
   // the cost is one filter pass on a tiny list (snapshots <100).
   const finite = snapshots.filter((s) => Number.isFinite(s.t));
   if (!memberId) {
-    // Pass-through identity when no NaN rows were filtered, so
-    // memoization downstream stays stable on clean data.
-    return finite.length === snapshots.length ? snapshots : finite;
+    // R2 audit CRITICAL: even on Household view (memberId=null),
+    // every snapshot's household MUST be passed through
+    // householdForRollups so an `includeInRollup=false` member's
+    // accounts drop out of past chart points the same way they
+    // drop out of today's headline NW. Without this, chart shows
+    // a discontinuity at the snapshot boundary.
+    //
+    // Short-circuit when nothing changes: if every snapshot lacks
+    // a household payload OR has no excluded members, the scope
+    // helper returns the same reference (identity preserved) and
+    // we hand back the original array so memoization downstream
+    // stays stable.
+    const scoped = finite.map((s) => {
+      if (!s.household) return s;
+      const scopedHh = householdForRollups(s.household);
+      if (scopedHh === s.household) return s;
+      return {
+        ...s,
+        household: scopedHh,
+        netWorthUSD: householdNetWorth(scopedHh),
+      };
+    });
+    const anyChanged =
+      scoped.some((s, i) => s !== finite[i]) ||
+      finite.length !== snapshots.length;
+    return anyChanged ? scoped : snapshots;
   }
   const out: Snapshot[] = [];
   for (const s of finite) {
@@ -202,9 +226,16 @@ export function reconstructHistory(
           "acquiredAt" in h ? (h.acquiredAt as number | null | undefined) : null;
         const claimedOld =
           acquiredAt != null && acquiredAt < oldestSnapshotT;
+        // R6 audit CRITICAL: also require valueUSD >= 0. A holding
+        // with a negative valueUSD (data-import corruption / a
+        // short position recorded incorrectly) would subtract from
+        // every historical bucket and produce a phantom negative
+        // band across the entire chart. Track the ID either way so
+        // composeNetWorthAt SKIPS it (no back-projection), but
+        // don't FLAT-line the negative value across history.
         if (claimedOld && Number.isFinite(h.valueUSD)) {
           newlyAddedIds.add(h.id);
-          newlyAddedFlatUSD += h.valueUSD;
+          if (h.valueUSD > 0) newlyAddedFlatUSD += h.valueUSD;
         }
       }
     }
@@ -282,8 +313,17 @@ function composeNetWorthAt(
       if (newlyAddedIds.has(h.id)) continue;
       const q = quotes[h.symbol.toUpperCase()];
       let price: number;
-      if (q && q.history.length > 0) {
-        price = priceAt(q, t) ?? h.lastPriceUSD;
+      const detailed = q ? priceAtDetailed(q, t) : null;
+      // CRITICAL (R2 audit): treat a CLAMPED lookup as a MISS and
+      // fall through to CAGR back-projection. The old code took the
+      // clamped price (oldest sample in the history window) for any
+      // t before the window — so a 6-yr-old timepoint with a 5-yr
+      // quote history would silently use the 5-yr-old price as if
+      // it were the 6-yr-old price, making the chart flat-line at
+      // the oldest sample and inventing zero growth. Falling to the
+      // CAGR branch is the documented "estimated" behavior.
+      if (detailed && !detailed.clamped) {
+        price = detailed.price;
       } else {
         // Synthesize the back-projection from the holding's expected
         // real CAGR. Better than a flat line when upstream history

@@ -58,6 +58,18 @@ export function TimeTravelBanner() {
     existingLabel: string | null;
     existingSource: "auto" | "manual" | "legacy";
   } | null>(null);
+  // R5 audit BLOCK: two-stage Exit confirm. After spending minutes
+  // editing a backdated session, a single accidental click on Exit
+  // discards everything with no undo. Mirror the
+  // SnapshotsManager.pendingDelete 4-second arm pattern: first
+  // click flips the button to "Confirm discard?", second click
+  // within 4s exits, otherwise auto-disarm.
+  const [exitArmed, setExitArmed] = useState(false);
+  useEffect(() => {
+    if (!exitArmed) return;
+    const id = window.setTimeout(() => setExitArmed(false), 4000);
+    return () => window.clearTimeout(id);
+  }, [exitArmed]);
   const mountedRef = useRef(true);
   useEffect(() => {
     return () => {
@@ -187,6 +199,10 @@ export function TimeTravelBanner() {
 
   const handleExit = () => {
     if (busy) return;
+    if (!exitArmed) {
+      setExitArmed(true);
+      return;
+    }
     exitTimeTravelDiscard();
   };
 
@@ -277,10 +293,18 @@ export function TimeTravelBanner() {
                 type="button"
                 onClick={handleExit}
                 disabled={busy}
-                className="rounded-md border border-bg/40 bg-amber-300/60 px-3 py-1 text-[11px] font-semibold text-bg disabled:opacity-40 active:opacity-80"
-                aria-label="Discard all time-travel edits and exit"
+                className={`rounded-md border px-3 py-1 text-[11px] font-semibold text-bg disabled:opacity-40 active:opacity-80 ${
+                  exitArmed
+                    ? "border-red-700 bg-red-300"
+                    : "border-bg/40 bg-amber-300/60"
+                }`}
+                aria-label={
+                  exitArmed
+                    ? "Confirm: discard all time-travel edits and exit"
+                    : "Discard all time-travel edits and exit"
+                }
               >
-                Exit
+                {exitArmed ? "Confirm discard?" : "Exit"}
               </button>
             </>
           )}

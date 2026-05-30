@@ -10,7 +10,7 @@ import {
   type HealthPlan,
 } from "@/lib/health/healthPlans";
 import { formatUSD } from "@/lib/format";
-import type { Household } from "@/lib/types";
+import { activeMemberIds, type Household } from "@/lib/types";
 import { SectionHeader } from "@/app/_components/ui/SectionHeader";
 import { ImportanceCard } from "./health/ImportanceCard";
 import {
@@ -45,10 +45,24 @@ export function HealthPanel() {
   const plans = useAppStore((s) => s.healthPlans);
   const weightsByMember = useAppStore((s) => s.healthImportanceWeights);
 
-  const memberIds = household.members.map((m) => m.id);
+  // R3 audit HIGH / rollup-contract gap: Member.includeInRollup is
+  // the single switch for "include this member in household
+  // aggregates," and HealthPlan.ownerId is a rollup-aware key. Use
+  // activeMemberIds (which respects includeInRollup) instead of
+  // raw household.members so an excluded member's premium drops
+  // out of the household total — consistent with how every other
+  // ownerId-keyed collection cascades. ALSO pre-filter the plans
+  // themselves so a plan owned by an excluded member's premium
+  // never lands in totalMonthlyUSD.
+  const activeIds = useMemo(() => activeMemberIds(household), [household]);
+  const memberIds = useMemo(() => Array.from(activeIds), [activeIds]);
+  const rollupPlans = useMemo(
+    () => plans.filter((p) => activeIds.has(p.ownerId)),
+    [plans, activeIds],
+  );
   const rollup = useMemo(
-    () => rollupHealthPlans(plans, memberIds),
-    [plans, memberIds],
+    () => rollupHealthPlans(rollupPlans, memberIds),
+    [rollupPlans, memberIds],
   );
 
   const inMemberView = selectedMemberId != null;

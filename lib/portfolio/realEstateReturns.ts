@@ -249,23 +249,33 @@ function newtonRaphsonIRR(
 }
 
 /**
- * Bisection IRR over [-0.99, +10] — covers the practical range
- * of real-world property returns (total loss → moonshot). Slow
- * but guaranteed to converge IF the NPV function changes sign
- * within the bracket. Falls back to null only when no sign change
- * exists (degenerate cashflow shape).
+ * Bisection IRR over [-0.99, +10] initially — expands `hi`
+ * exponentially up to +1000 if the bracket doesn't yet sign-flip.
+ * Covers the practical range of real-world property returns AND the
+ * thin-equity / leverage-flip cases the original fixed bracket
+ * silently dropped (R3 audit CRITICAL #1: 3x leveraged doubled in
+ * 2y → IRR ≈ 200%+ would land outside [-0.99, 10] and the metric
+ * vanished from the UI). Returns null only when the cashflow is
+ * truly degenerate (no sign change anywhere up to +1000% annual).
  */
 function bisectionIRR(
-  cashflows: Array<{ t: number; amount: number }>,
+  _cashflows: Array<{ t: number; amount: number }>,
   npv: (r: number) => number,
 ): number | null {
-  void cashflows;
   let lo = -0.99;
   let hi = 10;
   let fLo = npv(lo);
   let fHi = npv(hi);
   if (!Number.isFinite(fLo) || !Number.isFinite(fHi)) return null;
-  if (fLo * fHi > 0) return null; // no sign change → no root in bracket
+  // Expand `hi` exponentially when there's no sign change yet — a
+  // legitimate high-IRR scenario (extreme leverage with quick exit)
+  // can sit outside the initial bracket.
+  while (fLo * fHi > 0 && hi < 1000) {
+    hi = Math.min(1000, hi * 10);
+    fHi = npv(hi);
+    if (!Number.isFinite(fHi)) return null;
+  }
+  if (fLo * fHi > 0) return null; // truly no sign change in [-0.99, 1000]
   const TOLERANCE = 1e-8;
   for (let i = 0; i < 200; i++) {
     const mid = (lo + hi) / 2;

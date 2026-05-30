@@ -143,17 +143,29 @@ describe("TimeTravelBanner", () => {
     expect(useAppStore.getState().timeTravelDate).toBeNull();
   });
 
-  it("Exit flow: discards without writing", () => {
+  it("Exit flow: discards without writing (two-stage confirm)", () => {
     act(() => {
       useAppStore.getState().enterTimeTravel("2023-06-15");
     });
     const startRev = useAppStore.getState().snapshotsRevision;
     render(<TimeTravelBanner />);
+    // R5 audit BLOCK: Exit is now two-stage. First click ARMS the
+    // confirmation (button flips to "Confirm discard?"); second
+    // click within 4s actually exits. Single-click no longer
+    // discards an entire session's edits accidentally.
     const exitBtn = screen.getByRole("button", {
       name: /Discard all time-travel edits/i,
     });
     act(() => {
       fireEvent.click(exitBtn);
+    });
+    // After first click, still active — confirmation pending.
+    expect(useAppStore.getState().timeTravelActive).toBe(true);
+    const confirmBtn = screen.getByRole("button", {
+      name: /Confirm: discard all time-travel edits/i,
+    });
+    act(() => {
+      fireEvent.click(confirmBtn);
     });
     expect(recordSnapshotMock).not.toHaveBeenCalled();
     expect(useAppStore.getState().snapshotsRevision).toBe(startRev);

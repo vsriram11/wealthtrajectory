@@ -287,8 +287,14 @@ describe("Time-travel slice — enterTimeTravelEditingSnapshot (re-edit existing
     expect(s.state.timeTravelActive).toBe(true);
     expect(s.state.timeTravelDate).toBe("2023-06-15");
     expect(s.state.editingSnapshotT).toBe(SNAP_T);
-    // Live household is now the snapshot's household.
-    expect(s.state.household).toBe(SNAP_HH);
+    // Live household is now the snapshot's household — VALUE
+    // equal, but a DEEP CLONE (not a shared reference). The
+    // clone is the R1 audit critical fix: previously, editing
+    // the loaded household mutated the snapshot object held by
+    // SnapshotsManager AND the Dexie cache row, leaking
+    // discarded edits across the Exit boundary.
+    expect(s.state.household).toStrictEqual(SNAP_HH);
+    expect(s.state.household).not.toBe(SNAP_HH);
     // Baseline preserved the user's pre-edit state for Exit.
     expect(s.state.baselineHousehold).toBe(liveHouseholdBefore);
   });

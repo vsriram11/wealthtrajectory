@@ -260,8 +260,12 @@ export function priceAtDetailed(
 ): PriceAtResult | null {
   const h = quote.history;
   if (h.length === 0) return null;
-  if (atMs <= h[0].t) return { price: h[0].p, clamped: true };
-  if (atMs >= h[h.length - 1].t)
+  // Strict inequality on the boundary: an exact match against the
+  // first or last sample is INSIDE the available window — flagging
+  // it `clamped` makes the historical-price flow skip a valid
+  // sample (R2 audit HIGH). Only out-of-window lookups clamp.
+  if (atMs < h[0].t) return { price: h[0].p, clamped: true };
+  if (atMs > h[h.length - 1].t)
     return { price: h[h.length - 1].p, clamped: true };
   let lo = 0;
   let hi = h.length - 1;
@@ -270,7 +274,13 @@ export function priceAtDetailed(
     if (h[mid].t <= atMs) lo = mid;
     else hi = mid;
   }
-  return { price: h[lo].p, clamped: false };
+  // After the loop, `hi` may be the exact-end match; otherwise
+  // `lo` is the at-or-before index. Pick whichever is exactly
+  // atMs first; fall back to lo (the standard at-or-before).
+  return {
+    price: h[hi].t <= atMs ? h[hi].p : h[lo].p,
+    clamped: false,
+  };
 }
 
 /**

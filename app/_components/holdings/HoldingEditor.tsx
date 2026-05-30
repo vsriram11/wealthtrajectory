@@ -293,8 +293,12 @@ function EditorBody({ holding, onClose }: { holding: Holding; onClose: () => voi
               prefix="$"
               value={+holding.lastPriceUSD.toFixed(4)}
               step={0.01}
-              min={0}
-              onChange={(v) => setHoldingPrice(holding.id, v, { manual: true })}
+              min={0.0001}
+              onChange={(v) =>
+                v > 0
+                  ? setHoldingPrice(holding.id, v, { manual: true })
+                  : undefined
+              }
               help={
                 timeTravelActive
                   ? `Enter the per-share price as of ${timeTravelDate ?? "the backdate"}. Value = shares × price.`

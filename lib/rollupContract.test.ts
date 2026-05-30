@@ -418,4 +418,61 @@ describe("rollup-include flag — full cascade through every rollup-touching sur
       expect(otherMembers.some((m) => m.id === acct.ownerId)).toBe(false);
     }
   });
+
+  it("Health plans cascade through the includeInRollup flag (round-7 audit HIGH fix)", async () => {
+    // R3 audit: rollupHealthPlans takes a memberIds list to
+    // compute coverage, but HealthPanel was passing the RAW
+    // household.members ids — so a member with
+    // includeInRollup=false had their premium counted in the
+    // household total. Mirror the failure-driven contract:
+    // exclude a member with a plan and assert their premium
+    // drops out.
+    const { rollupHealthPlans } = await import(
+      "@/lib/health/healthPlans"
+    );
+    const sBefore = useAppStore.getState();
+    const jordanId = sBefore.household.members.find(
+      (m) => m.displayName === "Jordan",
+    )!.id;
+    // Seed a plan owned by Jordan so we have something to drop.
+    // Demo state may not include healthPlans by default; if it
+    // does, we add ours on top.
+    const seed = {
+      id: "plan-jordan-test" as never,
+      ownerId: jordanId as never,
+      name: "Test PPO",
+      monthlyPremiumUSD: 500,
+      coveredMemberIds: [jordanId] as never[],
+      deductibleUSD: 1000,
+      outOfPocketMaxUSD: 5000,
+      coinsuranceFraction: 0.2,
+      copayUSD: 30,
+      effectiveDate: "2025-01-01",
+    };
+    useAppStore.setState({
+      healthPlans: [...sBefore.healthPlans, seed as never],
+    });
+
+    // Activate-active baseline: Jordan IS included.
+    const sActive = useAppStore.getState();
+    const activeAll = Array.from(activeMemberIds(sActive.household));
+    const beforeRollup = rollupHealthPlans(
+      sActive.healthPlans.filter((p) => activeAll.includes(p.ownerId)),
+      activeAll,
+    );
+    expect(beforeRollup.totalMonthlyUSD).toBeGreaterThanOrEqual(500);
+
+    // Exclude Jordan → their plan must drop out.
+    useAppStore.getState().setMemberIncludeInRollup(jordanId, false);
+    const sExcluded = useAppStore.getState();
+    const activeAfter = Array.from(activeMemberIds(sExcluded.household));
+    const afterRollup = rollupHealthPlans(
+      sExcluded.healthPlans.filter((p) => activeAfter.includes(p.ownerId)),
+      activeAfter,
+    );
+    expect(afterRollup.totalMonthlyUSD).toBe(
+      beforeRollup.totalMonthlyUSD - 500,
+    );
+    expect(afterRollup.coveredMemberIds).not.toContain(jordanId);
+  });
 });

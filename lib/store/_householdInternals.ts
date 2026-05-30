@@ -165,11 +165,19 @@ export function applyLivePriceTo<Ctx extends { household: Household }>(
           if (h.isManualPrice) return h;
           if (h.symbol.toUpperCase() !== upperSymbol) return h;
           const firstFetch = h.lastPricedAt == null;
-          // Historical mode: don't recompute shares for a fresh
-          // holding (user's entered dollar value is authoritative).
-          // Existing holdings (lastPricedAt != null) still see the
-          // historical price applied to their share count.
-          if (mode === "historical" && firstFetch) {
+          // Historical mode: NEVER recompute valueUSD from
+          // existing shares × historical price. The shares were
+          // computed at TODAY's price → multiplying by past
+          // price yields garbage (audit R1 C2). Only update
+          // the lastPriceUSD + lastPricedAt fields so the UI
+          // can show "Last refreshed at <date>" without
+          // corrupting the user's dollar values.
+          //
+          // For the firstFetch case, same rule: user's
+          // entered dollar value is authoritative; don't divide
+          // by historical price to derive shares either (that
+          // would yield garbage shares).
+          if (mode === "historical") {
             return {
               ...h,
               lastPriceUSD: price,
