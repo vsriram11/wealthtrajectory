@@ -356,6 +356,20 @@ export function AuthHydrator() {
       if (!state.user) {
         writeCachedSub(null);
         setSubscription("free");
+        // Audit R2 (Layer 1/2/3): clear pendingInitialSyncConfirm on
+        // sign-out. Without this, a sign-in that set the flag but
+        // didn't get resolved before sign-out (idle timeout,
+        // other-device kick, manual sign-out) leaves the modal-
+        // backing flag set. The modal itself gates on `user` too (so
+        // it won't render), but clearing here ensures the flag
+        // doesn't survive into the NEXT sign-in's AuthHydrator pass
+        // — which could otherwise incorrectly skip the AuthHydrator
+        // initial-sync logic by finding the flag already true.
+        if (state.pendingInitialSyncConfirm) {
+          useAppStore
+            .getState()
+            .setGoogleSyncState({ pendingInitialSyncConfirm: false });
+        }
         return;
       }
       void handleUser(state.user.email);

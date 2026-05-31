@@ -28,22 +28,45 @@ import { pushToDrive } from "@/lib/sync/cloudSync";
  */
 export function InitialSyncConfirmModal() {
   const pending = useAppStore((s) => s.pendingInitialSyncConfirm);
+  const user = useAppStore((s) => s.user);
   const setGoogleSyncState = useAppStore((s) => s.setGoogleSyncState);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const confirmButtonRef = useRef<HTMLButtonElement | null>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
 
+  // Audit R2 (Layer 1/2/3): also gate on `user`. SessionEnforcer's
+  // other-device kick, CloudSyncer's session-marker mismatch, idle
+  // timeout, or a manual sign-out can null the user between
+  // AuthHydrator setting pendingInitialSyncConfirm and the user
+  // clicking a button. If the modal stays interactable:
+  //   - Push: pushToDrive returns "error" on `!s.user`; the modal
+  //     stays open showing "Push failed" with no actionable retry
+  //     surface (the user has to re-sign-in elsewhere first).
+  //   - Skip: would set googleLastSyncAt for a signed-out session.
+  //     Then the user signs into a DIFFERENT account: that account's
+  //     first edit triggers a CloudSyncer debounce-push, but the
+  //     googleLastSyncAt != null gate is already satisfied, so the
+  //     push fires WITHOUT an initial pull — risking overwrite of
+  //     the new account's real Drive backup with the prior local
+  //     state.
+  //
+  // The defensive fix in AuthHydrator's user-change subscriber also
+  // clears pendingInitialSyncConfirm on sign-out, but gating here
+  // protects against any window where the flag survives the
+  // sign-out (subscriber ordering, slice update race).
+  const visible = pending && !!user;
+
   useEffect(() => {
-    if (!pending) return;
+    if (!visible) return;
     previousFocusRef.current = document.activeElement as HTMLElement | null;
     confirmButtonRef.current?.focus();
     return () => {
       previousFocusRef.current?.focus?.();
     };
-  }, [pending]);
+  }, [visible]);
 
-  if (!pending) return null;
+  if (!visible) return null;
 
   const handleConfirm = async () => {
     setBusy(true);

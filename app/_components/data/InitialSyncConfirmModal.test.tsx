@@ -34,6 +34,13 @@ function resetSyncState() {
     googleLastSyncAt: null,
     lastSyncOutcome: null,
     googleSyncing: false,
+    user: {
+      sub: "test-sub",
+      email: "test@example.com",
+      name: "Test",
+      pictureUrl: null,
+      emailVerified: true,
+    },
   });
 }
 
@@ -53,7 +60,7 @@ describe("InitialSyncConfirmModal — gated rendering", () => {
     expect(container.firstChild).toBeNull();
   });
 
-  it("renders the dialog when pendingInitialSyncConfirm is true", () => {
+  it("renders the dialog when pendingInitialSyncConfirm is true AND user is signed in", () => {
     act(() => {
       useAppStore.setState({ pendingInitialSyncConfirm: true });
     });
@@ -61,6 +68,26 @@ describe("InitialSyncConfirmModal — gated rendering", () => {
     expect(
       screen.getByRole("dialog", { name: /Push current data to Drive/i }),
     ).toBeTruthy();
+  });
+
+  it("renders nothing when pending=true but user is signed out (Audit R2)", () => {
+    // SessionEnforcer / CloudSyncer / manual sign-out can null the
+    // user between AuthHydrator setting pendingInitialSyncConfirm and
+    // the user clicking a button. The modal MUST NOT be interactable
+    // in that state — clicking Push would silent-error, and clicking
+    // Skip would set googleLastSyncAt for a signed-out session, which
+    // would falsely satisfy the initial-sync gate after the next
+    // sign-in (potentially to a different account → that account's
+    // first edit would auto-push without an initial pull, risking
+    // overwrite of its real Drive backup).
+    act(() => {
+      useAppStore.setState({
+        pendingInitialSyncConfirm: true,
+        user: null,
+      });
+    });
+    const { container } = render(<InitialSyncConfirmModal />);
+    expect(container.firstChild).toBeNull();
   });
 });
 
