@@ -450,8 +450,29 @@ export function isDemoHouseholdStrict(h: Household): boolean {
     // customization. Within-holding price drift from PriceRefresher
     // is allowed; the count is the structural signal.
     if (a.holdings.length !== b.holdings.length) return false;
+    // Audit R3 (Layer 1/2/3): also check monthlyContributionUSD. A
+    // user bumping their 401(k) contribution from $1,958 → $2,000
+    // (most-common edit during a salary review) IS user
+    // customization. Pre-fix this slipped through as still-demo,
+    // and CloudSyncer's gate silently refused to push the edit.
+    if (a.monthlyContributionUSD !== b.monthlyContributionUSD) return false;
   }
   if (h.liabilities.length !== DEMO_HOUSEHOLD.liabilities.length) return false;
+  // Audit R3 (Layer 1/2/3): liability field check. Pre-fix only the
+  // count was compared, so edits to balanceUSD, name, ownerId, etc.
+  // (e.g., a user paying down the auto loan from $22k → $18k) were
+  // undetected — household still looked strict-demo and the user's
+  // edit stayed local-only forever. Deleting one and adding a
+  // different one with a different ID was also a count-match-but-
+  // content-differ case the pre-fix check missed.
+  for (let i = 0; i < h.liabilities.length; i++) {
+    const a = h.liabilities[i];
+    const b = DEMO_HOUSEHOLD.liabilities[i];
+    if (a.id !== b.id) return false;
+    if (a.name !== b.name) return false;
+    if (a.balanceUSD !== b.balanceUSD) return false;
+    if (a.ownerId !== b.ownerId) return false;
+  }
   return true;
 }
 

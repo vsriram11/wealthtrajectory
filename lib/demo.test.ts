@@ -203,4 +203,71 @@ describe("isDemoHouseholdStrict", () => {
       }),
     ).toBe(false);
   });
+
+  // Audit R3 (Layer 1/2/3): the pre-fix strict-demo check only
+  // compared liability/holding ARRAY LENGTHS — never individual
+  // field values within them. That left several legitimate user
+  // customizations undetected, silently blocking the user's edits
+  // from being pushed to Drive (CloudSyncer gate trips, no push,
+  // no UX indication that sync is stuck).
+
+  it("returns false when an account's monthlyContributionUSD is edited", () => {
+    // Pre-fix: a user who bumps their 401k contribution from $1958
+    // → $2000/mo (most-common edit during a salary review) was
+    // still strict-demo. CloudSyncer skipped the push; the edit
+    // stayed local-only forever.
+    const customized = {
+      ...DEMO_HOUSEHOLD,
+      accounts: DEMO_HOUSEHOLD.accounts.map((a, i) =>
+        i === 0
+          ? { ...a, monthlyContributionUSD: a.monthlyContributionUSD + 42 }
+          : a,
+      ),
+    };
+    expect(isDemoHouseholdStrict(customized)).toBe(false);
+  });
+
+  it("returns false when a liability balance is edited", () => {
+    // Pre-fix: paying down student loan / auto loan / credit card
+    // counted as customization in spirit, but only the count was
+    // checked. A user who edits balances to reflect their actual
+    // debt was still strict-demo from the check's perspective.
+    const customized = {
+      ...DEMO_HOUSEHOLD,
+      liabilities: DEMO_HOUSEHOLD.liabilities.map((l, i) =>
+        i === 0 ? { ...l, balanceUSD: l.balanceUSD - 1_000 } : l,
+      ),
+    };
+    expect(isDemoHouseholdStrict(customized)).toBe(false);
+  });
+
+  it("returns false when a liability is renamed", () => {
+    const customized = {
+      ...DEMO_HOUSEHOLD,
+      liabilities: DEMO_HOUSEHOLD.liabilities.map((l, i) =>
+        i === 0 ? { ...l, name: l.name + " (paid off)" } : l,
+      ),
+    };
+    expect(isDemoHouseholdStrict(customized)).toBe(false);
+  });
+
+  it("returns false when a liability is replaced with a different one (same count)", () => {
+    // Edge: user deletes the demo auto loan and adds their own
+    // personal loan. Count stays at 3 — pre-fix this looked
+    // identical to the seed.
+    const customized = {
+      ...DEMO_HOUSEHOLD,
+      liabilities: DEMO_HOUSEHOLD.liabilities.map((l, i) =>
+        i === 0
+          ? {
+              ...l,
+              id: "user-personal-loan",
+              name: "Personal loan",
+              balanceUSD: 5_000,
+            }
+          : l,
+      ),
+    };
+    expect(isDemoHouseholdStrict(customized)).toBe(false);
+  });
 });
