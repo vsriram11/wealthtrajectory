@@ -321,6 +321,11 @@ export function reconstructHistory(
         // own liabilities are the authoritative record of debt at
         // that time — nothing to filter.
         compSnap ? new Set<string>() : newlyAddedLiabilityIds,
+        // R2 audit: when composition came from a snapshot, its
+        // holdings carry already-back-projected `lastPriceUSD`
+        // values. Project quote-missing fallbacks relative to the
+        // snap's anchor so we don't double-discount.
+        compSnap ? compSnap.t : undefined,
       ) + newlyAddedFlatUSD;
     out.push({ t, netWorthUSD: nw });
   }
@@ -425,6 +430,27 @@ function composeNetWorthAt(
    * authoritative and the caller passes an empty set here.
    */
   newlyAddedLiabilityIds: Set<string> = new Set(),
+  /**
+   * R2 audit: when `household` is a SNAPSHOT's embedded household
+   * (rather than the live one), its `lastPriceUSD` is already
+   * recorded AS OF the snapshot's anchor time. Without this
+   * parameter, the quote-missing fallback path divides
+   * `lastPriceUSD` by CAGR over the FULL (now - t) interval —
+   * applying the CAGR discount TWICE on top of the snapshot's
+   * already-back-projected price. The result is dramatically
+   * under-valued historical buckets (roughly half what they
+   * should be for a 5y-old snapshot at typical equity CAGRs).
+   *
+   * Pass `snapAnchorT = snap.t` when iterating a snapshot's
+   * composition so the fallback projects relative to the
+   * snapshot's anchor (delta = anchorT - t) — which yields the
+   * recorded lastPriceUSD exactly when t == anchorT and a small
+   * forward/back projection between adjacent snap anchors.
+   *
+   * When `undefined` (live household path), behavior matches the
+   * pre-audit code: project from `now`.
+   */
+  snapAnchorT?: number,
 ): number {
   const cashTotal = sumCash(household);
   const liabilitiesTotal = household.liabilities.reduce(
@@ -520,7 +546,18 @@ function composeNetWorthAt(
         // (no upstream data available). Better than nothing for
         // long-tail tickers that aren't in the static cache and
         // whose dynamic fetch failed.
-        const monthsBack = (now - t) / (30.44 * 24 * 60 * 60 * 1000);
+        //
+        // R2 audit: when iterating a snapshot's embedded household,
+        // its `lastPriceUSD` is recorded AS-OF the snap's anchor —
+        // not today. Project relative to `snapAnchorT` so the
+        // estimate at bucket t = snap.t reproduces the recorded
+        // value (no double-discount). For inter-snap buckets,
+        // monthsBack can be negative (bucket falls AFTER the snap
+        // anchor) — that yields a small forward-projection, which
+        // is the right shape for "what the price should have been
+        // between this snap and the next."
+        const referenceT = snapAnchorT ?? now;
+        const monthsBack = (referenceT - t) / (30.44 * 24 * 60 * 60 * 1000);
         const monthlyRate =
           h.expectedRealCAGR === 0
             ? 0
@@ -604,7 +641,20 @@ function effectiveSnapNW(
   // No quotes available: fall back to the recorded NW (best we
   // can do without market data — same as the pre-fix behavior).
   if (!quotes) return snap.netWorthUSD;
-  return composeNetWorthAt(snap.household, quotes, snap.t, now);
+  // R2 audit: pass the snap's anchor t so quote-missing fallbacks
+  // anchor their CAGR projection to the snap's recorded moment,
+  // not to `now` — avoids double-discounting when the snap's
+  // lastPriceUSD is already back-projected (the demo-snapshot
+  // factory does this).
+  return composeNetWorthAt(
+    snap.household,
+    quotes,
+    snap.t,
+    now,
+    new Set<string>(),
+    new Set<string>(),
+    snap.t,
+  );
 }
 
 /**

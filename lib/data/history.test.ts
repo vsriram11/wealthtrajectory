@@ -847,6 +847,115 @@ describe("memberFilteredSnapshots (Round-5 fix)", () => {
   });
 });
 
+describe("reconstructHistory — snapshot composition with already-back-projected lastPriceUSD (R2 audit)", () => {
+  // R2 audit: the demo-snapshots refactor now produces snapshots
+  // whose embedded household has BOTH `shares` AND `lastPriceUSD`
+  // already back-projected for that snapshot's anchor time. The
+  // chart's `composeNetWorthAt` quote-missing fallback path
+  // divides `h.lastPriceUSD` by `(1+r)^((now-t)/month)`, which
+  // produces a DOUBLE back-projection when the holding came from
+  // a past snapshot (its lastPriceUSD is already discounted).
+  //
+  // Expected: when the bucket time t equals the snapshot's
+  // anchor time and no quotes are available, the per-holding
+  // contribution is shares × lastPriceUSD — the snapshot's
+  // recorded value at that moment, without further CAGR
+  // re-discounting.
+  it("compose at snap.t with no quotes uses recorded shares × lastPriceUSD (no double-discount)", () => {
+    const T_NOW = Date.UTC(2026, 5, 1, 12);
+    const T_FIVE_YEARS_AGO = T_NOW - 5 * 365 * 24 * 60 * 60 * 1000;
+    // Snapshot's embedded VTI: 50 shares at $200/share = $10,000.
+    // These are "recorded as-of T_FIVE_YEARS_AGO" — the demo
+    // factory builds these by back-projecting today's 200-share /
+    // $400 holding via the share + price curves.
+    const snapHousehold: Household = {
+      id: "hh",
+      members: [{ id: "m1", displayName: "Tester" } as never],
+      accounts: [
+        {
+          id: "a1",
+          ownerId: "m1",
+          displayName: "Brokerage",
+          category: "TAXABLE",
+          holdings: [
+            {
+              id: "h1",
+              kind: "equity" as const,
+              symbol: "VTI",
+              shares: 50,
+              valueUSD: 10_000,
+              lastPriceUSD: 200, // back-projected to T_FIVE_YEARS_AGO
+              lastPricedAt: T_FIVE_YEARS_AGO,
+              currency: "USD",
+              expenseRatio: 0.03,
+              geography: { US: 1, DEVELOPED: 0, EMERGING: 0 },
+              style: {},
+              leverage: 1,
+              expectedRealCAGR: 0.07,
+              isManualPrice: false,
+              acquiredAt: null,
+            },
+          ] as never,
+        } as never,
+      ],
+      liabilities: [],
+    };
+    // "Live today" composition: same VTI grown to 200 shares × $400.
+    const liveHousehold: Household = {
+      ...snapHousehold,
+      accounts: [
+        {
+          ...snapHousehold.accounts[0],
+          holdings: [
+            {
+              ...snapHousehold.accounts[0].holdings[0],
+              shares: 200,
+              lastPriceUSD: 400,
+              valueUSD: 80_000,
+              lastPricedAt: T_NOW,
+            },
+          ] as never,
+        } as never,
+      ],
+    };
+    const snapshots: Snapshot[] = [
+      {
+        t: T_FIVE_YEARS_AGO,
+        netWorthUSD: 10_000,
+        household: snapHousehold,
+      },
+    ];
+    const out = reconstructHistory(
+      liveHousehold,
+      {},
+      "ALL",
+      T_NOW,
+      snapshots,
+    );
+    // Find the bucket closest to T_FIVE_YEARS_AGO (snap anchor).
+    let bucketAtSnap = out[0];
+    let bestDelta = Math.abs(out[0].t - T_FIVE_YEARS_AGO);
+    for (const p of out) {
+      const d = Math.abs(p.t - T_FIVE_YEARS_AGO);
+      if (d < bestDelta) {
+        bestDelta = d;
+        bucketAtSnap = p;
+      }
+    }
+    // The bucket should reflect the snapshot's recorded value
+    // ($10,000) — NOT half that figure (which is what the
+    // double-discounted fallback produced).
+    //
+    // Pre-fix: lastPriceUSD=200 was divided by (1.07)^5 ≈ 1.40
+    // even though the bucket time was AT the snap anchor, so the
+    // per-share price collapsed to ~$143 and the total to ~$7,140.
+    // Tight tolerance because the bucket is essentially at the
+    // anchor — variance only comes from bucket-grid alignment.
+    expect(bucketAtSnap.netWorthUSD).toBeGreaterThan(9_500);
+    expect(bucketAtSnap.netWorthUSD).toBeLessThan(11_500);
+  });
+});
+
 describe("reconstructHistory — newly-added holdings (user-reported fake-gain fix)", () => {
   // USER REPORT: "Added equity today but backdated the acquired
   // on date — history chart shows a big fake gain."
