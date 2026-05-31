@@ -132,6 +132,53 @@ describe("buildDemoSnapshots", () => {
     expect(newestSymbols.has("VTI")).toBe(true);
   });
 
+  it("all five mapped acquisition tickers each appear/disappear at their declared threshold (R5 audit)", () => {
+    // R5 audit: the legacy test only spot-checked BTC + TQQQ. The
+    // ACQUIRED_MONTHS_AGO map drives THREE more tickers
+    // (NTSX/AVUV/QQQM) whose inception behavior should be pinned
+    // too — without this, a typo in the map (e.g. swapping a
+    // value) wouldn't fail a test.
+    const { ACQUIRED_MONTHS_AGO } = __testHooks;
+    // Use the explicit (months, interval) form so the test can
+    // derive monthsAgo for each output snapshot directly from
+    // its index — avoids 30.44-days-per-month drift that would
+    // misclassify boundary snapshots.
+    const MONTHS = 120;
+    const INTERVAL = 6;
+    const snaps = buildDemoSnapshots(NOW, MONTHS, INTERVAL);
+    const symbolsAt = (snap: typeof snaps[number]): Set<string> => {
+      const out = new Set<string>();
+      for (const a of snap.household!.accounts) {
+        for (const h of a.holdings) {
+          if ("symbol" in h) out.add(h.symbol);
+        }
+      }
+      return out;
+    };
+    // The factory emits in oldest→newest order: monthsAgo for
+    // snaps[i] = MONTHS - i * INTERVAL (down to 0 at the last
+    // entry).
+    const tickers = ["BTC", "TQQQ", "NTSX", "AVUV", "QQQM"] as const;
+    for (const ticker of tickers) {
+      const threshold = ACQUIRED_MONTHS_AGO[ticker];
+      for (let i = 0; i < snaps.length; i++) {
+        const monthsAgo = MONTHS - i * INTERVAL;
+        const present = symbolsAt(snaps[i]).has(ticker);
+        if (monthsAgo > threshold) {
+          expect(
+            present,
+            `${ticker} should be ABSENT at monthsAgo=${monthsAgo} (threshold=${threshold})`,
+          ).toBe(false);
+        } else {
+          expect(
+            present,
+            `${ticker} should be PRESENT at monthsAgo=${monthsAgo} (threshold=${threshold})`,
+          ).toBe(true);
+        }
+      }
+    }
+  });
+
   it("varies SHARES across snapshots — older snapshots have fewer shares of the same ticker", () => {
     // The whole reason for the 10y / 6mo rebuild: snapshots should
     // exercise the chart's interpolation by varying shares (not
