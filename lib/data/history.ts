@@ -479,7 +479,41 @@ function composeNetWorthAt(
         // satisfied because the flatline IS the first known
         // close — not today's price. Users understand "estimated
         // at first known price" for pre-inception buckets.
-        price = detailed.price;
+        //
+        // User-reported trailing-edge cliff (demo + signed-out):
+        // the chart showed "May 30 = $1.7M, May 31 = $1.5M" — a
+        // single-day vertical drop at the right edge. Root cause:
+        // when `t` falls AFTER the cached history's last close
+        // (very common — Yahoo's cached close is the previous
+        // trading day's official close, but the live NW pin uses
+        // the holding's INTRADAY `lastPriceUSD` from
+        // PriceRefresher), `priceAtDetailed` clamps to the cached
+        // last close. The right-edge bucket then reads the
+        // clamped close, while the very next bucket (today, pinned
+        // to live NW) reads the intraday price — the gap shows up
+        // as a vertical cliff on the chart.
+        //
+        // Fix: when the lookup is CLAMPED at the END of the cached
+        // window AND the holding has a live `lastPriceUSD` we trust
+        // (PriceRefresher updates it from /api/quote on every
+        // mount), prefer the live price. The trailing region
+        // smoothly bridges the cached-close → live-intraday gap
+        // instead of plateauing on the close and then cliffing to
+        // live at the pin. Start-of-window clamps still use the
+        // historical first close (the original fix above is intact
+        // for the inception case).
+        if (
+          detailed.clamped &&
+          q &&
+          q.history.length > 0 &&
+          t > q.history[q.history.length - 1].t &&
+          Number.isFinite(h.lastPriceUSD) &&
+          h.lastPriceUSD > 0
+        ) {
+          price = h.lastPriceUSD;
+        } else {
+          price = detailed.price;
+        }
       } else {
         // Synthesize the back-projection from the holding's expected
         // real CAGR. ONLY fires when the quote is missing entirely

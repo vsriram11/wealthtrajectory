@@ -1085,3 +1085,134 @@ describe("reconstructHistory — newly-added holdings (user-reported fake-gain f
     expect(out[yearAgoIdx].netWorthUSD).toBe(200_000);
   });
 });
+
+describe("reconstructHistory — trailing-edge intraday cliff fix", () => {
+  // User-reported (demo + signed-out): chart showed yesterday at
+  // $1.7M and today at $1.5M — a single-day vertical drop at the
+  // right edge. Root cause: the cached quote history ends at the
+  // previous trading day's close, and the live NW pin uses the
+  // holding's INTRADAY `lastPriceUSD` from PriceRefresher. When the
+  // two prices disagree, the right-edge bucket reads the cached
+  // close (clamped) and the next bucket pins to live intraday — a
+  // visible cliff. Fix: when priceAtDetailed clamps PAST the end of
+  // the quote window, prefer the holding's live `lastPriceUSD`.
+  const T_NOW = new Date("2026-05-31T16:00:00Z").getTime();
+  const T_YESTERDAY = T_NOW - 24 * 60 * 60 * 1000;
+  const T_TWO_DAYS_AGO = T_NOW - 2 * 24 * 60 * 60 * 1000;
+
+  function tinyHH(
+    lastPriceUSD: number,
+  ): Household {
+    return {
+      id: "trailing-cliff-test",
+      members: [{ id: "m1", displayName: "Tester" } as never],
+      accounts: [
+        {
+          id: "a1",
+          ownerId: "m1",
+          displayName: "Brokerage",
+          category: "TAXABLE",
+          holdings: [
+            {
+              id: "h1",
+              kind: "equity",
+              symbol: "VOO",
+              shares: 100,
+              // valueUSD reflects PriceRefresher's intraday update:
+              // shares × today's intraday price.
+              valueUSD: 100 * lastPriceUSD,
+              lastPriceUSD,
+              lastPricedAt: T_NOW,
+              currency: "USD",
+              expenseRatio: 0,
+              geography: { US: 1, DEVELOPED: 0, EMERGING: 0 },
+              style: {},
+              leverage: 1,
+              expectedRealCAGR: 0.08,
+              isManualPrice: false,
+              acquiredAt: null,
+            } as never,
+          ] as never,
+        } as never,
+      ],
+      liabilities: [],
+    };
+  }
+
+  it("smooths the trailing region toward live intraday when cached close lags", () => {
+    // Cached quote history ends at TWO_DAYS_AGO close = $100, but
+    // the holding's lastPriceUSD = $90 (today's intraday is 10%
+    // lower than the previous close — could happen on a sharp
+    // overnight drop). Pre-fix: yesterday's bucket would read the
+    // cached close ($100 × 100 shares = $10,000) and today's pin
+    // would read live ($90 × 100 = $9,000), producing a $1,000
+    // single-day cliff. Post-fix: yesterday's bucket also uses
+    // the live price ($9,000) → smooth transition to the pin.
+    const household = tinyHH(90);
+    const quotes: Record<string, Quote> = {
+      VOO: {
+        symbol: "VOO",
+        currentPrice: 100, // cached close, stale relative to lastPriceUSD
+        history: [
+          { t: T_TWO_DAYS_AGO - 86_400_000, p: 100 },
+          { t: T_TWO_DAYS_AGO, p: 100 },
+        ],
+        fetchedAt: T_NOW,
+        currency: "USD",
+        name: null,
+        unavailable: false,
+      },
+    };
+    const out = reconstructHistory(household, quotes, "1Y", T_NOW, []);
+    expect(out.length).toBeGreaterThan(2);
+    // The last few buckets (all AFTER the cached history end) must
+    // use the live intraday price, NOT the cached close. Compute the
+    // value the bucket would have at each price and confirm the
+    // trailing buckets land on the intraday side.
+    const live = 100 * 90; // 9,000
+    const cachedClose = 100 * 100; // 10,000
+    const last = out[out.length - 1].netWorthUSD;
+    const secondLast = out[out.length - 2].netWorthUSD;
+    // Without the fix: secondLast === cachedClose (10,000), last ===
+    // cachedClose (10,000) — and overlaySnapshots' live pin then
+    // adds the cliff via the right-edge pin to 9,000. With the fix,
+    // both buckets sit at the live value, eliminating the gap.
+    expect(secondLast).toBeCloseTo(live, -1);
+    expect(last).toBeCloseTo(live, -1);
+    // Specifically: secondLast should NOT be the cached close.
+    expect(Math.abs(secondLast - cachedClose)).toBeGreaterThan(100);
+    void T_YESTERDAY;
+  });
+
+  it("leaves start-of-window clamps alone (inception plateau is still correct)", () => {
+    // The fix only applies to END-of-window clamps. START-of-window
+    // (e.g., a ticker whose inception postdates the chart range)
+    // should still hold flat at the first historical close — the
+    // inception-plateau behavior the original fix established.
+    const household = tinyHH(110); // intraday $110
+    const quotes: Record<string, Quote> = {
+      VOO: {
+        symbol: "VOO",
+        currentPrice: 110,
+        // History starts only 30 days ago — the 1Y chart's earliest
+        // buckets fall BEFORE this window.
+        history: [
+          { t: T_NOW - 30 * 86_400_000, p: 50 },
+          { t: T_NOW - 1 * 86_400_000, p: 109 },
+        ],
+        fetchedAt: T_NOW,
+        currency: "USD",
+        name: null,
+        unavailable: false,
+      },
+    };
+    const out = reconstructHistory(household, quotes, "1Y", T_NOW, []);
+    // First bucket (well before inception): clamped to the FIRST
+    // historical close, which is $50 × 100 = $5,000.
+    const first = out[0].netWorthUSD;
+    expect(first).toBeCloseTo(5_000, -1);
+    // The fix's behavior shouldn't bleed into the start-of-window
+    // case — the first bucket must NOT be the live intraday value.
+    expect(first).not.toBeCloseTo(11_000, -1);
+  });
+});
