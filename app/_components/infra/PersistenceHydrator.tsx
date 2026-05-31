@@ -92,10 +92,19 @@ export function PersistenceHydrator() {
       // hydration (those leave all tracked slices identical and the
       // diff check below already returns early on them).
       if (state.mode !== "real") {
+        // Keep this list IN SYNC with the diff check below — every
+        // field the save layer persists must trigger auto-promote,
+        // or a demo user's edit to that field gets silently dropped
+        // (the noUserEdit check returns true and the save below
+        // also gates on mode === "real"). Audit R1 caught the
+        // omission of preferredMemberId — the Members sheet
+        // selector wrote it to the store but the filter said "no
+        // real change" so nothing persisted.
         const noUserEdit =
           state.household === prev.household &&
           state.assumptions === prev.assumptions &&
           state.memberAssumptions === prev.memberAssumptions &&
+          state.preferredMemberId === prev.preferredMemberId &&
           state.targetAllocation === prev.targetAllocation &&
           state.glidePath === prev.glidePath &&
           state.householdAnnualIncomeUSD === prev.householdAnnualIncomeUSD &&
