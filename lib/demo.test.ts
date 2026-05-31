@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 
-import { DEMO_HOUSEHOLD, DEMO_ASSUMPTIONS } from "./demo";
+import {
+  DEMO_HOUSEHOLD,
+  DEMO_ASSUMPTIONS,
+  isDemoHouseholdStrict,
+} from "./demo";
 import { householdNetWorth } from "./types";
 
 /**
@@ -91,5 +95,112 @@ describe("DEMO_HOUSEHOLD — no liability double-counts real-estate equity", () 
           h.excludeFromCashBucketSale === true,
       );
     expect(optedOut.length).toBeGreaterThan(0);
+  });
+});
+
+describe("isDemoHouseholdStrict", () => {
+  // The sync layer (AuthHydrator initial push, CloudSyncer auto-
+  // push, pushToDrive) uses this signal to refuse uploading a
+  // verbatim demo seed over real Drive data. False positives push
+  // the demo seed and overwrite the user's real backup; false
+  // negatives leave demo data sitting in Drive forever. Pin both
+  // directions tightly.
+
+  it("returns true for the unmodified DEMO_HOUSEHOLD seed", () => {
+    expect(isDemoHouseholdStrict(DEMO_HOUSEHOLD)).toBe(true);
+  });
+
+  it("returns true after PriceRefresher-style holding price drift", () => {
+    // Holdings get their `valueUSD` mutated on every price refresh.
+    // That must NOT count as user customization — otherwise a fresh
+    // tab that just refreshed prices would push the seed to Drive.
+    const drifted: typeof DEMO_HOUSEHOLD = {
+      ...DEMO_HOUSEHOLD,
+      accounts: DEMO_HOUSEHOLD.accounts.map((a) => ({
+        ...a,
+        holdings: a.holdings.map((h) =>
+          "valueUSD" in h ? { ...h, valueUSD: h.valueUSD * 1.05 } : h,
+        ),
+      })),
+    };
+    expect(isDemoHouseholdStrict(drifted)).toBe(true);
+  });
+
+  it("returns false when a member is renamed", () => {
+    // The user's framing: if they haven't even changed Alex/Sam to
+    // their own names, it's clearly still demo data.
+    const renamed = {
+      ...DEMO_HOUSEHOLD,
+      members: DEMO_HOUSEHOLD.members.map((m, i) =>
+        i === 0 ? { ...m, displayName: "Alexis" } : m,
+      ),
+    };
+    expect(isDemoHouseholdStrict(renamed)).toBe(false);
+  });
+
+  it("returns false when a member's age changes", () => {
+    const aged = {
+      ...DEMO_HOUSEHOLD,
+      members: DEMO_HOUSEHOLD.members.map((m, i) =>
+        i === 0 ? { ...m, age: (m.age ?? 0) + 1 } : m,
+      ),
+    };
+    expect(isDemoHouseholdStrict(aged)).toBe(false);
+  });
+
+  it("returns false when a member's incomeUSD changes", () => {
+    const reincomed = {
+      ...DEMO_HOUSEHOLD,
+      members: DEMO_HOUSEHOLD.members.map((m, i) =>
+        i === 0 ? { ...m, incomeUSD: (m.incomeUSD ?? 0) + 1_000 } : m,
+      ),
+    };
+    expect(isDemoHouseholdStrict(reincomed)).toBe(false);
+  });
+
+  it("returns false when an account is renamed", () => {
+    const renamed = {
+      ...DEMO_HOUSEHOLD,
+      accounts: DEMO_HOUSEHOLD.accounts.map((a, i) =>
+        i === 0 ? { ...a, displayName: a.displayName + " (joint)" } : a,
+      ),
+    };
+    expect(isDemoHouseholdStrict(renamed)).toBe(false);
+  });
+
+  it("returns false when an account is added", () => {
+    const added = {
+      ...DEMO_HOUSEHOLD,
+      accounts: [...DEMO_HOUSEHOLD.accounts, DEMO_HOUSEHOLD.accounts[0]],
+    };
+    expect(isDemoHouseholdStrict(added)).toBe(false);
+  });
+
+  it("returns false when a holding is added to an account", () => {
+    const added = {
+      ...DEMO_HOUSEHOLD,
+      accounts: DEMO_HOUSEHOLD.accounts.map((a, i) =>
+        i === 0
+          ? { ...a, holdings: [...a.holdings, a.holdings[0]] }
+          : a,
+      ),
+    };
+    expect(isDemoHouseholdStrict(added)).toBe(false);
+  });
+
+  it("returns false when household ID is rewritten", () => {
+    const idChanged = { ...DEMO_HOUSEHOLD, id: "user-household-1" };
+    expect(isDemoHouseholdStrict(idChanged)).toBe(false);
+  });
+
+  it("returns false for an empty household", () => {
+    expect(
+      isDemoHouseholdStrict({
+        id: "anything",
+        members: [],
+        accounts: [],
+        liabilities: [],
+      }),
+    ).toBe(false);
   });
 });

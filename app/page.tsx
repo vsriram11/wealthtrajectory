@@ -34,6 +34,7 @@ import { EncryptionUnlockBanner } from "./_components/data/EncryptionUnlockBanne
 import { SyncShrinkageBanner } from "./_components/data/SyncShrinkageBanner";
 import { GlobalSyncBanner } from "./_components/data/GlobalSyncBanner";
 import { SignInOutcomeBanner } from "./_components/data/SignInOutcomeBanner";
+import { InitialSyncConfirmModal } from "./_components/data/InitialSyncConfirmModal";
 import { TimeTravelBanner } from "./_components/data/TimeTravelBanner";
 import { EmptyState } from "./_components/ui/EmptyState";
 import { QuickStart } from "./_components/data/QuickStart";
@@ -98,6 +99,7 @@ export default function Home() {
       <SyncShrinkageBanner />
       <GlobalSyncBanner />
       <BackupDiscoverabilityBanner />
+      <InitialSyncConfirmModal />
       <MemberFilter />
       {page === "home" && (
         <>

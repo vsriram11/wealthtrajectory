@@ -64,6 +64,14 @@ beforeEach(() => {
     // a Drive payload that just doesn't bother including them.
     incomeStreams: [],
     budgetItems: [],
+    // Layer 1 added `household.accounts` to the shrinkage-guarded set,
+    // so the same clear-for-sync-test reasoning applies: zero out
+    // local accounts so a Drive payload with [] accounts doesn't
+    // trip a false-positive shrinkage on every sync test.
+    household: {
+      ...useAppStore.getState().household,
+      accounts: [],
+    },
     // Sign in.
     user: {
       sub: "test-sub",
@@ -391,6 +399,29 @@ describe("pushToDrive — pre-flight guards", () => {
     expect(useAppStore.getState().mode).toBe("demo");
     // Initial sync gate also kicks in, but mode === demo wins.
     expect(await pushToDrive(useAppStore)).toBe("error");
+  });
+
+  it("returns 'error' when household is still the verbatim demo seed (Layer 3)", async () => {
+    // Layer 3 guard: even after auto-promotion to real mode, a
+    // verbatim demo household must not be pushed to Drive. The
+    // catastrophic scenario is a user signing in on a new device
+    // with real Drive data; if findBackupFile returns null on a
+    // stale-index race, the eager push would PATCH the real backup
+    // with the demo seed. This guard refuses the push at the
+    // chokepoint regardless of which caller routed here.
+    const { DEMO_HOUSEHOLD } = await import("@/lib/demo");
+    useAppStore.setState({
+      mode: "real",
+      // Reset the test's pre-cleared accounts back to the demo
+      // shape so isDemoHouseholdStrict returns true.
+      household: DEMO_HOUSEHOLD,
+      googleLastSyncAt: Date.now(),
+    });
+    const out = await pushToDrive(useAppStore);
+    expect(out).toBe("error");
+    // Surfaces a user-visible message so a "Sync now" click
+    // doesn't fail silently — the user needs to know what to do.
+    expect(useAppStore.getState().googleSyncError).toMatch(/demo seed/i);
   });
 
   it("returns 'error' when a time-travel session is active (Audit R10)", async () => {

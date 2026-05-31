@@ -8,6 +8,10 @@ import {
 } from "@/lib/sync/syncSafety";
 
 describe("checkShrinkage", () => {
+  // `household.accounts` is now in the guarded set (Layer 1) so
+  // every empty/full call shape carries it. Tests pin behavior of
+  // the surrounding collections; tests for the accounts-specific
+  // path live in the `accounts shrinkage` describe block below.
   const empty = {
     scenarios: [],
     goals: [],
@@ -15,6 +19,7 @@ describe("checkShrinkage", () => {
     incomeStreams: [],
     healthPlans: [],
     snapshots: [],
+    household: { accounts: [] },
     healthImportanceWeights: {},
     memberAssumptions: {},
   };
@@ -34,6 +39,7 @@ describe("checkShrinkage", () => {
     snapshots: [],
         healthImportanceWeights: {},
     memberAssumptions: {},
+    household: { accounts: [] },
       }),
     ).toBeNull();
   });
@@ -51,6 +57,7 @@ describe("checkShrinkage", () => {
     snapshots: [],
           healthImportanceWeights: {},
     memberAssumptions: {},
+    household: { accounts: [] },
         },
       ),
     ).toBeNull();
@@ -101,6 +108,7 @@ describe("checkShrinkage", () => {
     snapshots: [],
         healthImportanceWeights: {},
     memberAssumptions: {},
+    household: { accounts: [] },
       },
     );
     expect(r).toBeNull();
@@ -154,6 +162,7 @@ describe("checkShrinkageAgainstDrive: encryption fail-closed", () => {
     snapshots: [],
     healthImportanceWeights: {},
     memberAssumptions: {},
+    household: { accounts: [] },
   };
 
   it("returns null when Drive content is null (no backup)", async () => {
@@ -229,6 +238,7 @@ describe("SHRINKAGE_GUARDED constants — symmetric coverage", () => {
     snapshots: [],
       healthImportanceWeights: {},
     memberAssumptions: {},
+    household: { accounts: [] },
     };
   }
 
@@ -287,7 +297,14 @@ describe("SHRINKAGE_GUARDED constants — symmetric coverage", () => {
     // the constant but forget to wire it into the loop, this test
     // catches it.
     for (const k of SHRINKAGE_GUARDED_ARRAY_COLLECTIONS) {
-      const populatedLocal = { ...emptyState(), [k]: [{ id: "x" }] };
+      // Special-case `accounts` because it lives nested at
+      // `household.accounts`, not at the top level — the guard
+      // accesses it via that nested path (see syncSafety.ts +
+      // cloudSync.ts), and the populated-local fixture must match.
+      const populatedLocal =
+        k === "accounts"
+          ? { ...emptyState(), household: { accounts: [{ id: "x" }] } }
+          : { ...emptyState(), [k]: [{ id: "x" }] };
       // checkShrinkage compares (drive, current) flagging Drive>0 && current=0.
       // The inbound-direction test uses the reverse — and is covered
       // separately in cloudSync's path. Here we test the OUTBOUND

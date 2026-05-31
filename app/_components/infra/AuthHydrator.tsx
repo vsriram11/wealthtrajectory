@@ -11,6 +11,7 @@ import {
 } from "@/lib/sync/googleDrive";
 import { exportData } from "@/lib/persistence/dataIO";
 import { pullFromDrive, pushToDrive } from "@/lib/sync/cloudSync";
+import { isDemoHouseholdStrict } from "@/lib/demo";
 import {
   generateSessionId,
   isWithinClaimGrace,
@@ -154,38 +155,54 @@ export function AuthHydrator() {
           s.mode === "real" &&
           s.household.accounts.length > 0
         ) {
-          // Existing local real-mode data: push it up as the initial
-          // backup. Under Frame B, `mode === "real"` is the
-          // authoritative signal that the user has data worth
-          // preserving — it covers both classic "started fresh in
-          // real mode" AND the auto-promoted-from-demo case (where
-          // household IDs may still look demo-ish but the user has
-          // made at least one edit to a persisted slice; that edit
-          // is what triggered promoteToReal).
+          // Local has real-mode data; Drive has no backup. Two sub-
+          // branches keyed on whether the household tree is still the
+          // verbatim demo seed.
           //
-          // We DELIBERATELY removed the prior `!isDemoHousehold`
-          // gate here. Pre-Frame-B it was paranoia (mode==real and
-          // household==demo was impossible by construction). Post-
-          // Frame-B that combination IS the auto-promote outcome;
-          // gating on it routed those edits into the wipe branch
-          // below and destroyed user data on sign-in.
+          // Layer 3: if strict-demo, the user has been auto-promoted
+          // by some non-household edit (assumptions, budget, goals)
+          // but hasn't claimed the demo members/accounts as their
+          // own. Defer the initial sync silently — no push, no modal.
+          // Once the user renames a member or edits an account, the
+          // household becomes non-strict-demo and CloudSyncer's
+          // auto-debounce will push it via the normal path.
           //
-          // (No shrinkage guard needed here — this branch is only
-          // reached when `existing` is null, i.e. Drive has no backup
-          // yet. Routed through pushToDrive — its shrinkage guard
-          // is a no-op here since Drive is empty, but going through
-          // the canonical helper means future safety upgrades
-          // automatically apply.) bypassInitialSyncGate because
-          // we're INSIDE the initial sync, completing it.
-          const pushResult = await pushToDrive(useAppStore, {
-            bypassInitialSyncGate: true,
-          });
-          if (cancelled) return;
-          if (pushResult === "ok") {
+          // Layer 2: if non-strict-demo, the user has customized
+          // data. We could push it, but the rare case where Drive
+          // actually has data but findBackupFile returned null
+          // (stale index, scope quirk) would silently overwrite the
+          // user's real Drive backup. Surface a confirmation modal
+          // instead. The modal sets `pendingInitialSyncConfirm` and
+          // either calls pushToDrive on Confirm or defers on Cancel.
+          //
+          // The previous unconditional pushToDrive call (post-Audit-
+          // R3) was the regression-fix-that-introduced-its-own-
+          // regression: it solved "edits destroyed on sign-in" by
+          // pushing everything, which then opens "real Drive data
+          // overwritten on stale-index race." The strict-demo gate
+          // closes the most common case (assumptions-only edits);
+          // the modal handles the legitimately-ambiguous case.
+          if (isDemoHouseholdStrict(s.household)) {
+            // Mark initial sync as "completed" so CloudSyncer's
+            // initial-sync gate releases. The user's next edit (one
+            // that customizes the household tree) will trigger the
+            // normal debounce-push path. Without setting
+            // googleLastSyncAt, manual "Sync now" clicks would be
+            // permanently blocked-by-initial-sync.
             s.setGoogleSyncState({
+              googleSyncing: false,
               googleSyncError: null,
               googleSyncBlockedReason: null,
-              lastSyncOutcome: "uploaded-local",
+              googleLastSyncAt: Date.now(),
+              lastSyncOutcome: null,
+            });
+          } else {
+            // Non-strict-demo: ask the user before pushing.
+            s.setGoogleSyncState({
+              googleSyncing: false,
+              googleSyncError: null,
+              googleSyncBlockedReason: null,
+              pendingInitialSyncConfirm: true,
             });
           }
         } else if (s.mode !== "real") {

@@ -35,7 +35,9 @@ import {
 import {
   DriveUnreadableError,
   checkShrinkageAgainstDrive,
+  isMajorShrink,
 } from "@/lib/sync/syncSafety";
+import { isDemoHouseholdStrict } from "@/lib/demo";
 import { loadSnapshots } from "@/lib/persistence/persistence";
 
 export type PullResult =
@@ -94,18 +96,39 @@ type ShrinkageGuardedMapCollection =
 
 function isInboundShrinkage(
   drivePayload: Partial<
-    Record<ShrinkageGuardedArrayCollection, unknown[]>
+    Record<Exclude<ShrinkageGuardedArrayCollection, "accounts">, unknown[]>
   > &
-    Partial<Record<ShrinkageGuardedMapCollection, Record<string, unknown>>>,
-  localState: Record<ShrinkageGuardedArrayCollection, unknown[]> &
-    Record<ShrinkageGuardedMapCollection, Record<string, unknown>>,
+    Partial<Record<ShrinkageGuardedMapCollection, Record<string, unknown>>> & {
+      household?: { accounts?: unknown[] };
+    },
+  localState: Record<
+    Exclude<ShrinkageGuardedArrayCollection, "accounts">,
+    unknown[]
+  > &
+    Record<ShrinkageGuardedMapCollection, Record<string, unknown>> & {
+      household: { accounts: unknown[] };
+    },
 ): { shrinking: string[] } | null {
   const shrinking: string[] = [];
   for (const k of SHRINKAGE_GUARDED_ARRAY_COLLECTIONS) {
-    const driveArr = drivePayload[k];
-    const driveLen = Array.isArray(driveArr) ? driveArr.length : 0;
-    const localLen = localState[k].length;
-    if (localLen > 0 && driveLen === 0) shrinking.push(k);
+    let driveLen: number;
+    let localLen: number;
+    if (k === "accounts") {
+      // Same nested-access reasoning as `checkShrinkage` in
+      // syncSafety.ts — accounts live at household.accounts.
+      driveLen = Array.isArray(drivePayload.household?.accounts)
+        ? drivePayload.household.accounts.length
+        : 0;
+      localLen = localState.household.accounts.length;
+    } else {
+      const driveArr = drivePayload[k];
+      driveLen = Array.isArray(driveArr) ? driveArr.length : 0;
+      localLen = localState[k].length;
+    }
+    // INBOUND guard direction: refuse pull when Drive would shrink
+    // local. Source = local (what we have), dest = Drive (what
+    // we'd land at after the pull).
+    if (isMajorShrink(localLen, driveLen)) shrinking.push(k);
   }
   for (const k of SHRINKAGE_GUARDED_MAP_COLLECTIONS) {
     const driveMap = drivePayload[k];
@@ -114,7 +137,7 @@ function isInboundShrinkage(
         ? Object.keys(driveMap).length
         : 0;
     const localCount = Object.keys(localState[k]).length;
-    if (localCount > 0 && driveCount === 0) shrinking.push(k);
+    if (isMajorShrink(localCount, driveCount)) shrinking.push(k);
   }
   return shrinking.length > 0 ? { shrinking } : null;
 }
@@ -275,6 +298,7 @@ export async function pullFromDrive(
         incomeStreams: localNow.incomeStreams,
         healthPlans: localNow.healthPlans,
         snapshots: localSnapshotsForShrinkage,
+        household: { accounts: localNow.household.accounts },
       });
       if (shrinkage) {
         s.setGoogleSyncState({
@@ -392,11 +416,28 @@ export async function pushToDrive(
     });
     return "error";
   }
-  // Note: the previous `isDemoHousehold(s.household)` paranoia check
-  // has been removed under Frame B. `mode === "real"` is the single
-  // source of truth for "user-owned data worth uploading"; an
-  // auto-promoted demo session (household IDs still demo-shaped but
-  // user has made edits) is a legitimate push.
+  // Frame B + Layer 3: `isDemoHouseholdStrict` is the precise
+  // signal for "household tree is still the verbatim demo seed".
+  // Refuse the push in that case — even though the user has been
+  // auto-promoted to real mode (via some non-household edit like
+  // assumptions / budget / goals), they haven't claimed the household
+  // members or accounts as their own yet. Pushing the seed risks
+  // overwriting a real Drive backup on the rare findBackupFile
+  // stale-index race.
+  //
+  // Contrast: the original `isDemoHousehold` paranoia gate this
+  // replaces was based on demo IDs alone (heavily-customized
+  // households still triggered it). Audit R3 removed THAT gate and
+  // surfaced a bug. The strict variant only catches verbatim seed,
+  // which is the actual scenario we want to refuse.
+  if (isDemoHouseholdStrict(s.household)) {
+    s.setGoogleSyncState({
+      googleSyncing: false,
+      googleSyncError:
+        "Household is still the demo seed — rename a member or edit an account to push to Drive.",
+    });
+    return "error";
+  }
 
   if (s.googleSyncBlockedReason === "encrypted") {
     s.setGoogleSyncState({
@@ -460,6 +501,12 @@ export async function pushToDrive(
               healthImportanceWeights: s.healthImportanceWeights,
               memberAssumptions: s.memberAssumptions,
               snapshots: localSnapshotsForShrinkage,
+              // Layer 1: include household.accounts in the
+              // outbound shrinkage check. Pre-Layer-1 the household
+              // tree was unprotected on push, so a stale-index race
+              // could replace 15 real Drive accounts with the demo
+              // seed's 10 — count-survives-but-content-differs wipe.
+              household: { accounts: s.household.accounts },
             },
           );
           if (shrinkage) {
