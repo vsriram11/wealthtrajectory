@@ -48,7 +48,7 @@ import {
   formatUSD,
   formatUSDCompact,
 } from "@/lib/format";
-import type { Holding, Household } from "@/lib/types";
+import { isLivePriceable, type Holding, type Household } from "@/lib/types";
 import { SnapshotsManager } from "@/app/_components/data/SnapshotsManager";
 
 /** Range chips shown above the history chart. */
@@ -162,20 +162,73 @@ export function HistoryView({
   // pre-fix flat-back-projection-plus-cliff appearance.
   const useSyntheticDemo = isDemoHouseholdStrict(household);
 
+  // Build a "what the household WOULD look like if PriceRefresher
+  // had run" snapshot of the live household, computed on-the-fly
+  // from the quotes HistoryView already loaded. This bypasses the
+  // PriceRefresher throttled apply loop (~15s for 13 demo symbols
+  // at 1-sec throttle) for the chart's purposes.
+  //
+  // Why: DEMO_HOUSEHOLD's holdings ship with `lastPricedAt: null`
+  // and shares derived from `preset.referencePriceUSD` (e.g. VOO at
+  // $520 → 182.7 shares for the $95k position). The static cache
+  // holds REAL 2026 closes (~$690 for VOO). buildDemoSnapshots uses
+  // live shares × cached real prices → 182.7 × $690 = $126k vs
+  // live valueUSD $95k. ~33% plateau-above-live cliff at the chart's
+  // right edge. PriceRefresher's firstFetch path eventually
+  // recomputes shares = valueUSD / today_price = 137.7 (fixing the
+  // mismatch), but takes seconds. This adjustment makes the chart
+  // correct immediately as soon as quotes load.
+  const adjustedHousehold = useMemo(() => {
+    if (!useSyntheticDemo) return household;
+    let touched = false;
+    const next = {
+      ...household,
+      accounts: household.accounts.map((a) => ({
+        ...a,
+        holdings: a.holdings.map((h) => {
+          // Only adjust live-priceable holdings whose lastPricedAt
+          // is null (PR hasn't run yet) AND for which we have a
+          // valid quote with currentPrice.
+          if (!isLivePriceable(h)) return h;
+          if (h.isManualPrice) return h;
+          if (h.lastPricedAt != null) return h;
+          const q = quotes[h.symbol.toUpperCase()];
+          if (!q || !q.currentPrice || q.currentPrice <= 0) return h;
+          if (!Number.isFinite(h.valueUSD) || h.valueUSD <= 0) return h;
+          // Mirror applyLivePriceTo's firstFetch path: preserve the
+          // dollar value, recompute shares from today's market
+          // price. snap.shares = newShares × accumulation factor in
+          // buildBackdatedHousehold, which then composes correctly
+          // against cached prices.
+          const newShares = h.valueUSD / q.currentPrice;
+          touched = true;
+          return {
+            ...h,
+            shares: newShares,
+            lastPriceUSD: q.currentPrice,
+          };
+        }),
+      })),
+    };
+    return touched ? next : household;
+  }, [household, quotes, useSyntheticDemo]);
+
   useEffect(() => {
     let cancelled = false;
     if (useSyntheticDemo) {
       void Promise.resolve().then(() => {
         if (cancelled) return;
-        // Pass the LIVE household (post-PriceRefresher) so snap.shares
-        // are derived from actual today-price shares, not the
-        // preset.referencePriceUSD-derived shares baked into the
-        // DEMO_HOUSEHOLD constant. Without this, snap.shares ×
-        // cache_real_price > live_household.valueUSD by 15-25% (the
-        // ratio of real_price / preset.referencePriceUSD), producing
-        // a plateau-above-live cliff at the chart's right edge.
+        // Pass the adjustedHousehold (live + PR-firstFetch-simulated
+        // shares from quotes) so snap.shares are consistent with
+        // cached real prices even before PR's slow apply loop
+        // completes. See `adjustedHousehold` memo above.
         setSnapshots(
-          buildDemoSnapshots(demoAnchor, undefined, undefined, household),
+          buildDemoSnapshots(
+            demoAnchor,
+            undefined,
+            undefined,
+            adjustedHousehold,
+          ),
         );
       });
       return () => {
@@ -188,11 +241,11 @@ export function HistoryView({
     return () => {
       cancelled = true;
     };
-    // household is read inside the closure when in demo mode — list
-    // it as a dep so a PriceRefresher update (changing
-    // household.holdings[].valueUSD/shares) re-runs the build with
-    // the latest shares.
-  }, [snapshotsRevision, useSyntheticDemo, demoAnchor, household]);
+    // adjustedHousehold is read inside the closure when in demo
+    // mode — list it as a dep so a PriceRefresher update OR a
+    // quotes-load (which feeds the adjustedHousehold memo)
+    // re-runs the build with the latest shares.
+  }, [snapshotsRevision, useSyntheticDemo, demoAnchor, adjustedHousehold]);
 
   // setLoading(true) below is the canonical "start an async data
   // load" pattern. The React 19 idiomatic alternative is Suspense
