@@ -37,8 +37,8 @@ const NAV: { id: PageId; label: string; sub: string; pro?: boolean }[] = [
   },
   {
     id: "calculators",
-    label: "Static Calculators",
-    sub: "Static planning tools",
+    label: "Research",
+    sub: "Static calculators, ETF/Stock research, and planning",
   },
   {
     id: "glossary",

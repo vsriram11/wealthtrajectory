@@ -35,7 +35,9 @@ import {
 import {
   DriveUnreadableError,
   checkShrinkageAgainstDrive,
+  isMajorShrink,
 } from "@/lib/sync/syncSafety";
+import { isDemoHouseholdStrict } from "@/lib/demo";
 import { loadSnapshots } from "@/lib/persistence/persistence";
 
 export type PullResult =
@@ -94,18 +96,39 @@ type ShrinkageGuardedMapCollection =
 
 function isInboundShrinkage(
   drivePayload: Partial<
-    Record<ShrinkageGuardedArrayCollection, unknown[]>
+    Record<Exclude<ShrinkageGuardedArrayCollection, "accounts">, unknown[]>
   > &
-    Partial<Record<ShrinkageGuardedMapCollection, Record<string, unknown>>>,
-  localState: Record<ShrinkageGuardedArrayCollection, unknown[]> &
-    Record<ShrinkageGuardedMapCollection, Record<string, unknown>>,
+    Partial<Record<ShrinkageGuardedMapCollection, Record<string, unknown>>> & {
+      household?: { accounts?: unknown[] };
+    },
+  localState: Record<
+    Exclude<ShrinkageGuardedArrayCollection, "accounts">,
+    unknown[]
+  > &
+    Record<ShrinkageGuardedMapCollection, Record<string, unknown>> & {
+      household: { accounts: unknown[] };
+    },
 ): { shrinking: string[] } | null {
   const shrinking: string[] = [];
   for (const k of SHRINKAGE_GUARDED_ARRAY_COLLECTIONS) {
-    const driveArr = drivePayload[k];
-    const driveLen = Array.isArray(driveArr) ? driveArr.length : 0;
-    const localLen = localState[k].length;
-    if (localLen > 0 && driveLen === 0) shrinking.push(k);
+    let driveLen: number;
+    let localLen: number;
+    if (k === "accounts") {
+      // Same nested-access reasoning as `checkShrinkage` in
+      // syncSafety.ts — accounts live at household.accounts.
+      driveLen = Array.isArray(drivePayload.household?.accounts)
+        ? drivePayload.household.accounts.length
+        : 0;
+      localLen = localState.household.accounts.length;
+    } else {
+      const driveArr = drivePayload[k];
+      driveLen = Array.isArray(driveArr) ? driveArr.length : 0;
+      localLen = localState[k].length;
+    }
+    // INBOUND guard direction: refuse pull when Drive would shrink
+    // local. Source = local (what we have), dest = Drive (what
+    // we'd land at after the pull).
+    if (isMajorShrink(localLen, driveLen)) shrinking.push(k);
   }
   for (const k of SHRINKAGE_GUARDED_MAP_COLLECTIONS) {
     const driveMap = drivePayload[k];
@@ -114,7 +137,7 @@ function isInboundShrinkage(
         ? Object.keys(driveMap).length
         : 0;
     const localCount = Object.keys(localState[k]).length;
-    if (localCount > 0 && driveCount === 0) shrinking.push(k);
+    if (isMajorShrink(localCount, driveCount)) shrinking.push(k);
   }
   return shrinking.length > 0 ? { shrinking } : null;
 }
@@ -175,6 +198,19 @@ export async function pullFromDrive(
 
   const s = store.getState();
   if (!s.user) return "no-backup";
+  // Audit R10: refuse pulls while a time-travel session is active.
+  // A pull would call importPayload, which replaces the in-memory
+  // household — destroying the session's hypothetical edits AND the
+  // baseline pointer used by exitTimeTravelDiscard. Without this
+  // gate, signing in mid-session causes the user's backdated work
+  // to vanish + leaves the time-travel banner pointing at a
+  // stale baseline that no longer matches anything in memory.
+  //
+  // Returns "throttled" (not "error") so the silent-mode callers
+  // (tab-resume sync, sign-in initial pull) treat it as a benign
+  // no-op rather than surfacing a sync error to the user mid-
+  // session — they'll just retry once the session ends.
+  if (s.timeTravelActive) return "throttled";
   if (!force) {
     if (s.googleSyncing) return "throttled";
     // Refuse to pull while a CloudSyncer upload is queued or
@@ -262,6 +298,7 @@ export async function pullFromDrive(
         incomeStreams: localNow.incomeStreams,
         healthPlans: localNow.healthPlans,
         snapshots: localSnapshotsForShrinkage,
+        household: { accounts: localNow.household.accounts },
       });
       if (shrinkage) {
         s.setGoogleSyncState({
@@ -317,7 +354,18 @@ export async function pullFromDrive(
  * Pre-flight guards (in order):
  *   1. Signed in. Else "error".
  *   2. mode === "real". Else "error" (never upload demo data).
- *   3. Not isDemoHousehold (paranoia). Else "error".
+ *      Under Frame B, `mode === "real"` is the authoritative signal
+ *      that the user has data worth uploading — including the auto-
+ *      promoted-from-demo case where household IDs may still look
+ *      demo-ish but the user has made edits. The previous
+ *      `!isDemoHousehold` paranoia check was incompatible with
+ *      Frame B (it routed auto-promoted edits into an error and
+ *      stranded the user data local-only on initial sign-in) and
+ *      has been dropped — mode is the single source of truth.
+ *   3. Not in a time-travel session. The in-memory household
+ *      while `timeTravelActive` is a HYPOTHETICAL past state, not
+ *      the user's present-day data. Uploading it would overwrite
+ *      the legitimate Drive backup with backdated edits.
  *   4. Encryption block clear. Else "blocked-by-encryption".
  *   5. Initial Drive pull confirmed (googleLastSyncAt is set),
  *      UNLESS `bypassInitialSyncGate` is true (used by the
@@ -349,8 +397,47 @@ export async function pushToDrive(
   const s = store.getState();
   if (!s.user) return "error";
   if (s.mode !== "real") return "error";
-  const { isDemoHousehold } = await import("@/lib/types");
-  if (isDemoHousehold(s.household)) return "error";
+  // Audit R10: refuse pushes while a time-travel session is
+  // active. The in-memory household is a HYPOTHETICAL past state,
+  // not the user's actual present-day data. Uploading it would
+  // overwrite the legitimate Drive backup with backdated edits
+  // (and on multi-device setups, propagate the hypothetical to
+  // every other tab). The CloudSyncer subscribe handler already
+  // gates on timeTravelActive; this is the same gate at the
+  // chokepoint that AuthHydrator's sign-in flow uses directly.
+  if (s.timeTravelActive) {
+    // Surface a message so a "Sync now" click (or any explicit
+    // user-initiated push) explains the no-op instead of failing
+    // silently.
+    s.setGoogleSyncState({
+      googleSyncing: false,
+      googleSyncError:
+        "Sync is paused while you're in time-travel mode. Save or Exit the session to resume.",
+    });
+    return "error";
+  }
+  // Frame B + Layer 3: `isDemoHouseholdStrict` is the precise
+  // signal for "household tree is still the verbatim demo seed".
+  // Refuse the push in that case — even though the user has been
+  // auto-promoted to real mode (via some non-household edit like
+  // assumptions / budget / goals), they haven't claimed the household
+  // members or accounts as their own yet. Pushing the seed risks
+  // overwriting a real Drive backup on the rare findBackupFile
+  // stale-index race.
+  //
+  // Contrast: the original `isDemoHousehold` paranoia gate this
+  // replaces was based on demo IDs alone (heavily-customized
+  // households still triggered it). Audit R3 removed THAT gate and
+  // surfaced a bug. The strict variant only catches verbatim seed,
+  // which is the actual scenario we want to refuse.
+  if (isDemoHouseholdStrict(s.household)) {
+    s.setGoogleSyncState({
+      googleSyncing: false,
+      googleSyncError:
+        "Household is still the demo seed — rename a member or edit an account to push to Drive.",
+    });
+    return "error";
+  }
 
   if (s.googleSyncBlockedReason === "encrypted") {
     s.setGoogleSyncState({
@@ -414,6 +501,12 @@ export async function pushToDrive(
               healthImportanceWeights: s.healthImportanceWeights,
               memberAssumptions: s.memberAssumptions,
               snapshots: localSnapshotsForShrinkage,
+              // Layer 1: include household.accounts in the
+              // outbound shrinkage check. Pre-Layer-1 the household
+              // tree was unprotected on push, so a stale-index race
+              // could replace 15 real Drive accounts with the demo
+              // seed's 10 — count-survives-but-content-differs wipe.
+              household: { accounts: s.household.accounts },
             },
           );
           if (shrinkage) {

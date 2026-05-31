@@ -64,6 +64,14 @@ beforeEach(() => {
     // a Drive payload that just doesn't bother including them.
     incomeStreams: [],
     budgetItems: [],
+    // Layer 1 added `household.accounts` to the shrinkage-guarded set,
+    // so the same clear-for-sync-test reasoning applies: zero out
+    // local accounts so a Drive payload with [] accounts doesn't
+    // trip a false-positive shrinkage on every sync test.
+    household: {
+      ...useAppStore.getState().household,
+      accounts: [],
+    },
     // Sign in.
     user: {
       sub: "test-sub",
@@ -94,6 +102,22 @@ describe("pullFromDrive — pre-flight guards", () => {
 
   it("bails 'throttled' when googleSyncing is already in flight", async () => {
     useAppStore.getState().setGoogleSyncState({ googleSyncing: true });
+    expect(await pullFromDrive(useAppStore)).toBe("throttled");
+  });
+
+  it("bails 'throttled' when a time-travel session is active (Audit R10)", async () => {
+    // A pull mid-session would call importPayload, which replaces
+    // the in-memory household — destroying the session's
+    // hypothetical edits AND the baseline pointer used by
+    // exitTimeTravelDiscard. The user's backdated work would vanish
+    // silently. Particularly important post-PR-#18, where a demo
+    // user can enter time-travel and then sign in.
+    useAppStore.setState({
+      timeTravelActive: true,
+      timeTravelDate: "2020-01-01",
+      baselineHousehold: useAppStore.getState().household,
+      baselineAssumptions: useAppStore.getState().assumptions,
+    });
     expect(await pullFromDrive(useAppStore)).toBe("throttled");
   });
 
@@ -377,6 +401,63 @@ describe("pushToDrive — pre-flight guards", () => {
     expect(await pushToDrive(useAppStore)).toBe("error");
   });
 
+  it("returns 'error' when household is still the verbatim demo seed (Layer 3)", async () => {
+    // Layer 3 guard: even after auto-promotion to real mode, a
+    // verbatim demo household must not be pushed to Drive. The
+    // catastrophic scenario is a user signing in on a new device
+    // with real Drive data; if findBackupFile returns null on a
+    // stale-index race, the eager push would PATCH the real backup
+    // with the demo seed. This guard refuses the push at the
+    // chokepoint regardless of which caller routed here.
+    const { DEMO_HOUSEHOLD } = await import("@/lib/demo");
+    useAppStore.setState({
+      mode: "real",
+      // Reset the test's pre-cleared accounts back to the demo
+      // shape so isDemoHouseholdStrict returns true.
+      household: DEMO_HOUSEHOLD,
+      googleLastSyncAt: Date.now(),
+    });
+    const out = await pushToDrive(useAppStore);
+    expect(out).toBe("error");
+    // Surfaces a user-visible message so a "Sync now" click
+    // doesn't fail silently — the user needs to know what to do.
+    expect(useAppStore.getState().googleSyncError).toMatch(/demo seed/i);
+  });
+
+  it("returns 'error' when a time-travel session is active (Audit R10)", async () => {
+    // A user mid-backdating-session has a HYPOTHETICAL household in
+    // memory. Pushing it to Drive would overwrite their actual
+    // present-day backup. Sign-in is the failure path PR #18 made
+    // reachable: demo + time-travel + first holding-edit promotes
+    // to real, and a sign-in click at that moment used to call
+    // pushToDrive with the hypothetical household.
+    useAppStore.setState({
+      mode: "real",
+      household: {
+        id: "h-real",
+        members: [{ id: "m", displayName: "U" }],
+        accounts: [],
+        liabilities: [],
+      },
+      timeTravelActive: true,
+      timeTravelDate: "2020-01-01",
+      baselineHousehold: {
+        id: "h-real",
+        members: [{ id: "m", displayName: "U" }],
+        accounts: [],
+        liabilities: [],
+      },
+      baselineAssumptions: useAppStore.getState().assumptions,
+    });
+    expect(await pushToDrive(useAppStore)).toBe("error");
+    // Surface an explanatory message — "Sync now" clicks while
+    // mid-session shouldn't fail silently. Pinned so a future
+    // refactor doesn't drop the user-facing reason.
+    expect(useAppStore.getState().googleSyncError).toMatch(
+      /time-travel/i,
+    );
+  });
+
   it("returns 'blocked-by-encryption' when blocked reason is already 'encrypted'", async () => {
     useAppStore.setState({
       mode: "real",
@@ -600,5 +681,68 @@ describe("pushToDrive — main flow", () => {
     expect(out).toBe("error");
     expect(useAppStore.getState().googleSyncError).toContain("network down");
     expect(useAppStore.getState().googleSyncing).toBe(false);
+  });
+
+  // Audit R6 (Layer 1/2/3): the AuthHydrator "fresh sign-in" path now
+  // routes through pushToDrive with bypassInitialSyncGate=true rather
+  // than calling uploadBackup directly. This test pins that even on
+  // that path, the shrinkage guard catches the stale-index race
+  // scenario — empty local household pushing over Drive that
+  // actually has accounts (the most concrete data-loss case).
+  it("bypassInitialSyncGate=true STILL refuses to wipe accounts on the fresh-install path (R6)", async () => {
+    // Set up the AuthHydrator-equivalent state: signed in, mode=real,
+    // empty household, no prior sync (googleLastSyncAt === null).
+    useAppStore.setState({
+      mode: "real",
+      household: {
+        id: "h-empty",
+        members: [{ id: "m", displayName: "U" }],
+        accounts: [],
+        liabilities: [],
+      },
+    });
+    useAppStore.getState().setGoogleSyncState({ googleLastSyncAt: null });
+
+    // Simulate the stale-index race: AuthHydrator's findBackupFile
+    // already returned null upstream, but pushToDrive's internal
+    // shrinkage-guard re-query finds the real backup.
+    findBackupFileMock.mockResolvedValueOnce({
+      id: "drive-id",
+      modifiedTime: "2026-05-15T00:00:00Z",
+    });
+    const { exportData } = await import("@/lib/persistence/dataIO");
+    // Drive backup has a populated household — 3 accounts the user
+    // would lose if we pushed the empty local state over it.
+    const driveText = exportData({
+      household: {
+        id: "h-real",
+        members: [{ id: "m", displayName: "U" }],
+        accounts: [
+          { id: "a1", category: "BROKERAGE", displayName: "A", ownerId: "m", holdings: [], monthlyContributionUSD: 0 },
+          { id: "a2", category: "BROKERAGE", displayName: "B", ownerId: "m", holdings: [], monthlyContributionUSD: 0 },
+          { id: "a3", category: "BROKERAGE", displayName: "C", ownerId: "m", holdings: [], monthlyContributionUSD: 0 },
+        ],
+        liabilities: [],
+      },
+      assumptions: useAppStore.getState().assumptions,
+      scenarios: [],
+    });
+    downloadBackupMock.mockResolvedValueOnce(driveText);
+
+    const out = await pushToDrive(useAppStore, {
+      bypassInitialSyncGate: true,
+    });
+
+    // Shrinkage guard MUST trip — 3 accounts on Drive vs 0 local is
+    // > 50% loss → catastrophic.
+    expect(out).toBe("blocked-by-shrinkage");
+    expect(useAppStore.getState().googleSyncBlockedReason).toBe(
+      "import-shrinkage",
+    );
+    // CRITICAL: no upload fires. The pre-R6 AuthHydrator's direct
+    // uploadBackup call would have PATCHed the real backup with the
+    // empty payload. This pins that the post-R6 routing through
+    // pushToDrive prevents that wipe.
+    expect(uploadBackupMock).not.toHaveBeenCalled();
   });
 });

@@ -7,11 +7,9 @@ import {
   claimActiveSession,
   findBackupFile,
   loadActiveSession,
-  uploadBackup,
 } from "@/lib/sync/googleDrive";
-import { exportData } from "@/lib/persistence/dataIO";
 import { pullFromDrive, pushToDrive } from "@/lib/sync/cloudSync";
-import { isDemoHousehold } from "@/lib/types";
+import { isDemoHouseholdStrict } from "@/lib/demo";
 import {
   generateSessionId,
   isWithinClaimGrace,
@@ -153,73 +151,122 @@ export function AuthHydrator() {
           // UX via the state pullFromDrive already set.
         } else if (
           s.mode === "real" &&
-          s.household.accounts.length > 0 &&
-          !isDemoHousehold(s.household)
+          s.household.accounts.length > 0
         ) {
-          // Existing local-only real data: push it up as the initial
-          // backup. The isDemoHousehold check is paranoia — if some
-          // future bug leaves us in real mode with the demo household,
-          // refuse to write demo data over the user's Drive backup.
-          // (No shrinkage guard needed here — this branch is only
-          // reached when `existing` is null, i.e. Drive has no backup
-          // yet. Routed through pushToDrive — its shrinkage guard
-          // is a no-op here since Drive is empty, but going through
-          // the canonical helper means future safety upgrades
-          // automatically apply.) bypassInitialSyncGate because
-          // we're INSIDE the initial sync, completing it.
-          const pushResult = await pushToDrive(useAppStore, {
+          // Local has real-mode data; Drive has no backup. Two sub-
+          // branches keyed on whether the household tree is still the
+          // verbatim demo seed.
+          //
+          // Layer 3: if strict-demo, the user has been auto-promoted
+          // by some non-household edit (assumptions, budget, goals)
+          // but hasn't claimed the demo members/accounts as their
+          // own. Defer the initial sync silently — no push, no modal.
+          // Once the user renames a member or edits an account, the
+          // household becomes non-strict-demo and CloudSyncer's
+          // auto-debounce will push it via the normal path.
+          //
+          // Layer 2: if non-strict-demo, the user has customized
+          // data. We could push it, but the rare case where Drive
+          // actually has data but findBackupFile returned null
+          // (stale index, scope quirk) would silently overwrite the
+          // user's real Drive backup. Surface a confirmation modal
+          // instead. The modal sets `pendingInitialSyncConfirm` and
+          // either calls pushToDrive on Confirm or defers on Cancel.
+          //
+          // The previous unconditional pushToDrive call (post-Audit-
+          // R3) was the regression-fix-that-introduced-its-own-
+          // regression: it solved "edits destroyed on sign-in" by
+          // pushing everything, which then opens "real Drive data
+          // overwritten on stale-index race." The strict-demo gate
+          // closes the most common case (assumptions-only edits);
+          // the modal handles the legitimately-ambiguous case.
+          if (isDemoHouseholdStrict(s.household)) {
+            // Mark initial sync as "completed" so CloudSyncer's
+            // initial-sync gate releases. The user's next edit (one
+            // that customizes the household tree) will trigger the
+            // normal debounce-push path. Without setting
+            // googleLastSyncAt, manual "Sync now" clicks would be
+            // permanently blocked-by-initial-sync.
+            s.setGoogleSyncState({
+              googleSyncing: false,
+              googleSyncError: null,
+              googleSyncBlockedReason: null,
+              googleLastSyncAt: Date.now(),
+              lastSyncOutcome: null,
+            });
+          } else {
+            // Non-strict-demo: ask the user before pushing.
+            s.setGoogleSyncState({
+              googleSyncing: false,
+              googleSyncError: null,
+              googleSyncBlockedReason: null,
+              pendingInitialSyncConfirm: true,
+            });
+          }
+        } else if (s.mode !== "real") {
+          // Signed-in user starting fresh — drop them into empty real mode.
+          s.switchToReal();
+          // Audit R6 (Layer 1/2/3): route the fresh-install upload
+          // through `pushToDrive` rather than calling `uploadBackup`
+          // directly. The previous inline path bypassed the shrinkage
+          // guard entirely — if findBackupFile returned null due to
+          // a Drive-index stale-read race (the exact failure mode
+          // Layer 1/2/3 was meant to defend against) BUT the
+          // underlying file actually existed, uploadBackup's internal
+          // findAllFiles re-search would PATCH the real backup with
+          // the empty / minimal payload, silently overwriting the
+          // user's actual data.
+          //
+          // pushToDrive's shrinkage guard does a second findBackupFile
+          // + downloadBackup + count-compare BEFORE the upload. Even
+          // if the first findBackupFile lied, the chance that the
+          // second call lies in the same way is materially lower
+          // (Drive's index has had a few hundred ms to catch up). And
+          // if it does still return null, we're no worse off than
+          // before. Defense in depth, with the right chokepoint.
+          //
+          // `bypassInitialSyncGate: true` because googleLastSyncAt is
+          // still null at this point (no prior sync) — pushToDrive
+          // would otherwise refuse with blocked-by-initial-sync.
+          const result = await pushToDrive(useAppStore, {
             bypassInitialSyncGate: true,
           });
           if (cancelled) return;
-          if (pushResult === "ok") {
+          if (result === "ok") {
             s.setGoogleSyncState({
-              googleSyncError: null,
               googleSyncBlockedReason: null,
-              lastSyncOutcome: "uploaded-local",
+              lastSyncOutcome: "uploaded-fresh",
             });
           }
-        } else if (s.mode !== "real" || isDemoHousehold(s.household)) {
-          // Signed-in user starting fresh — drop them into empty real mode.
-          s.switchToReal();
-          // Round-2 audit fix: include snapshots even on the
-          // fresh-install upload path. Typically empty for a new
-          // user but a returning user could land here too (e.g.
-          // they had local IDB snapshots from a prior signed-out
-          // session, then signed in for the first time — those
-          // pre-signin snapshots must reach Drive).
-          const snapshotsForUpload = await (
-            await import("@/lib/persistence/persistence")
-          ).loadSnapshots();
-          const json = exportData({
-            household: useAppStore.getState().household,
-            assumptions: useAppStore.getState().assumptions,
-            scenarios: useAppStore.getState().scenarios,
-            memberAssumptions: useAppStore.getState().memberAssumptions,
-            preferredMemberId: useAppStore.getState().preferredMemberId,
-            targetAllocation: useAppStore.getState().targetAllocation,
-            glidePath: useAppStore.getState().glidePath,
-            householdAnnualIncomeUSD: useAppStore.getState().householdAnnualIncomeUSD,
-            goals: useAppStore.getState().goals,
-            budgetItems: useAppStore.getState().budgetItems,
-            incomeStreams: useAppStore.getState().incomeStreams,
-            healthPlans: useAppStore.getState().healthPlans,
-            healthImportanceWeights: useAppStore.getState().healthImportanceWeights,
-            snapshots: snapshotsForUpload,
-          });
-          const passphrase =
-            useAppStore.getState().encryptionPassphrase;
-          const sealed = passphrase
-            ? await (
-                await import("@/lib/sync/crypto")
-              ).encryptString(json, passphrase)
-            : json;
-          await uploadBackup(token, sealed);
-          if (cancelled) return;
+          // For non-"ok" results (blocked-by-shrinkage / -encryption,
+          // error), pushToDrive already set the descriptive
+          // googleSyncError + (where appropriate) googleSyncBlockedReason
+          // so the dedicated banners pick up the recovery UX.
+        } else {
+          // Audit R6 (Layer 1/2/3): the previously-missing branch.
+          // Fires when: existing === null + mode === "real" +
+          // accounts.length === 0 (user has an empty real household
+          // — e.g., they previously did Start Fresh and signed in
+          // afterwards, or signed out + cleared their data + signed
+          // back in).
+          //
+          // The pre-fix code silently fell through with no
+          // setGoogleSyncState call, leaving googleLastSyncAt === null.
+          // That sticks CloudSyncer's initial-sync gate ON forever —
+          // every future edit's debounce-push gets refused with
+          // "blocked-by-initial-sync", and the user has no idea why
+          // their data isn't syncing. They'd need to manually click
+          // "Sync now" in the GoogleSyncCard to recover.
+          //
+          // Mark the initial sync as complete (mirroring the
+          // strict-demo silent-defer branch above) so the user's
+          // next edit triggers a normal debounce-push.
           s.setGoogleSyncState({
-            googleLastSyncAt: Date.now(),
+            googleSyncing: false,
             googleSyncError: null,
             googleSyncBlockedReason: null,
-            lastSyncOutcome: "uploaded-fresh",
+            googleLastSyncAt: Date.now(),
+            lastSyncOutcome: null,
           });
         }
       } catch (e) {
@@ -329,6 +376,20 @@ export function AuthHydrator() {
       if (!state.user) {
         writeCachedSub(null);
         setSubscription("free");
+        // Audit R2 (Layer 1/2/3): clear pendingInitialSyncConfirm on
+        // sign-out. Without this, a sign-in that set the flag but
+        // didn't get resolved before sign-out (idle timeout,
+        // other-device kick, manual sign-out) leaves the modal-
+        // backing flag set. The modal itself gates on `user` too (so
+        // it won't render), but clearing here ensures the flag
+        // doesn't survive into the NEXT sign-in's AuthHydrator pass
+        // — which could otherwise incorrectly skip the AuthHydrator
+        // initial-sync logic by finding the flag already true.
+        if (state.pendingInitialSyncConfirm) {
+          useAppStore
+            .getState()
+            .setGoogleSyncState({ pendingInitialSyncConfirm: false });
+        }
         return;
       }
       void handleUser(state.user.email);

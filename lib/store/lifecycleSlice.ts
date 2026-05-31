@@ -110,6 +110,21 @@ export type LifecycleSliceActions = {
   switchToReal: () => void;
   /** Drop back to the demo household + assumptions. Preserves auth. */
   resetToDemo: () => void;
+  /**
+   * Promote demo → real WITHOUT wiping the user's current state.
+   *
+   * Different from `switchToReal()` (which blanks the household to
+   * empty for the "Start Fresh" onboarding flow). This action is
+   * fired automatically by the persistence layer on the user's
+   * first edit: the demo data they were just looking at IS the
+   * starting point of THEIR data now. Flipping the flag lets the
+   * downstream gates (CloudSyncer drive-upload, hide-on-demo UI
+   * cues) start treating this as a real session without losing
+   * what the user has been building.
+   *
+   * No-op when already in real mode.
+   */
+  promoteToReal: () => void;
 };
 
 export const LIFECYCLE_SLICE_INITIAL: LifecycleSliceState = {
@@ -151,6 +166,16 @@ export type LifecycleSliceContext = LifecycleSliceState &
     googleSyncing: boolean;
     googleSyncError: string | null;
     googleLastSyncAt: number | null;
+    /**
+     * Layer 2 (Audit R5): included so lifecycle resets can clear
+     * the modal-backing flag. Without the explicit clear, a user
+     * clicking "Use mock data" while the InitialSyncConfirmModal is
+     * open would reset every other slice to demo BUT leave the
+     * modal mounted (rendering "Push current data to Drive?" over
+     * demo-seed state). Clicking Push would then surface a
+     * confusing "Household is still the demo seed" error.
+     */
+    pendingInitialSyncConfirm: boolean;
     user: GoogleProfile | null;
     subscription: "free" | "pro";
     subscriptionCheckedAt: number | null;
@@ -243,10 +268,30 @@ export function createLifecycleSliceActions(
         googleSyncing: false,
         googleSyncError: null,
         googleLastSyncAt: s.googleLastSyncAt,
+        // Audit R5 (Layer 1/2/3): clear the modal-backing flag on
+        // mode reset. Without this, a user with the modal open who
+        // clicks "Start Fresh" / a code path that calls
+        // switchToReal leaves the modal mounted asking to push the
+        // (now-blanked) household to Drive. The push would surface
+        // a strict-demo refusal but the modal's prompt is misleading.
+        pendingInitialSyncConfirm: false,
         user: s.user,
         subscription: s.subscription,
         subscriptionCheckedAt: s.subscriptionCheckedAt,
       })),
+
+    promoteToReal: () => {
+      // Skip the `set` entirely in the no-op case. Zustand's setter
+      // produces a FRESH state object reference even when the patch
+      // is `{}` (Object.assign returns a new object), which fires
+      // every subscriber listener with a shallow-equal-but-not-
+      // identical state. Harmless under the existing diff-check
+      // gates, but wasteful — and R7 now calls promoteToReal()
+      // before every snapshot write (Add / Save edit / Delete),
+      // amplifying the wasted dispatches. Audit R15.
+      if (get().mode === "real") return;
+      set(() => ({ mode: "real" }));
+    },
 
     resetToDemo: () => {
       void config.clearRealState();
@@ -262,6 +307,12 @@ export function createLifecycleSliceActions(
         googleSyncing: false,
         googleSyncError: null,
         googleLastSyncAt: s.googleLastSyncAt,
+        // Audit R5 (Layer 1/2/3): clear the modal-backing flag on
+        // mode reset to demo. Same reasoning as switchToReal: the
+        // modal must not survive a lifecycle reset that no longer
+        // matches its prompt ("Push current data to Drive?" when
+        // the data is now the demo seed).
+        pendingInitialSyncConfirm: false,
         user: s.user,
         subscription: s.subscription,
         subscriptionCheckedAt: s.subscriptionCheckedAt,

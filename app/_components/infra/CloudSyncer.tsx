@@ -11,7 +11,7 @@ import {
 } from "@/lib/sync/googleDrive";
 import { exportData } from "@/lib/persistence/dataIO";
 import { loadSnapshots } from "@/lib/persistence/persistence";
-import { isDemoHousehold } from "@/lib/types";
+import { isDemoHouseholdStrict } from "@/lib/demo";
 import {
   DriveUnreadableError,
   checkShrinkageAgainstDrive,
@@ -33,6 +33,13 @@ import {
  * footgun. The "Use mock data" button is also hidden from the header
  * when signed in (defense in depth), but the gate lives here so
  * neither path can corrupt Drive.
+ *
+ * Under Frame B, `mode === "real"` is the single authoritative
+ * signal — including the auto-promoted-from-demo case (household
+ * IDs may still look demo-ish but the user has made real edits).
+ * The previous `isDemoHousehold` belt-and-suspenders check has
+ * been removed; it incorrectly rejected auto-promoted user data,
+ * leaving genuine edits stranded local-only on signed-in devices.
  */
 export function CloudSyncer() {
   useEffect(() => {
@@ -40,11 +47,14 @@ export function CloudSyncer() {
     const unsub = useAppStore.subscribe((state, prev) => {
       if (!state.googleConnected) return;
       if (state.mode !== "real") return;
-      // Belt-and-suspenders: never upload the demo household, even if
-      // some future bug leaves us in real mode with demo data.
-      // isDemoHousehold checks for the hardcoded demo IDs that no
-      // user-created household can produce.
-      if (isDemoHousehold(state.household)) return;
+      // Layer 3: refuse to schedule a push if the household tree is
+      // still the verbatim demo seed. The user has been auto-promoted
+      // to real mode (e.g., they edited an assumption slider), but
+      // they haven't claimed the demo members/accounts as their own.
+      // Pushing the seed risks overwriting a real Drive backup on the
+      // rare findBackupFile stale-index race. Once the user renames a
+      // member or edits an account, this gate releases naturally.
+      if (isDemoHouseholdStrict(state.household)) return;
       // Time-travel session gate — same reasoning as the IDB gate
       // in PersistenceHydrator. The in-memory household represents
       // a HYPOTHETICAL past state the user is editing for the
@@ -155,9 +165,13 @@ export function CloudSyncer() {
           s.setGoogleSyncState({ googleUploadScheduled: false });
           return;
         }
-        // Re-check fingerprint at fire time too — state may have
-        // changed in the 3-second debounce window.
-        if (isDemoHousehold(s.household)) {
+        // Layer 3 fire-time recheck: symmetric with the subscribe-
+        // entry gate above. The user could have reverted to a
+        // strict-demo household between schedule and fire (unusual
+        // but possible — e.g., import a Drive backup that happens
+        // to match the demo seed); refuse the push in that case
+        // rather than rely on the entry gate alone.
+        if (isDemoHouseholdStrict(s.household)) {
           s.setGoogleSyncState({ googleUploadScheduled: false });
           return;
         }
@@ -271,6 +285,7 @@ export function CloudSyncer() {
                   healthImportanceWeights: s.healthImportanceWeights,
                   memberAssumptions: s.memberAssumptions,
                   snapshots: localSnapshotsForShrinkage,
+                  household: { accounts: s.household.accounts },
                 },
               );
               if (shrinkage) {

@@ -1933,10 +1933,14 @@ describe("historicalReturns — algebraic invariants", () => {
   it("demoSnapshots: class series span the full window with monotone-ascending t", async () => {
     const { buildDemoSnapshots, buildAssetClassSeries } = await lazyImports();
     const now = Date.UTC(2026, 4, 15, 12);
-    const snaps = buildDemoSnapshots(now, 60);
+    // intervalMonths=1 keeps this property test independent of the
+    // production default (which is 6-month anchors). 61 monthly
+    // points (months=60 + interval=1 spans monthsAgo=60..0 inclusive)
+    // stress-tests the per-class buckets cleanly.
+    const snaps = buildDemoSnapshots(now, 60, 1);
     const series = buildAssetClassSeries(snaps);
     for (const [, ser] of Object.entries(series)) {
-      expect(ser!.length).toBe(60);
+      expect(ser!.length).toBe(61);
       for (let i = 1; i < ser!.length; i++) {
         expect(ser![i].t).toBeGreaterThan(ser![i - 1].t);
       }

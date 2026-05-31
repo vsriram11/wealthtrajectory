@@ -847,6 +847,115 @@ describe("memberFilteredSnapshots (Round-5 fix)", () => {
   });
 });
 
+describe("reconstructHistory — snapshot composition with already-back-projected lastPriceUSD (R2 audit)", () => {
+  // R2 audit: the demo-snapshots refactor now produces snapshots
+  // whose embedded household has BOTH `shares` AND `lastPriceUSD`
+  // already back-projected for that snapshot's anchor time. The
+  // chart's `composeNetWorthAt` quote-missing fallback path
+  // divides `h.lastPriceUSD` by `(1+r)^((now-t)/month)`, which
+  // produces a DOUBLE back-projection when the holding came from
+  // a past snapshot (its lastPriceUSD is already discounted).
+  //
+  // Expected: when the bucket time t equals the snapshot's
+  // anchor time and no quotes are available, the per-holding
+  // contribution is shares × lastPriceUSD — the snapshot's
+  // recorded value at that moment, without further CAGR
+  // re-discounting.
+  it("compose at snap.t with no quotes uses recorded shares × lastPriceUSD (no double-discount)", () => {
+    const T_NOW = Date.UTC(2026, 5, 1, 12);
+    const T_FIVE_YEARS_AGO = T_NOW - 5 * 365 * 24 * 60 * 60 * 1000;
+    // Snapshot's embedded VTI: 50 shares at $200/share = $10,000.
+    // These are "recorded as-of T_FIVE_YEARS_AGO" — the demo
+    // factory builds these by back-projecting today's 200-share /
+    // $400 holding via the share + price curves.
+    const snapHousehold: Household = {
+      id: "hh",
+      members: [{ id: "m1", displayName: "Tester" } as never],
+      accounts: [
+        {
+          id: "a1",
+          ownerId: "m1",
+          displayName: "Brokerage",
+          category: "TAXABLE",
+          holdings: [
+            {
+              id: "h1",
+              kind: "equity" as const,
+              symbol: "VTI",
+              shares: 50,
+              valueUSD: 10_000,
+              lastPriceUSD: 200, // back-projected to T_FIVE_YEARS_AGO
+              lastPricedAt: T_FIVE_YEARS_AGO,
+              currency: "USD",
+              expenseRatio: 0.03,
+              geography: { US: 1, DEVELOPED: 0, EMERGING: 0 },
+              style: {},
+              leverage: 1,
+              expectedRealCAGR: 0.07,
+              isManualPrice: false,
+              acquiredAt: null,
+            },
+          ] as never,
+        } as never,
+      ],
+      liabilities: [],
+    };
+    // "Live today" composition: same VTI grown to 200 shares × $400.
+    const liveHousehold: Household = {
+      ...snapHousehold,
+      accounts: [
+        {
+          ...snapHousehold.accounts[0],
+          holdings: [
+            {
+              ...snapHousehold.accounts[0].holdings[0],
+              shares: 200,
+              lastPriceUSD: 400,
+              valueUSD: 80_000,
+              lastPricedAt: T_NOW,
+            },
+          ] as never,
+        } as never,
+      ],
+    };
+    const snapshots: Snapshot[] = [
+      {
+        t: T_FIVE_YEARS_AGO,
+        netWorthUSD: 10_000,
+        household: snapHousehold,
+      },
+    ];
+    const out = reconstructHistory(
+      liveHousehold,
+      {},
+      "ALL",
+      T_NOW,
+      snapshots,
+    );
+    // Find the bucket closest to T_FIVE_YEARS_AGO (snap anchor).
+    let bucketAtSnap = out[0];
+    let bestDelta = Math.abs(out[0].t - T_FIVE_YEARS_AGO);
+    for (const p of out) {
+      const d = Math.abs(p.t - T_FIVE_YEARS_AGO);
+      if (d < bestDelta) {
+        bestDelta = d;
+        bucketAtSnap = p;
+      }
+    }
+    // The bucket should reflect the snapshot's recorded value
+    // ($10,000) — NOT half that figure (which is what the
+    // double-discounted fallback produced).
+    //
+    // Pre-fix: lastPriceUSD=200 was divided by (1.07)^5 ≈ 1.40
+    // even though the bucket time was AT the snap anchor, so the
+    // per-share price collapsed to ~$143 and the total to ~$7,140.
+    // Tight tolerance because the bucket is essentially at the
+    // anchor — variance only comes from bucket-grid alignment.
+    expect(bucketAtSnap.netWorthUSD).toBeGreaterThan(9_500);
+    expect(bucketAtSnap.netWorthUSD).toBeLessThan(11_500);
+  });
+});
+
 describe("reconstructHistory — newly-added holdings (user-reported fake-gain fix)", () => {
   // USER REPORT: "Added equity today but backdated the acquired
   // on date — history chart shows a big fake gain."
@@ -1083,5 +1192,268 @@ describe("reconstructHistory — newly-added holdings (user-reported fake-gain f
     // the snapshot's composition (which has no liabilities) → $200k.
     const yearAgoIdx = out.findIndex((p) => p.t >= T_YEAR_AGO);
     expect(out[yearAgoIdx].netWorthUSD).toBe(200_000);
+  });
+});
+
+describe("reconstructHistory — trailing-edge intraday cliff fix", () => {
+  // User-reported (demo + signed-out): chart showed yesterday at
+  // $1.7M and today at $1.5M — a single-day vertical drop at the
+  // right edge. Root cause: the cached quote history ends at the
+  // previous trading day's close, and the live NW pin uses the
+  // holding's INTRADAY `lastPriceUSD` from PriceRefresher. When the
+  // two prices disagree, the right-edge bucket reads the cached
+  // close (clamped) and the next bucket pins to live intraday — a
+  // visible cliff. Fix: when priceAtDetailed clamps PAST the end of
+  // the quote window, prefer the holding's live `lastPriceUSD`.
+  const T_NOW = new Date("2026-05-31T16:00:00Z").getTime();
+  const T_YESTERDAY = T_NOW - 24 * 60 * 60 * 1000;
+  const T_TWO_DAYS_AGO = T_NOW - 2 * 24 * 60 * 60 * 1000;
+
+  function tinyHH(
+    lastPriceUSD: number,
+  ): Household {
+    return {
+      id: "trailing-cliff-test",
+      members: [{ id: "m1", displayName: "Tester" } as never],
+      accounts: [
+        {
+          id: "a1",
+          ownerId: "m1",
+          displayName: "Brokerage",
+          category: "TAXABLE",
+          holdings: [
+            {
+              id: "h1",
+              kind: "equity",
+              symbol: "VOO",
+              shares: 100,
+              // valueUSD reflects PriceRefresher's intraday update:
+              // shares × today's intraday price.
+              valueUSD: 100 * lastPriceUSD,
+              lastPriceUSD,
+              lastPricedAt: T_NOW,
+              currency: "USD",
+              expenseRatio: 0,
+              geography: { US: 1, DEVELOPED: 0, EMERGING: 0 },
+              style: {},
+              leverage: 1,
+              expectedRealCAGR: 0.08,
+              isManualPrice: false,
+              acquiredAt: null,
+            } as never,
+          ] as never,
+        } as never,
+      ],
+      liabilities: [],
+    };
+  }
+
+  it("smooths the trailing region toward live intraday when cached close lags", () => {
+    // Real-world data flow: the API route returns quote.currentPrice
+    // = live intraday (from Finnhub) + history ending at the
+    // previous trading day's close. PriceRefresher writes that
+    // currentPrice into holding.lastPriceUSD. So in practice,
+    // quote.currentPrice ≈ holding.lastPriceUSD — both reflect live
+    // intraday. The CACHED HISTORY's last close ($100 here) is
+    // what's stale, not the holding/quote.
+    //
+    // Pre-fix: bucket past history end clamped to history.last.p
+    // = $100 cached close. Today's bucket pinned to live = $90.
+    // $1,000 cliff per share.
+    // Post-fix: prefer quote.currentPrice ($90 live intraday) over
+    // the clamped close. Trailing bucket = $9,000, no cliff.
+    const household = tinyHH(90);
+    const quotes: Record<string, Quote> = {
+      VOO: {
+        symbol: "VOO",
+        currentPrice: 90, // LIVE intraday (matches holding.lastPriceUSD)
+        history: [
+          // Cache ends 2 days ago at $100 — overnight gap drop
+          // brought live intraday today down to $90.
+          { t: T_TWO_DAYS_AGO - 86_400_000, p: 100 },
+          { t: T_TWO_DAYS_AGO, p: 100 },
+        ],
+        fetchedAt: T_NOW,
+        currency: "USD",
+        name: null,
+        unavailable: false,
+      },
+    };
+    const out = reconstructHistory(household, quotes, "1Y", T_NOW, []);
+    expect(out.length).toBeGreaterThan(2);
+    const live = 100 * 90; // 9,000
+    const cachedClose = 100 * 100; // 10,000
+    const last = out[out.length - 1].netWorthUSD;
+    const secondLast = out[out.length - 2].netWorthUSD;
+    expect(secondLast).toBeCloseTo(live, -1);
+    expect(last).toBeCloseTo(live, -1);
+    // Specifically: secondLast should NOT be the cached close.
+    expect(Math.abs(secondLast - cachedClose)).toBeGreaterThan(100);
+    void T_YESTERDAY;
+  });
+
+  it("leaves start-of-window clamps alone (inception plateau is still correct)", () => {
+    // The fix only applies to END-of-window clamps. START-of-window
+    // (e.g., a ticker whose inception postdates the chart range)
+    // should still hold flat at the first historical close — the
+    // inception-plateau behavior the original fix established.
+    const household = tinyHH(110); // intraday $110
+    const quotes: Record<string, Quote> = {
+      VOO: {
+        symbol: "VOO",
+        currentPrice: 110,
+        // History starts only 30 days ago — the 1Y chart's earliest
+        // buckets fall BEFORE this window.
+        history: [
+          { t: T_NOW - 30 * 86_400_000, p: 50 },
+          { t: T_NOW - 1 * 86_400_000, p: 109 },
+        ],
+        fetchedAt: T_NOW,
+        currency: "USD",
+        name: null,
+        unavailable: false,
+      },
+    };
+    const out = reconstructHistory(household, quotes, "1Y", T_NOW, []);
+    // First bucket (well before inception): clamped to the FIRST
+    // historical close, which is $50 × 100 = $5,000.
+    const first = out[0].netWorthUSD;
+    expect(first).toBeCloseTo(5_000, -1);
+    // The fix's behavior shouldn't bleed into the start-of-window
+    // case — the first bucket must NOT be the live intraday value.
+    expect(first).not.toBeCloseTo(11_000, -1);
+  });
+
+  it("uses quote.currentPrice (not h.lastPriceUSD) when iterating a snap with back-projected prices", () => {
+    // Demo scenario (real user-reported V-bottom): the chart
+    // picks a 6-month-old snapshot for buckets near the right
+    // edge. That snap's `lastPriceUSD` was back-projected
+    // (~0.95× today) when the snap was built. Pre-fix, the
+    // trailing-clamped buckets read snap.lastPriceUSD ($95)
+    // multiplied by snap.shares (0.93× of today), producing
+    // ~0.88× of live NW — a visible V drop right before the
+    // live pin.
+    //
+    // Quote.currentPrice ($100, the live intraday) is the
+    // universal source of truth regardless of which household
+    // is being iterated. Pin that the fix uses it.
+    const snapHousehold: Household = {
+      id: "snap-h",
+      members: [{ id: "m1", displayName: "Tester" } as never],
+      accounts: [
+        {
+          id: "a1",
+          ownerId: "m1",
+          displayName: "Brokerage",
+          category: "TAXABLE",
+          holdings: [
+            {
+              id: "h1",
+              kind: "equity",
+              symbol: "VOO",
+              shares: 93, // 0.93× of "today's" 100 shares
+              valueUSD: 93 * 95, // snap intrinsic: shares × snap.lastPriceUSD
+              lastPriceUSD: 95, // BACK-PROJECTED snap price
+              lastPricedAt: T_NOW,
+              currency: "USD",
+              expenseRatio: 0,
+              geography: { US: 1, DEVELOPED: 0, EMERGING: 0 },
+              style: {},
+              leverage: 1,
+              expectedRealCAGR: 0.08,
+              isManualPrice: false,
+              acquiredAt: null,
+            } as never,
+          ] as never,
+        } as never,
+      ],
+      liabilities: [],
+    };
+    const snap: Snapshot = {
+      t: T_NOW - 180 * 86_400_000, // 6 months ago
+      netWorthUSD: 93 * 95,
+      household: snapHousehold,
+      source: "auto",
+    };
+    // Build the live household from scratch (rather than spreading
+    // through the `as never`-typed snap household, which TS can't
+    // resolve). Same shape, different shares + lastPriceUSD.
+    const liveHH: Household = {
+      id: "snap-h",
+      members: [{ id: "m1", displayName: "Tester" } as never],
+      accounts: [
+        {
+          id: "a1",
+          ownerId: "m1",
+          displayName: "Brokerage",
+          category: "TAXABLE",
+          holdings: [
+            {
+              id: "h1",
+              kind: "equity",
+              symbol: "VOO",
+              shares: 100,
+              valueUSD: 100 * 100,
+              lastPriceUSD: 100,
+              lastPricedAt: T_NOW,
+              currency: "USD",
+              expenseRatio: 0,
+              geography: { US: 1, DEVELOPED: 0, EMERGING: 0 },
+              style: {},
+              leverage: 1,
+              expectedRealCAGR: 0.08,
+              isManualPrice: false,
+              acquiredAt: null,
+            } as never,
+          ] as never,
+        } as never,
+      ],
+      liabilities: [],
+    };
+    const quotes: Record<string, Quote> = {
+      VOO: {
+        symbol: "VOO",
+        currentPrice: 100, // LIVE intraday — the universal source
+        history: [
+          { t: T_NOW - 200 * 86_400_000, p: 90 },
+          // Cache ends well before today — trailing buckets
+          // will end-clamp.
+          { t: T_NOW - 10 * 86_400_000, p: 99 },
+        ],
+        fetchedAt: T_NOW,
+        currency: "USD",
+        name: null,
+        unavailable: false,
+      },
+    };
+    const reconstructed = reconstructHistory(liveHH, quotes, "1Y", T_NOW, [
+      snap,
+    ]);
+    // Pipe through overlaySnapshots like the home chart does, so
+    // the live pin lands at the right edge.
+    const live = 100 * 100; // $10,000
+    const out = overlaySnapshots(
+      reconstructed,
+      [snap],
+      live,
+      liveHH,
+      quotes,
+      T_NOW,
+    );
+
+    // For buckets between the 6mo-ago snap and the right edge
+    // that fall PAST the cached history end (last ~10 days),
+    // pickCompositionSnapshot returns the snap. Pre-fix: bucket
+    // value = 93 shares × $95 snap.lastPriceUSD = $8,835.
+    // Post-fix: 93 shares × $100 quote.currentPrice = $9,300.
+    // The right-edge bucket pins to live: 100 × $100 = $10,000.
+    const last = out[out.length - 1].netWorthUSD;
+    const secondLast = out[out.length - 2].netWorthUSD;
+    expect(last).toBeCloseTo(live, -1); // live pin
+    // secondLast should be ~$9,300 (post-fix), NOT ~$8,835
+    // (pre-fix snap.lastPriceUSD path). Pin a tight range so a
+    // regression to either side breaks the test.
+    expect(secondLast).toBeGreaterThan(9_200);
+    expect(secondLast).toBeLessThan(9_500);
   });
 });

@@ -132,8 +132,10 @@ export function EnterTimeTravelModal({
           freely edit your holdings, accounts, and assumptions to
           match how things looked then.{" "}
           <strong className="text-amber-300">
-            While in the mode, none of your edits are saved to disk
-            or synced to Drive.
+            Your live data isn&rsquo;t touched while in the mode,
+            and Drive sync is paused — session edits live in a
+            separate resume record so reload returns you to the
+            session.
           </strong>{" "}
           On Save, your edits become the snapshot payload; on Exit,
           everything is restored.

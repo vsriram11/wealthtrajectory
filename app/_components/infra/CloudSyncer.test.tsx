@@ -21,11 +21,12 @@ import { CloudSyncer } from "./CloudSyncer";
 import { useAppStore } from "@/lib/store";
 
 function resetStore() {
-  // Replace the demo household with a non-demo one so
-  // `isDemoHousehold` doesn't gate the subscribe handler off
-  // (CloudSyncer early-returns for the demo household even in
-  // real mode — defense-in-depth against demo data leaking to
-  // Drive).
+  // Replace the demo household with a non-demo one. Pre-Frame-B
+  // this was needed because CloudSyncer early-returned on
+  // `isDemoHousehold` even in real mode. Post-Frame-B that gate
+  // has been removed (mode === "real" is the single source of
+  // truth), so the replacement is no longer load-bearing — kept
+  // for clarity in what the test is exercising.
   useAppStore.setState({
     mode: "real",
     household: {

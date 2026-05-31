@@ -31,7 +31,22 @@ type Collection =
    * need the same wipe-protection. Callers pass the local snapshot
    * COUNT into the guard (cheap), not the rows themselves.
    */
-  | "snapshots";
+  | "snapshots"
+  /**
+   * Accounts live nested at `household.accounts`, not at the top
+   * level. The guard accesses them via a special path below, but
+   * they're listed here so the SHRINKAGE_GUARDED_ARRAY_COLLECTIONS
+   * export covers the full set the banner / recovery flow needs to
+   * know about.
+   *
+   * Added in the post-Frame-B "Layer 1" tightening: previously the
+   * household tree was unprotected on Drive uploads, so an
+   * auto-promoted demo-seed session whose findBackupFile call
+   * returned a spurious null could PATCH a real Drive backup with
+   * the demo's account list (10 demo accounts replacing the user's
+   * 15 real ones — a count-match-but-content-differ wipe).
+   */
+  | "accounts";
 /**
  * Sparse-map collections also need wipe-protection — same N→0 risk,
  * but the underlying shape is `Record<string, ...>` instead of an
@@ -83,7 +98,48 @@ export const SHRINKAGE_GUARDED_ARRAY_COLLECTIONS = [
   "incomeStreams",
   "healthPlans",
   "snapshots",
+  "accounts",
 ] as const satisfies readonly Collection[];
+
+/**
+ * Catastrophic-shrinkage threshold: refuse the upload (outbound) or
+ * download (inbound) if the destination would drop below this
+ * fraction of the source's count.
+ *
+ * Pre-Layer-1: the trigger was N → 0 only (full wipe). That missed
+ * the partial wipe class — e.g., a Drive backup with 15 accounts
+ * being overwritten by a demo seed's 10 accounts isn't a "wipe"
+ * (10 > 0) but is a significant data loss for the user, and the
+ * "count match, content differ" case is the specific Frame-B
+ * regression we want to catch.
+ *
+ * 0.5 is the lowest threshold that still permits a "delete one or
+ * two items" workflow without nagging the user. Below 50% survival
+ * we treat the transition as catastrophic and refuse pending
+ * explicit recovery-banner consent.
+ */
+export const MAJOR_SHRINK_THRESHOLD = 0.5;
+
+/**
+ * Single source of truth for "is the destination's count
+ * catastrophically smaller than the source's?". Used by both the
+ * outbound (`checkShrinkage`) and inbound (`isInboundShrinkage`)
+ * guards so they trip at the same threshold.
+ *
+ * - sourceCount === 0  → never shrinkage (there was nothing to lose)
+ * - destCount === 0    → always shrinkage (full wipe)
+ * - 0 < destCount      → shrinkage when destCount < source × ratio
+ *                        (i.e., we lost more than (1 − ratio) of
+ *                        the items). At ratio = 0.5 that's > 50%.
+ */
+export function isMajorShrink(
+  sourceCount: number,
+  destCount: number,
+): boolean {
+  if (sourceCount === 0) return false;
+  if (destCount === 0) return true;
+  return destCount < sourceCount * MAJOR_SHRINK_THRESHOLD;
+}
 
 export const SHRINKAGE_GUARDED_MAP_COLLECTIONS = [
   "healthImportanceWeights",
@@ -119,6 +175,7 @@ export function checkShrinkage(
     incomeStreams?: unknown[];
     healthPlans?: unknown[];
     snapshots?: unknown[];
+    household?: { accounts?: unknown[] };
     healthImportanceWeights?: Record<string, unknown>;
     memberAssumptions?: Record<string, unknown>;
   },
@@ -129,6 +186,7 @@ export function checkShrinkage(
     incomeStreams: unknown[];
     healthPlans: unknown[];
     snapshots: unknown[];
+    household: { accounts: unknown[] };
     healthImportanceWeights: Record<string, unknown>;
     memberAssumptions: Record<string, unknown>;
   },
@@ -137,11 +195,25 @@ export function checkShrinkage(
   const currentCounts: ShrinkageReport["currentCounts"] = {};
   const shrinking: (Collection | MapCollection)[] = [];
   for (const c of TRACKED_COLLECTIONS) {
-    const driveLen = Array.isArray(drivePayload[c]) ? drivePayload[c]!.length : 0;
-    const curLen = currentState[c].length;
+    let driveLen: number;
+    let curLen: number;
+    if (c === "accounts") {
+      // Nested at household.accounts — not at the top level like
+      // the other collections, so it gets a dedicated access path
+      // here. The branch only exists for this one collection
+      // because lifting accounts to the top level would require a
+      // schema migration we don't need.
+      driveLen = Array.isArray(drivePayload.household?.accounts)
+        ? drivePayload.household.accounts.length
+        : 0;
+      curLen = currentState.household.accounts.length;
+    } else {
+      driveLen = Array.isArray(drivePayload[c]) ? drivePayload[c]!.length : 0;
+      curLen = currentState[c].length;
+    }
     driveCounts[c] = driveLen;
     currentCounts[c] = curLen;
-    if (driveLen > 0 && curLen === 0) shrinking.push(c);
+    if (isMajorShrink(driveLen, curLen)) shrinking.push(c);
   }
   for (const c of TRACKED_MAP_COLLECTIONS) {
     const driveObj = drivePayload[c];
@@ -156,7 +228,7 @@ export function checkShrinkage(
         : 0;
     driveCounts[c] = driveCount;
     currentCounts[c] = curCount;
-    if (driveCount > 0 && curCount === 0) shrinking.push(c);
+    if (isMajorShrink(driveCount, curCount)) shrinking.push(c);
   }
   if (shrinking.length === 0) return null;
   return { shrinking, driveCounts, currentCounts };
@@ -196,6 +268,7 @@ export async function checkShrinkageAgainstDrive(
     incomeStreams: unknown[];
     healthPlans: unknown[];
     snapshots: unknown[];
+    household: { accounts: unknown[] };
     healthImportanceWeights: Record<string, unknown>;
     memberAssumptions: Record<string, unknown>;
   },

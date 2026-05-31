@@ -48,20 +48,27 @@ describe("snapshot lifecycle — end-to-end integration", () => {
       demoSnapshots,
     } = await freshModules();
     // Use the demo snapshot generator as the source of "realistic"
-    // data. 60 monthly snapshots × multiple asset classes.
+    // data. 61 monthly snapshots × multiple asset classes (the
+    // signature is `months=N, intervalMonths=1` → N+1 snapshots
+    // spanning monthsAgo = N down through 0 inclusive). Passing
+    // intervalMonths=1 explicitly so this test stays independent of
+    // the production default (6-month anchors). The class-series
+    // engine should handle any sampling cadence, so monthly is the
+    // most-stressful choice here.
     const now = Date.UTC(2026, 4, 15, 12);
-    const snaps = demoSnapshots.buildDemoSnapshots(now, 60);
+    const snaps = demoSnapshots.buildDemoSnapshots(now, 60, 1);
+    expect(snaps).toHaveLength(61);
     // Persist them all through the public write API.
     await persistence.replaceAllSnapshots(snaps);
     const loaded = await persistence.loadSnapshots();
-    expect(loaded).toHaveLength(60);
+    expect(loaded).toHaveLength(61);
     // The engine consumes them and produces per-class series.
     const buckets = historicalReturns.buildAssetClassSeries(loaded);
     expect(Object.keys(buckets).length).toBeGreaterThan(0);
     // Each bucket has one point per snapshot it appears in.
     for (const [, ser] of Object.entries(buckets)) {
       expect(ser!.length).toBeGreaterThan(0);
-      expect(ser!.length).toBeLessThanOrEqual(60);
+      expect(ser!.length).toBeLessThanOrEqual(61);
     }
     // Summary rows compute without throwing.
     const rows = historicalReturns.summarizeClassReturns(buckets);
@@ -73,6 +80,52 @@ describe("snapshot lifecycle — end-to-end integration", () => {
       if (row.totalReturn != null)
         expect(Number.isFinite(row.totalReturn)).toBe(true);
     }
+  });
+
+  it("production-default demo snapshots (120,6) round-trip and per-class engine handles missing acquisition tickers (R12 audit)", async () => {
+    // R12 audit pin: with the production defaults, the demo's
+    // oldest snapshot drops BTC + 4 leveraged ETFs (they were
+    // acquired more recently than 10y). buildAssetClassSeries
+    // uses the first ∩ last intersection rule, so the OUTPUT
+    // shape is:
+    //
+    //  - Crypto: NO series (BTC was the only crypto holding and
+    //    it's absent from the oldest snapshot).
+    //  - Equity / bond / commodity / cash / real_estate: present
+    //    via always-held tickers.
+    //
+    // This regression test pins that behavior so a future
+    // refactor (e.g. changing the intersection rule) makes the
+    // change VISIBLE rather than silently shifting demo output.
+    const {
+      persistence,
+      historicalReturns,
+      demoSnapshots,
+    } = await freshModules();
+    const now = Date.UTC(2026, 4, 15, 12);
+    const snaps = demoSnapshots.buildDemoSnapshots(now); // production defaults
+    expect(snaps).toHaveLength(21);
+    await persistence.replaceAllSnapshots(snaps);
+    const loaded = await persistence.loadSnapshots();
+    expect(loaded).toHaveLength(21);
+    const buckets = historicalReturns.buildAssetClassSeries(loaded);
+    // Crypto disappears because BTC (the only crypto holding)
+    // isn't in the oldest snapshot — the intersection rule
+    // excludes it. Documented trade-off; pinning so the contract
+    // is testable.
+    expect(buckets.crypto).toBeUndefined();
+    // Other classes still present because they have always-held
+    // tickers across the window.
+    expect(buckets.equity).toBeDefined();
+    expect(buckets.equity!.length).toBe(21);
+    expect(buckets.bond).toBeDefined();
+    expect(buckets.bond!.length).toBe(21);
+    expect(buckets.cash).toBeDefined();
+    expect(buckets.cash!.length).toBe(21);
+    // Summary handles the missing crypto cleanly.
+    const rows = historicalReturns.summarizeClassReturns(buckets);
+    expect(rows.find((r) => r.assetClass === "crypto")).toBeUndefined();
+    expect(rows.find((r) => r.assetClass === "equity")).toBeDefined();
   });
 
   it("appState round-trips through write → loadSnapshots (no field stripping)", async () => {

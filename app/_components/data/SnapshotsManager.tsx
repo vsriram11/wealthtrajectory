@@ -9,6 +9,8 @@ import {
   recordSnapshot,
   type Snapshot,
 } from "@/lib/persistence/persistence";
+import { buildDemoSnapshots } from "@/lib/demoSnapshots";
+import { isDemoHouseholdStrict } from "@/lib/demo";
 import { captureSnapshotAppState } from "@/lib/persistence/snapshotAppState";
 import {
   filterHousehold,
@@ -166,24 +168,72 @@ export function SnapshotsManager() {
     return () => window.clearTimeout(id);
   }, [statusMessage]);
   const [includeComposition, setIncludeComposition] = useState(true);
+  // Stable anchor for synthesized demo snapshots — mirrors the
+  // HistoryView pattern so the demo timeline doesn't shift on
+  // re-render. Only consulted when `mode === "demo"`.
+  const [demoAnchor] = useState(() => Date.now());
 
   const refresh = async () => {
+    // Frame B-safe gate: use the strict household-identity check
+    // (NOT `mode === "demo"`) so a Frame-B-auto-promoted user who
+    // hasn't yet customized the household still sees the synthetic
+    // demo timeline. The exact same gate is in HistoryView so the
+    // home-page chart and this list stay consistent.
+    //
+    // Behavior:
+    //  - strict-demo (mode could be demo OR real-but-untouched
+    //    household tree) → MERGE: IDB takes precedence when t
+    //    collides (user explicitly recorded that one), but the
+    //    synthetic 10y demo timeline supplies the rest of the
+    //    historical anchors.
+    //  - household has been customized (rename / add / etc.) →
+    //    IDB only.
+    if (isDemoHouseholdStrict(household)) {
+      const idb = await loadSnapshots();
+      // Pass the LIVE household so snap.shares are anchored to the
+      // post-PriceRefresher dollar values (same fix as HistoryView).
+      const demo = buildDemoSnapshots(
+        demoAnchor,
+        undefined,
+        undefined,
+        household,
+      );
+      const idbByT = new Map(idb.map((s) => [s.t, s]));
+      const merged: Snapshot[] = demo.map((d) => idbByT.get(d.t) ?? d);
+      const demoTs = new Set(demo.map((d) => d.t));
+      for (const s of idb) {
+        if (!demoTs.has(s.t)) merged.push(s);
+      }
+      merged.sort((a, b) => a.t - b.t);
+      setSnapshots(merged);
+      return;
+    }
     const list = await loadSnapshots();
     setSnapshots(list);
   };
 
-  // Async IndexedDB load on expand. The setSnapshots inside
-  // refresh() is reached after an await — it's not synchronous in
-  // this effect body — but ESLint can't trace through the async
-  // call. The React 19 alternative (Suspense + `use()`) would
-  // require returning a Promise from the parent and would
-  // restructure the on-demand expand flow. Keep as-is and disable;
-  // the load is gated by the `open` flag, so it never cascades
-  // unprompted.
+  // Compute the demo gate as a reactive value so the load effect
+  // can depend on it cleanly (an inline `isDemoHouseholdStrict(...)`
+  // in the deps array would re-evaluate every render).
+  const isStrictDemo = isDemoHouseholdStrict(household);
+
+  // Load eagerly on mount AND on `open` toggle. The summary text
+  // ("N recorded · oldest <date>" vs "None yet — capture one to
+  // anchor your history") needs `snapshots` populated even while
+  // the panel is collapsed; otherwise a demo visitor sees "None
+  // yet" in the collapsed header even though the synthetic 10y
+  // timeline is what's actually feeding the chart on the home
+  // page. Also re-fires when the demo gate flips (a strict-demo
+  // → customized transition or vice versa).
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
-    if (open) void refresh();
-  }, [open]);
+    void refresh();
+    // The refresh closure reads `household` + `demoAnchor`; React's
+    // exhaustive-deps would want `refresh` in the array, but
+    // `refresh` is recreated every render so we'd cascade. Track
+    // the gating signals explicitly instead.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, isStrictDemo, demoAnchor]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // Apply the global member filter. `memberFilteredSnapshots`
@@ -229,13 +279,33 @@ export function SnapshotsManager() {
     [household, memberId],
   );
 
-  if (mode !== "real") return null;
+  // Frame B (no-sign-in): SnapshotsManager renders in demo mode
+  // too. When the user clicks Save, we explicitly promoteToReal
+  // BEFORE writing the snapshot — the snapshot persists to IDB
+  // and becomes part of the user's real history. (Audit R7
+  // corrected the PR commit's claim that "the persistence
+  // subscriber auto-promotes" on snapshot writes — actually the
+  // subscriber only fires on tracked-slice changes, not on
+  // bumpSnapshotsRevision, so without an explicit promote here
+  // the user stayed in demo mode while a demo-shaped snapshot
+  // was written to IDB.) The "Use mock data" button in
+  // DemoHeader gives users a one-click escape back to the demo
+  // seed if they want to discard their edits + snapshots.
+  const promoteToReal = useAppStore((s) => s.promoteToReal);
+  void mode;
 
   const handleAdd = async () => {
     const t = parseISO(draftDate);
     if (!Number.isFinite(t)) return;
     setBusy(true);
     try {
+      // Auto-promote demo → real if needed BEFORE writing. The
+      // snapshot is the user's first deliberate "save my history"
+      // act; even if no other slice has been edited yet, this
+      // qualifies as an edit and the snapshot should anchor a real
+      // session (not pollute the demo state). promoteToReal is a
+      // no-op in real mode.
+      promoteToReal();
       const snap: Snapshot = {
         t,
         // Round-1/2 audit fix: use the SAME NW the user saw in the
@@ -293,6 +363,9 @@ export function SnapshotsManager() {
     void (async () => {
       setBusy(true);
       try {
+        // Audit R7: promote demo→real before any IDB write so the
+        // snapshots store stays consistent with the mode flag.
+        promoteToReal();
         await deleteSnapshot(t);
         bumpSnapshotsRevision();
         await refresh();
@@ -363,6 +436,9 @@ export function SnapshotsManager() {
     }
     setEditNWError("");
     setBusy(true);
+    // Audit R7: promote demo→real before any IDB write so the
+    // snapshots store stays consistent with the mode flag.
+    promoteToReal();
     // R1-D6 audit HIGH fix: if `moveSnapshot` succeeds (deletes the
     // old row, writes the new one) but then `recordSnapshot` throws,
     // OR if moveSnapshot itself fails mid delete-then-put, IDB has
@@ -644,9 +720,10 @@ export function SnapshotsManager() {
             </span>{" "}
             Enter a special mode where you can edit your holdings,
             accounts, and assumptions as if at a past date. Save to
-            record a backdated snapshot; Exit to restore. None of
-            your edits in the session are persisted to IndexedDB or
-            Drive — your live data is safe.
+            record a backdated snapshot; Exit to restore. Your live
+            data is never touched — session edits are kept in a
+            separate resume record (so reload returns you to the
+            session) and Drive sync is paused for the duration.
           </button>
           <EnterTimeTravelModal
             open={timeTravelModalOpen}

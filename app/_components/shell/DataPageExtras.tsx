@@ -77,7 +77,7 @@ export function DataPageExtras() {
               </div>
               <div className="mt-0.5 text-[11px] text-text-dim">
                 {mode === "demo"
-                  ? "Edits aren't saved. Switch when you're ready to track for real."
+                  ? "Your first edit converts the mock data into your own — edits then auto-save locally."
                   : user
                     ? "All edits auto-save locally and back up to your private Google Drive folder."
                     : "All edits are auto-saved locally to this browser."}

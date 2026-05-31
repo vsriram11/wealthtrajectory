@@ -191,13 +191,6 @@ export const TIME_TRAVEL_SLICE_INITIAL: TimeTravelSliceState = {
 type Ctx = TimeTravelSliceState & {
   household: Household;
   assumptions: Assumptions;
-  // Mode is read at entry time to refuse activation outside
-  // real mode (audit fix: SnapshotsManager UI is real-mode-only,
-  // but the slice action is publicly addressable via the store
-  // — defense in depth keeps demo-mode DevTools users from
-  // entering a session that would leak hypothetical edits into
-  // a real user's next-load IDB state).
-  mode: "demo" | "real";
   // Reset on snapshot-edit entry / session resume: the snapshot
   // (or persisted session) household may have a different member
   // roster than the live state, so the live selectedMemberId may

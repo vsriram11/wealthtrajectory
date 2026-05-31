@@ -397,6 +397,86 @@ export const DEMO_HOUSEHOLD: Household = {
 };
 
 /**
+ * STRICT demo-household identity check: returns true iff the
+ * household's MEMBER + ACCOUNT identity matches DEMO_HOUSEHOLD
+ * verbatim (same IDs, same displayNames, same ages, same account
+ * categories). Holdings + prices are NOT compared because
+ * PriceRefresher legitimately mutates them on every fetch.
+ *
+ * Used by the sync layer to answer "has the user customized
+ * anything in the household tree yet?". Even one name rename
+ * (Alex → Alexis, "Brokerage" → "Joint brokerage") returns false.
+ *
+ * The contrast with `isDemoHousehold` in lib/types.ts:
+ *   - `isDemoHousehold` checks for the PRESENCE of demo IDs and is
+ *     used as a structural "this came from the demo seed" signal.
+ *     It returns true for a household that has been heavily
+ *     customized but still uses the original demo member IDs.
+ *   - `isDemoHouseholdStrict` returns true ONLY when the household
+ *     is still verbatim the demo seed. A single rename or add
+ *     anywhere in the member/account tree flips it to false.
+ *
+ * Reasoning: pre-Frame-B, `isDemoHousehold` was used as a paranoia
+ * "we should never be here in real mode" check; the audit (R3)
+ * removed those because Frame B made the combination legitimate.
+ * BUT the audit also opened a narrow gap where a sign-in race
+ * could push a still-demo-seed household over real Drive data.
+ * `isDemoHouseholdStrict` is the precise signal for the sync layer
+ * to refuse THAT push without re-introducing R3's bug — a user who
+ * edited only assumptions/budget/goals (which don't touch the
+ * household tree) is still strict-demo here and we shouldn't push
+ * their session's seed-with-tweaks over their real Drive backup.
+ */
+export function isDemoHouseholdStrict(h: Household): boolean {
+  if (h.id !== DEMO_HOUSEHOLD.id) return false;
+  if (h.members.length !== DEMO_HOUSEHOLD.members.length) return false;
+  for (let i = 0; i < h.members.length; i++) {
+    const a = h.members[i];
+    const b = DEMO_HOUSEHOLD.members[i];
+    if (a.id !== b.id) return false;
+    if (a.displayName !== b.displayName) return false;
+    if (a.age !== b.age) return false;
+    if (a.incomeUSD !== b.incomeUSD) return false;
+  }
+  if (h.accounts.length !== DEMO_HOUSEHOLD.accounts.length) return false;
+  for (let i = 0; i < h.accounts.length; i++) {
+    const a = h.accounts[i];
+    const b = DEMO_HOUSEHOLD.accounts[i];
+    if (a.id !== b.id) return false;
+    if (a.displayName !== b.displayName) return false;
+    if (a.category !== b.category) return false;
+    if (a.ownerId !== b.ownerId) return false;
+    // Holdings count check — adding/removing holdings counts as
+    // customization. Within-holding price drift from PriceRefresher
+    // is allowed; the count is the structural signal.
+    if (a.holdings.length !== b.holdings.length) return false;
+    // Audit R3 (Layer 1/2/3): also check monthlyContributionUSD. A
+    // user bumping their 401(k) contribution from $1,958 → $2,000
+    // (most-common edit during a salary review) IS user
+    // customization. Pre-fix this slipped through as still-demo,
+    // and CloudSyncer's gate silently refused to push the edit.
+    if (a.monthlyContributionUSD !== b.monthlyContributionUSD) return false;
+  }
+  if (h.liabilities.length !== DEMO_HOUSEHOLD.liabilities.length) return false;
+  // Audit R3 (Layer 1/2/3): liability field check. Pre-fix only the
+  // count was compared, so edits to balanceUSD, name, ownerId, etc.
+  // (e.g., a user paying down the auto loan from $22k → $18k) were
+  // undetected — household still looked strict-demo and the user's
+  // edit stayed local-only forever. Deleting one and adding a
+  // different one with a different ID was also a count-match-but-
+  // content-differ case the pre-fix check missed.
+  for (let i = 0; i < h.liabilities.length; i++) {
+    const a = h.liabilities[i];
+    const b = DEMO_HOUSEHOLD.liabilities[i];
+    if (a.id !== b.id) return false;
+    if (a.name !== b.name) return false;
+    if (a.balanceUSD !== b.balanceUSD) return false;
+    if (a.ownerId !== b.ownerId) return false;
+  }
+  return true;
+}
+
+/**
  * Demo retirement ages drawn from each earner's projected
  * Independence Day (~age 48 for Alex, ~46 for Jordan). The
  * Social Security estimator averages in zero-earning years for

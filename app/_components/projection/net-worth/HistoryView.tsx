@@ -22,7 +22,7 @@
  * round number without any manual annotation.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useAppStore } from "@/lib/store";
 import {
   HISTORY_RANGE_LABELS,
@@ -34,6 +34,8 @@ import {
   type HistoryRange,
 } from "@/lib/data/history";
 import { loadSnapshots, type Snapshot } from "@/lib/persistence/persistence";
+import { buildDemoSnapshots } from "@/lib/demoSnapshots";
+import { isDemoHouseholdStrict } from "@/lib/demo";
 import {
   getCachedQuote,
   getQuote,
@@ -46,8 +48,9 @@ import {
   formatUSD,
   formatUSDCompact,
 } from "@/lib/format";
-import type { Holding, Household } from "@/lib/types";
+import { isLivePriceable, type Holding, type Household } from "@/lib/types";
 import { SnapshotsManager } from "@/app/_components/data/SnapshotsManager";
+import { CustomDatePicker } from "@/app/_components/ui/CustomDatePicker";
 
 /** Range chips shown above the history chart. */
 const HISTORY_RANGES: HistoryRange[] = [
@@ -135,16 +138,115 @@ export function HistoryView({
   // TimeTravelBanner; auto-snapshotter writes). Without the
   // dep, this view showed stale data until next mount.
   const snapshotsRevision = useAppStore((s) => s.snapshotsRevision);
+  // Stable anchor for the synthetic demo snapshots — pin it once
+  // per mount so buildDemoSnapshots returns identical timestamps
+  // across re-renders (otherwise hover-state, chart-keys, and
+  // memoized series would churn on every render).
+  const [demoAnchor] = useState(() => Date.now());
+
+  // Use the strict household-identity check (NOT `mode === "demo"`)
+  // as the gate for synthesizing demo snapshots. Reason:
+  //   - A fresh visitor lands in mode === "demo" → strict-demo, use
+  //     the synthesized 10y timeline. ✓
+  //   - The visitor edits any persisted slice (assumptions slider,
+  //     budget item, goal, etc.) → Frame B auto-promotes mode to
+  //     "real" → BUT the household tree is still the verbatim demo
+  //     seed → still strict-demo, KEEP showing the synthetic
+  //     timeline. ✓
+  //   - The visitor renames a member or adds an account →
+  //     isDemoHouseholdStrict flips to false → switch to IDB
+  //     snapshots (their own real history starts now). ✓
+  //
+  // Without this gate, the auto-promote left the user in
+  // "real-mode-with-demo-household" — the previous `mode === "demo"`
+  // branch never fired, and the chart silently reverted to its
+  // pre-fix flat-back-projection-plus-cliff appearance.
+  const useSyntheticDemo = isDemoHouseholdStrict(household);
+
+  // Build a "what the household WOULD look like if PriceRefresher
+  // had run" snapshot of the live household, computed on-the-fly
+  // from the quotes HistoryView already loaded. This bypasses the
+  // PriceRefresher throttled apply loop (~15s for 13 demo symbols
+  // at 1-sec throttle) for the chart's purposes.
+  //
+  // Why: DEMO_HOUSEHOLD's holdings ship with `lastPricedAt: null`
+  // and shares derived from `preset.referencePriceUSD` (e.g. VOO at
+  // $520 → 182.7 shares for the $95k position). The static cache
+  // holds REAL 2026 closes (~$690 for VOO). buildDemoSnapshots uses
+  // live shares × cached real prices → 182.7 × $690 = $126k vs
+  // live valueUSD $95k. ~33% plateau-above-live cliff at the chart's
+  // right edge. PriceRefresher's firstFetch path eventually
+  // recomputes shares = valueUSD / today_price = 137.7 (fixing the
+  // mismatch), but takes seconds. This adjustment makes the chart
+  // correct immediately as soon as quotes load.
+  const adjustedHousehold = useMemo(() => {
+    if (!useSyntheticDemo) return household;
+    let touched = false;
+    const next = {
+      ...household,
+      accounts: household.accounts.map((a) => ({
+        ...a,
+        holdings: a.holdings.map((h) => {
+          // Only adjust live-priceable holdings whose lastPricedAt
+          // is null (PR hasn't run yet) AND for which we have a
+          // valid quote with currentPrice.
+          if (!isLivePriceable(h)) return h;
+          if (h.isManualPrice) return h;
+          if (h.lastPricedAt != null) return h;
+          const q = quotes[h.symbol.toUpperCase()];
+          if (!q || !q.currentPrice || q.currentPrice <= 0) return h;
+          if (!Number.isFinite(h.valueUSD) || h.valueUSD <= 0) return h;
+          // Mirror applyLivePriceTo's firstFetch path: preserve the
+          // dollar value, recompute shares from today's market
+          // price. snap.shares = newShares × accumulation factor in
+          // buildBackdatedHousehold, which then composes correctly
+          // against cached prices.
+          const newShares = h.valueUSD / q.currentPrice;
+          touched = true;
+          return {
+            ...h,
+            shares: newShares,
+            lastPriceUSD: q.currentPrice,
+          };
+        }),
+      })),
+    };
+    return touched ? next : household;
+  }, [household, quotes, useSyntheticDemo]);
 
   useEffect(() => {
     let cancelled = false;
+    if (useSyntheticDemo) {
+      void Promise.resolve().then(() => {
+        if (cancelled) return;
+        // Pass the adjustedHousehold (live + PR-firstFetch-simulated
+        // shares from quotes) so snap.shares are consistent with
+        // cached real prices even before PR's slow apply loop
+        // completes. See `adjustedHousehold` memo above.
+        setSnapshots(
+          buildDemoSnapshots(
+            demoAnchor,
+            undefined,
+            undefined,
+            adjustedHousehold,
+          ),
+        );
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
     void loadSnapshots().then((snaps) => {
       if (!cancelled) setSnapshots(snaps);
     });
     return () => {
       cancelled = true;
     };
-  }, [snapshotsRevision]);
+    // adjustedHousehold is read inside the closure when in demo
+    // mode — list it as a dep so a PriceRefresher update OR a
+    // quotes-load (which feeds the adjustedHousehold memo)
+    // re-runs the build with the latest shares.
+  }, [snapshotsRevision, useSyntheticDemo, demoAnchor, adjustedHousehold]);
 
   // setLoading(true) below is the canonical "start an async data
   // load" pattern. The React 19 idiomatic alternative is Suspense
@@ -359,29 +461,21 @@ export function HistoryView({
       </div>
       {range === "CUSTOM" && (
         <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-border bg-bg-elevated px-3 py-2 text-[11px]">
-          <label className="flex items-center gap-1.5 text-text-muted">
-            <span>From</span>
-            <input
-              type="date"
-              value={customStart}
-              max={customEnd}
-              onChange={(e) => setCustomStart(e.target.value)}
-              className="rounded-md border border-border bg-bg-surface px-2 py-1 text-[11px] text-text"
-              aria-label="Custom range start date"
-            />
-          </label>
-          <label className="flex items-center gap-1.5 text-text-muted">
-            <span>To</span>
-            <input
-              type="date"
-              value={customEnd}
-              min={customStart}
-              max={todayIso}
-              onChange={(e) => setCustomEnd(e.target.value)}
-              className="rounded-md border border-border bg-bg-surface px-2 py-1 text-[11px] text-text"
-              aria-label="Custom range end date"
-            />
-          </label>
+          <CustomDatePicker
+            label="From"
+            value={customStart}
+            max={customEnd}
+            onChange={setCustomStart}
+            ariaLabel="Custom range start date"
+          />
+          <CustomDatePicker
+            label="To"
+            value={customEnd}
+            min={customStart}
+            max={todayIso}
+            onChange={setCustomEnd}
+            ariaLabel="Custom range end date"
+          />
           {!customRangeBounds && (
             <span className="text-amber-300">
               Pick a valid range (start before end)

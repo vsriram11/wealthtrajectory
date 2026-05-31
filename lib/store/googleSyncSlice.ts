@@ -55,6 +55,18 @@ export type GoogleSyncSliceState = {
   snapshotsRevision: number;
   /** Result of the most recent post-sign-in cloud-sync. */
   lastSyncOutcome: SyncOutcome;
+  /**
+   * Layer 2: set to true when AuthHydrator's initial-sign-in flow
+   * finds NO Drive backup AND the user's local household is not the
+   * strict demo seed (i.e., they have customized data worth
+   * preserving). Triggers `InitialSyncConfirmModal` which asks the
+   * user before any push: "We didn't find a Drive backup. Push
+   * current data?" Push proceeds on confirm; cancel defers the
+   * initial sync so the user can re-decide later.
+   *
+   * Cleared by the modal on either choice. Not persisted to Drive.
+   */
+  pendingInitialSyncConfirm: boolean;
 };
 
 export type GoogleSyncSliceActions = {
@@ -79,6 +91,7 @@ export const GOOGLE_SYNC_SLICE_INITIAL: GoogleSyncSliceState = {
   googleUploadScheduled: false,
   snapshotsRevision: 0,
   lastSyncOutcome: null,
+  pendingInitialSyncConfirm: false,
 };
 
 export function createGoogleSyncSliceActions(

@@ -78,6 +78,9 @@ function makeFakeStore(seed: Partial<LifecycleSliceContext> = {}) {
     baselineHousehold: null,
     baselineAssumptions: null,
     editingSnapshotT: null,
+    // Layer 2 (Audit R5) — included so the context shape matches
+    // production and the explicit-clear assertions can read it.
+    pendingInitialSyncConfirm: false,
     ...seed,
   };
   return {
@@ -141,6 +144,79 @@ describe("switchToReal", () => {
     // Sync flags reset
     expect(s.state.googleSyncing).toBe(false);
     expect(s.state.googleSyncError).toBeNull();
+  });
+
+  // Audit R5 (Layer 1/2/3): pendingInitialSyncConfirm is the
+  // modal-backing flag. Lifecycle resets MUST clear it so the
+  // InitialSyncConfirmModal doesn't survive a transition that
+  // makes its prompt nonsensical (e.g., user clicks "Start
+  // Fresh" while the modal is open asking to push their current
+  // data — switchToReal blanks that data, the modal should not
+  // continue offering to push it).
+  it("clears pendingInitialSyncConfirm so the modal doesn't survive the reset", () => {
+    const s = makeFakeStore({
+      mode: "demo",
+      pendingInitialSyncConfirm: true,
+      user: { email: "a@b.com" } as never,
+    });
+    const a = createLifecycleSliceActions(s.set, s.get, config);
+    a.switchToReal();
+    expect(s.state.pendingInitialSyncConfirm).toBe(false);
+  });
+});
+
+describe("resetToDemo", () => {
+  // Symmetric to the switchToReal R5 test: resetToDemo must also
+  // clear pendingInitialSyncConfirm. A user clicking "Use mock
+  // data" from the header while the modal is open would otherwise
+  // get the demo seed underneath the modal — and clicking Push
+  // would surface a "Household is still the demo seed" error
+  // (after my Layer 3 strict-demo guard).
+  it("clears pendingInitialSyncConfirm so the modal doesn't survive resetToDemo", () => {
+    const s = makeFakeStore({
+      mode: "real",
+      pendingInitialSyncConfirm: true,
+      user: { email: "a@b.com" } as never,
+    });
+    const a = createLifecycleSliceActions(s.set, s.get, config);
+    a.resetToDemo();
+    expect(s.state.pendingInitialSyncConfirm).toBe(false);
+  });
+});
+
+describe("promoteToReal", () => {
+  it("flips mode demo→real WITHOUT wiping the user's current state", () => {
+    const editedHousehold = { ...DEMO_HH, members: [...DEMO_HH.members] };
+    const s = makeFakeStore({
+      mode: "demo",
+      household: editedHousehold,
+      scenarios: [
+        { id: "sc1", name: "x", color: "#fff", createdAt: 0, overrides: {} },
+      ],
+      user: null,
+      googleConnected: false,
+    });
+    const a = createLifecycleSliceActions(s.set, s.get, config);
+    a.promoteToReal();
+
+    // Mode flipped.
+    expect(s.state.mode).toBe("real");
+    // Household + scenarios + everything else preserved (this is
+    // the whole point — `switchToReal` wipes, `promoteToReal`
+    // preserves). Without this guarantee the auto-promote in
+    // PersistenceHydrator would silently delete the user's first
+    // edit on its way to enabling persistence.
+    expect(s.state.household).toBe(editedHousehold);
+    expect(s.state.scenarios).toHaveLength(1);
+  });
+
+  it("is a no-op when already in real mode", () => {
+    const realHousehold = { ...DEMO_HH };
+    const s = makeFakeStore({ mode: "real", household: realHousehold });
+    const a = createLifecycleSliceActions(s.set, s.get, config);
+    a.promoteToReal();
+    expect(s.state.mode).toBe("real");
+    expect(s.state.household).toBe(realHousehold);
   });
 });
 
