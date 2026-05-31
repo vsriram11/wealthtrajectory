@@ -34,14 +34,19 @@ import {
   type HistoryRange,
 } from "@/lib/data/history";
 import { loadSnapshots, type Snapshot } from "@/lib/persistence/persistence";
-import { getCachedQuote, getQuote, type Quote } from "@/lib/data/quotes";
+import {
+  getCachedQuote,
+  getQuote,
+  priceAtDetailed,
+  type Quote,
+} from "@/lib/data/quotes";
 import {
   formatPercent,
   formatPercentTight,
   formatUSD,
   formatUSDCompact,
 } from "@/lib/format";
-import type { Household } from "@/lib/types";
+import type { Holding, Household } from "@/lib/types";
 import { SnapshotsManager } from "@/app/_components/data/SnapshotsManager";
 
 /** Range chips shown above the history chart. */
@@ -53,7 +58,32 @@ const HISTORY_RANGES: HistoryRange[] = [
   "YTD",
   "5Y",
   "ALL",
+  "CUSTOM",
 ];
+
+/** ISO YYYY-MM-DD ↔ ms timestamp helpers for date-picker UI. */
+function isoFromMs(ms: number): string {
+  const d = new Date(ms);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+function msFromIso(iso: string): number | null {
+  // Treat ISO date as UTC noon to dodge timezone-edge bugs in
+  // bucket boundaries.
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(iso);
+  if (!m) return null;
+  const t = Date.UTC(
+    Number(m[1]),
+    Number(m[2]) - 1,
+    Number(m[3]),
+    12,
+    0,
+    0,
+  );
+  return Number.isFinite(t) ? t : null;
+}
 
 export function HistoryView({
   household,
@@ -81,6 +111,23 @@ export function HistoryView({
   const [snapshots, setSnapshots] = useState<Snapshot[]>([]);
   const [loading, setLoading] = useState(false);
   const [range, setRange] = useState<HistoryRange>("1Y");
+  // Custom date-range state — only used when range === "CUSTOM".
+  // Defaults to 1y window so the picker opens on a sensible
+  // interval the user can adjust. Persisted across chip switches
+  // so toggling between Custom and a preset doesn't reset the
+  // user's picked dates.
+  const [customStart, setCustomStart] = useState<string>(() =>
+    isoFromMs(Date.now() - 365 * 24 * 60 * 60 * 1000),
+  );
+  const [customEnd, setCustomEnd] = useState<string>(() =>
+    isoFromMs(Date.now()),
+  );
+  // Stable snapshot of "today" for the date-input max cap.
+  // Using useState with a lazy initializer (rather than a
+  // top-level expression) so Date.now() runs once at mount, not
+  // on every render (would otherwise drift each render AND trip
+  // React's impure-function rule).
+  const [todayIso] = useState(() => isoFromMs(Date.now()));
   const [hovered, setHovered] = useState<HistoryPoint | null>(null);
   // Audit fix (round-3 BLOCK #2): subscribe to snapshotsRevision
   // so the NW history view re-fetches on snapshot mutations
@@ -143,43 +190,57 @@ export function HistoryView({
     [snapshots, memberId],
   );
 
-  const series = useMemo(
-    () =>
-      overlaySnapshots(
-        reconstructHistory(
-          household,
-          quotes,
-          range,
-          undefined,
-          filteredSnapshots,
-        ),
-        filteredSnapshots,
-        // Pin today's bucket to the live headline NW so the chart can
-        // never disagree with the number shown at the top of the
-        // card (and so a stale snapshot or out-of-date quote history
-        // can't drop the right edge to ~$0).
-        netWorth,
-        // Live household for the backdated-holding augmentation:
-        // snapshots recorded BEFORE the user added a backdated
-        // holding get their anchor NW bumped up to include the
-        // holding (per acquiredAt). User-reported bug: time-travel
-        // snapshot at Dec 2025 contains a private stock added in
-        // May 2026, but older auto-snapshots from Aug/Oct 2025
-        // don't — making the chart's Aug-Dec region understate.
+  const customRangeBounds = useMemo(() => {
+    if (range !== "CUSTOM") return undefined;
+    const start = msFromIso(customStart);
+    const end = msFromIso(customEnd);
+    if (start == null || end == null || start >= end) return undefined;
+    return { start, end };
+  }, [range, customStart, customEnd]);
+
+  // When Custom range is active with INVALID bounds (user mid-
+  // typing in the date inputs, or start >= end), suppress the
+  // chart series rather than passing degenerate input downstream.
+  // Degenerate input (e.g., start === end) collapses the bucket
+  // loop into `days = 2` with all buckets at the same `t`, which
+  // crashed the SVG path math (zero-width axis → NaN coordinates).
+  const customInvalid = range === "CUSTOM" && !customRangeBounds;
+
+  const series = useMemo(() => {
+    if (customInvalid) return [] as HistoryPoint[];
+    return overlaySnapshots(
+      reconstructHistory(
         household,
-        // Quotes + now: the snap anchor is computed via the SAME
-        // compose math as the pre-snap reconstruction so the
-        // boundary lines up. Without quotes, the anchor falls back
-        // to the recorded snap.netWorthUSD which was computed at
-        // SAVE TIME (today's prices for time-travel saves), making
-        // the chart anchor sit at today's value on a past date and
-        // creating a visible vertical jump against the
-        // back-projected pre-snap region.
         quotes,
+        range,
         undefined,
+        filteredSnapshots,
+        customRangeBounds,
       ),
-    [household, quotes, range, filteredSnapshots, netWorth],
-  );
+      filteredSnapshots,
+      // Pin today's bucket to the live headline NW so the chart
+      // can never disagree with the number shown at the top of
+      // the card.
+      netWorth,
+      // Live household for the backdated-holding augmentation:
+      // snapshots recorded BEFORE the user added a backdated
+      // holding get their anchor NW bumped up to include the
+      // holding.
+      household,
+      // Quotes + now: snap anchor uses the SAME compose math
+      // as the pre-snap reconstruction.
+      quotes,
+      undefined,
+    );
+  }, [
+    customInvalid,
+    household,
+    quotes,
+    range,
+    filteredSnapshots,
+    netWorth,
+    customRangeBounds,
+  ]);
 
   const hasLiveData = symbols.some(
     (s) => quotes[s] && (quotes[s] as Quote).history.length > 0,
@@ -262,6 +323,7 @@ export function HistoryView({
           t={hovered.t}
           snapshots={filteredSnapshots}
           household={household}
+          quotes={quotes}
         />
       )}
 
@@ -295,6 +357,38 @@ export function HistoryView({
           </button>
         ))}
       </div>
+      {range === "CUSTOM" && (
+        <div className="mt-2 flex flex-wrap items-center gap-2 rounded-lg border border-border bg-bg-elevated px-3 py-2 text-[11px]">
+          <label className="flex items-center gap-1.5 text-text-muted">
+            <span>From</span>
+            <input
+              type="date"
+              value={customStart}
+              max={customEnd}
+              onChange={(e) => setCustomStart(e.target.value)}
+              className="rounded-md border border-border bg-bg-surface px-2 py-1 text-[11px] text-text"
+              aria-label="Custom range start date"
+            />
+          </label>
+          <label className="flex items-center gap-1.5 text-text-muted">
+            <span>To</span>
+            <input
+              type="date"
+              value={customEnd}
+              min={customStart}
+              max={todayIso}
+              onChange={(e) => setCustomEnd(e.target.value)}
+              className="rounded-md border border-border bg-bg-surface px-2 py-1 text-[11px] text-text"
+              aria-label="Custom range end date"
+            />
+          </label>
+          {!customRangeBounds && (
+            <span className="text-amber-300">
+              Pick a valid range (start before end)
+            </span>
+          )}
+        </div>
+      )}
 
       {symbols.length > 0 && !hasLiveData && !hasSnapshots && loading && (
         <div className="mt-3 rounded-md border border-border bg-bg-elevated p-2.5 text-[11px] text-text-dim">
@@ -326,10 +420,62 @@ export function HistoryView({
   );
 }
 
+/**
+ * Resolve a holding's value at a historical bucket date.
+ *
+ * For live-priceable kinds (equity / bond / commodity / crypto):
+ *   shares × historical quote price at t. Falls back to current
+ *   valueUSD if the quote is missing, clamped (t outside history
+ *   window), or the holding is manually priced.
+ *
+ * For cash / real_estate / private_stock / other:
+ *   valueUSD (those kinds don't fluctuate with quote data).
+ *
+ * User-reported bug: previously the composition pill ALWAYS used
+ * `valueUSD` (today's value) — so hovering on 2021 showed the
+ * 2026 composition, which "stays forever the same" while the NW
+ * chart line moves. The fix routes live-priceable holdings
+ * through the quote, so the composition pill matches the chart's
+ * historical numbers.
+ */
+function historicalValue(
+  holding: Holding,
+  t: number,
+  quotes: Record<string, Quote | null>,
+): number {
+  if (
+    holding.kind === "cash" ||
+    holding.kind === "real_estate" ||
+    holding.kind === "private_stock" ||
+    holding.kind === "other"
+  ) {
+    return holding.valueUSD;
+  }
+  // Live-priceable kinds.
+  if (holding.isManualPrice) return holding.valueUSD;
+  const q = quotes[holding.symbol.toUpperCase()];
+  if (!q) return holding.valueUSD;
+  const r = priceAtDetailed(q, t);
+  if (r === null) return holding.valueUSD;
+  // CRITICAL: even when `clamped` (t outside the available quote
+  // history), USE the clamped price × shares — NOT today's
+  // valueUSD. User-reported bug: with the previous "fallback to
+  // valueUSD on clamp" semantic, the bucket just before quote
+  // history's first point fell back to today's price (e.g.
+  // TQQQ today ~$84 × 100 shares = $8,400) while the bucket
+  // just after used the 2021 close (~$24 × 100 = $2,400), making
+  // the chart drop $6,000 per 100 shares of TQQQ in one bucket.
+  // Multiplied across holdings: visible $200K cliff at the
+  // quote-history start. Using the clamped price (h[0] or h[N-1])
+  // ensures both adjacent buckets agree at the boundary.
+  return holding.shares * r.price;
+}
+
 function CompositionAtPoint({
   t,
   snapshots,
   household,
+  quotes,
 }: {
   t: number;
   snapshots: Snapshot[];
@@ -342,6 +488,8 @@ function CompositionAtPoint({
    * excludes it — the chart numbers wouldn't reconcile.
    */
   household: Household;
+  /** Quote data — see historicalValue for how it's used. */
+  quotes: Record<string, Quote | null>;
 }) {
   // Find the rich snapshot at-or-before t (if any).
   const rich = snapshots
@@ -394,9 +542,9 @@ function CompositionAtPoint({
         // acquisition date on those.
         if (acquiredAt != null && acquiredAt > t) continue;
       }
-      totalsByKind[holding.kind] =
-        (totalsByKind[holding.kind] ?? 0) + holding.valueUSD;
-      snapshotNetWorth += holding.valueUSD;
+      const hv = historicalValue(holding, t, quotes);
+      totalsByKind[holding.kind] = (totalsByKind[holding.kind] ?? 0) + hv;
+      snapshotNetWorth += hv;
       baseIds.add(holding.id);
     }
   }
@@ -418,8 +566,9 @@ function CompositionAtPoint({
       // (the live-NW pin) and shouldn't pollute past compositions.
       if (acquiredAt == null || acquiredAt > t) continue;
       if (!Number.isFinite(h.valueUSD) || h.valueUSD <= 0) continue;
-      totalsByKind[h.kind] = (totalsByKind[h.kind] ?? 0) + h.valueUSD;
-      snapshotNetWorth += h.valueUSD;
+      const hv = historicalValue(h, t, quotes);
+      totalsByKind[h.kind] = (totalsByKind[h.kind] ?? 0) + hv;
+      snapshotNetWorth += hv;
     }
   }
   if (snapshotNetWorth <= 0) return null;

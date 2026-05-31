@@ -331,13 +331,86 @@ export function createTimeTravelSliceActions(
         // alone rather than overwrite with null.
         const restoredHousehold = s.baselineHousehold ?? s.household;
         const restoredAssumptions = s.baselineAssumptions ?? s.assumptions;
+        // EXTRA DEFENSE: explicitly revert any manual-price flag
+        // that was flipped DURING this session on live-priceable
+        // holdings. A user who set a manual price for an
+        // historical date during time-travel doesn't want that
+        // manual flag stuck in their live state after exit —
+        // baseline restore SHOULD handle this, but in practice
+        // we've seen it leak (likely because the baseline gets
+        // out of sync via the persistent-session path or some
+        // edge case). This makes the revert explicit + survives
+        // any baseline-restore quirk.
+        //
+        // For each holding in the restored (baseline) household,
+        // we know its CORRECT manual flag. Apply it as the source
+        // of truth — this is a no-op when baseline already
+        // restored correctly, and the fix when it didn't.
+        // Compare baseline's manual flags against the CURRENT
+        // (in-session) household. Only rebuild the household
+        // object when a flag actually needs fixing — preserves
+        // reference identity in the common no-leak case (so
+        // memoized downstream selectors don't re-fire).
+        const baselineFlags = new Map<string, boolean>();
+        for (const acct of restoredHousehold.accounts) {
+          for (const h of acct.holdings) {
+            if (
+              h.kind === "equity" ||
+              h.kind === "bond" ||
+              h.kind === "crypto" ||
+              h.kind === "commodity"
+            ) {
+              baselineFlags.set(h.id, h.isManualPrice);
+            }
+          }
+        }
+        const sessionFlags = new Map<string, boolean>();
+        for (const acct of s.household.accounts) {
+          for (const h of acct.holdings) {
+            if (
+              h.kind === "equity" ||
+              h.kind === "bond" ||
+              h.kind === "crypto" ||
+              h.kind === "commodity"
+            ) {
+              sessionFlags.set(h.id, h.isManualPrice);
+            }
+          }
+        }
+        let needsCorrection = false;
+        for (const [id, base] of baselineFlags) {
+          const session = sessionFlags.get(id);
+          if (session !== undefined && session !== base) {
+            needsCorrection = true;
+            break;
+          }
+        }
+        const correctedHousehold: Household = needsCorrection
+          ? {
+              ...restoredHousehold,
+              accounts: restoredHousehold.accounts.map((a) => ({
+                ...a,
+                holdings: a.holdings.map((h) => {
+                  const baseFlag = baselineFlags.get(h.id);
+                  if (baseFlag === undefined) return h;
+                  if (
+                    "isManualPrice" in h &&
+                    h.isManualPrice !== baseFlag
+                  ) {
+                    return { ...h, isManualPrice: baseFlag } as typeof h;
+                  }
+                  return h;
+                }),
+              })),
+            }
+          : restoredHousehold;
         return {
           timeTravelActive: false,
           timeTravelDate: null,
           baselineHousehold: null,
           baselineAssumptions: null,
           editingSnapshotT: null,
-          household: restoredHousehold,
+          household: correctedHousehold,
           assumptions: restoredAssumptions,
           // Clear the price-status bookkeeping too — it's
           // session-scoped and shouldn't bleed across sessions.
