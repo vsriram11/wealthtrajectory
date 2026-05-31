@@ -449,14 +449,22 @@ describe("Time-travel slice — enterTimeTravelEditingSnapshot (re-edit existing
   });
 });
 
-describe("Time-travel slice — mode behavior (user-reported no-op fix)", () => {
-  it("allows enterTimeTravel regardless of mode (slice gate removed — UI gate is load-bearing)", () => {
-    // The previous slice-level mode==="real" gate caused a
-    // user-visible no-op when clicking "Enter time-travel mode"
-    // from the modal (root cause unclear — possibly stale mode
-    // in the Zustand callback). The SnapshotsManager UI gate
-    // prevents the modal from even opening in demo mode, so
-    // removing the slice gate doesn't open a new attack surface.
+describe("Time-travel slice — mode behavior", () => {
+  it("allows enterTimeTravel regardless of mode (Frame B: demo entry is intentional)", () => {
+    // Pre-Frame-B: SnapshotsManager was real-mode-only, and an
+    // earlier audit removed a slice-level mode-gate that was
+    // causing a user-visible no-op. The audit-era comment claimed
+    // the SnapshotsManager UI gate prevented modal opening in demo,
+    // making the slice gate unnecessary defense-in-depth.
+    //
+    // Post-Frame-B (PR #18): SnapshotsManager renders in demo too.
+    // Entering time-travel from demo is intentional — the first
+    // holding-edit during the session auto-promotes via the
+    // PersistenceHydrator subscriber, the session record persists
+    // to its dedicated IDB key, and Exit restores the demo
+    // baseline cleanly. This test pins the no-gate-on-mode contract
+    // both pre and post Frame B; the surrounding UX has shifted
+    // around it.
     const s = makeFakeStore({ mode: "demo" });
     const a = createTimeTravelSliceActions(s.set);
     a.enterTimeTravel("2024-01-01");
