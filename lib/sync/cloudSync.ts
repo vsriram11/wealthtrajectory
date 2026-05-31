@@ -175,6 +175,14 @@ export async function pullFromDrive(
 
   const s = store.getState();
   if (!s.user) return "no-backup";
+  // Audit R10: refuse pulls while a time-travel session is active.
+  // A pull would call importPayload, which replaces the in-memory
+  // household — destroying the session's hypothetical edits AND the
+  // baseline pointer used by exitTimeTravelDiscard. Without this
+  // gate, signing in mid-session causes the user's backdated work
+  // to vanish + leaves the time-travel banner pointing at a
+  // stale baseline that no longer matches anything in memory.
+  if (s.timeTravelActive) return "throttled";
   if (!force) {
     if (s.googleSyncing) return "throttled";
     // Refuse to pull while a CloudSyncer upload is queued or
@@ -325,13 +333,17 @@ export async function pullFromDrive(
  *      Frame B (it routed auto-promoted edits into an error and
  *      stranded the user data local-only on initial sign-in) and
  *      has been dropped — mode is the single source of truth.
- *   3. Encryption block clear. Else "blocked-by-encryption".
- *   4. Initial Drive pull confirmed (googleLastSyncAt is set),
+ *   3. Not in a time-travel session. The in-memory household
+ *      while `timeTravelActive` is a HYPOTHETICAL past state, not
+ *      the user's present-day data. Uploading it would overwrite
+ *      the legitimate Drive backup with backdated edits.
+ *   4. Encryption block clear. Else "blocked-by-encryption".
+ *   5. Initial Drive pull confirmed (googleLastSyncAt is set),
  *      UNLESS `bypassInitialSyncGate` is true (used by the
  *      "uploaded-fresh" branch of AuthHydrator, which is creating
  *      the first backup for a brand-new user). Else
  *      "blocked-by-initial-sync".
- *   5. Shrinkage guard: download current Drive content, refuse
+ *   6. Shrinkage guard: download current Drive content, refuse
  *      upload if doing so would wipe a non-empty collection
  *      (scenarios / goals / budgetItems) down to empty. THROWS
  *      `DriveUnreadableError` propagate to fail-closed
@@ -356,6 +368,15 @@ export async function pushToDrive(
   const s = store.getState();
   if (!s.user) return "error";
   if (s.mode !== "real") return "error";
+  // Audit R10: refuse pushes while a time-travel session is
+  // active. The in-memory household is a HYPOTHETICAL past state,
+  // not the user's actual present-day data. Uploading it would
+  // overwrite the legitimate Drive backup with backdated edits
+  // (and on multi-device setups, propagate the hypothetical to
+  // every other tab). The CloudSyncer subscribe handler already
+  // gates on timeTravelActive; this is the same gate at the
+  // chokepoint that AuthHydrator's sign-in flow uses directly.
+  if (s.timeTravelActive) return "error";
   // Note: the previous `isDemoHousehold(s.household)` paranoia check
   // has been removed under Frame B. `mode === "real"` is the single
   // source of truth for "user-owned data worth uploading"; an

@@ -97,6 +97,22 @@ describe("pullFromDrive — pre-flight guards", () => {
     expect(await pullFromDrive(useAppStore)).toBe("throttled");
   });
 
+  it("bails 'throttled' when a time-travel session is active (Audit R10)", async () => {
+    // A pull mid-session would call importPayload, which replaces
+    // the in-memory household — destroying the session's
+    // hypothetical edits AND the baseline pointer used by
+    // exitTimeTravelDiscard. The user's backdated work would vanish
+    // silently. Particularly important post-PR-#18, where a demo
+    // user can enter time-travel and then sign in.
+    useAppStore.setState({
+      timeTravelActive: true,
+      timeTravelDate: "2020-01-01",
+      baselineHousehold: useAppStore.getState().household,
+      baselineAssumptions: useAppStore.getState().assumptions,
+    });
+    expect(await pullFromDrive(useAppStore)).toBe("throttled");
+  });
+
   it("bails 'throttled' when an upload is queued (race protection)", async () => {
     // Race scenario: a backgrounded tab's CloudSyncer queued an
     // upload via setTimeout. Tab returns. pullFromDrive must NOT
@@ -374,6 +390,34 @@ describe("pushToDrive — pre-flight guards", () => {
     // resetToDemo in beforeEach already sets demo mode.
     expect(useAppStore.getState().mode).toBe("demo");
     // Initial sync gate also kicks in, but mode === demo wins.
+    expect(await pushToDrive(useAppStore)).toBe("error");
+  });
+
+  it("returns 'error' when a time-travel session is active (Audit R10)", async () => {
+    // A user mid-backdating-session has a HYPOTHETICAL household in
+    // memory. Pushing it to Drive would overwrite their actual
+    // present-day backup. Sign-in is the failure path PR #18 made
+    // reachable: demo + time-travel + first holding-edit promotes
+    // to real, and a sign-in click at that moment used to call
+    // pushToDrive with the hypothetical household.
+    useAppStore.setState({
+      mode: "real",
+      household: {
+        id: "h-real",
+        members: [{ id: "m", displayName: "U" }],
+        accounts: [],
+        liabilities: [],
+      },
+      timeTravelActive: true,
+      timeTravelDate: "2020-01-01",
+      baselineHousehold: {
+        id: "h-real",
+        members: [{ id: "m", displayName: "U" }],
+        accounts: [],
+        liabilities: [],
+      },
+      baselineAssumptions: useAppStore.getState().assumptions,
+    });
     expect(await pushToDrive(useAppStore)).toBe("error");
   });
 
