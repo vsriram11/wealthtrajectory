@@ -557,21 +557,40 @@ async function main() {
     `Validation passed: ${validation.summary} (proceeding with upload)`,
   );
 
-  // Stage 4: ATOMIC PUBLISH.
+  // Stage 4: PRE-GC + PUBLISH.
   //
-  // Upload every shard FIRST under a versioned prefix
-  // (`quote-history/<generatedAt>/shard-NN.json`) — those URLs
-  // never collide with the previously-published set. Only THEN
-  // upload the manifest at the well-known path
-  // `quote-history/manifest.json` pointing at the new versioned
-  // URLs.
+  // Storage constraint: with dividends + splits added and the
+  // history window extended back to Dec 2005, the new generation
+  // is ~520 MB on its own. The prior generation is ~510 MB.
+  // Together they'd exceed the Vercel Hobby 1 GB cap, so the
+  // "upload first, swap manifest, then GC" pattern doesn't fit.
   //
-  // If the job crashes / is cancelled mid-shard-upload, the
-  // manifest is still pointing at the previous version's URLs and
-  // clients keep getting consistent old data. Without versioning,
-  // a partial overwrite leaves clients seeing a Frankenstein mix
-  // of old + new shards.
+  // Instead we GC the prior generation BEFORE uploading the new
+  // one. Trade-off: there's a ~5-minute window where the live
+  // manifest still references the just-deleted shard URLs → those
+  // GETs 404. Mitigations during the gap:
+  //   - The client-side IDB cache (lib/data/quotes.ts) returns
+  //     last-known prices when the upstream/static fetch fails,
+  //     so popular tickers keep working from local history.
+  //   - Long-tail tickers fall through to the dynamic Yahoo/
+  //     Finnhub path as before — same behavior as today's cache
+  //     misses, just for a few more symbols during the window.
+  //   - For a personal app with one operator, the window is
+  //     acceptable.
+  //
+  // If the upload fails partway, the manifest still references
+  // deleted shards but the IDB fallback keeps the UI functional.
+  // Re-running the script overwrites cleanly.
   const generatedAt = Date.now();
+  console.log(
+    "Pre-GC: freeing prior generation before upload (storage too tight for 2x simultaneously)…",
+  );
+  await garbageCollectOldGenerations(generatedAt);
+
+  // Stage 4b: Upload every shard under a versioned prefix
+  // (`quote-history/<generatedAt>/shard-NN.json`). URLs never
+  // collide with the previously-published set; the new manifest
+  // (stage 5) is the only thing that makes them discoverable.
   const versionPrefix = `quote-history/${generatedAt}`;
   console.log(`Uploading ${NUM_HISTORY_SHARDS} shards under ${versionPrefix}/…`);
   const blobUrls: Array<{ shard: number; url: string; size: number }> = [];
@@ -632,24 +651,17 @@ async function main() {
     },
   );
   console.log(`Manifest uploaded: ${manifestUrl}`);
-  console.log(`Atomic swap complete: generatedAt=${generatedAt}`);
+  console.log(`Manifest swap complete: generatedAt=${generatedAt}`);
 
-  // Stage 6: GARBAGE COLLECT old versioned generations.
+  // Stage 6: SAFETY-NET GC.
   //
-  // Critical for free-tier storage: each refresh adds ~500MB of
-  // shards under a NEW versioned prefix. Without GC, two refreshes
-  // exceed the 1GB Hobby cap. Vercel Blob doesn't auto-delete
-  // unreferenced files.
-  //
-  // We GC AFTER the manifest swap (not before): if upload had
-  // failed, the prior manifest is still pointing at prior shards
-  // and we mustn't delete them. After a successful swap the live
-  // manifest references ONLY the new generation's shards, so the
-  // prior generation's prefix can safely go.
-  //
-  // Integrated into the refresh script (not a separate cron) so
-  // the operational invariant "after every successful refresh,
-  // storage = ~500MB" holds atomically.
+  // Pre-GC (stage 4) already deleted the prior generation before
+  // upload, so under normal flow there are no orphans to clean up
+  // here. This second pass is defense-in-depth: if a future change
+  // introduces a different leak source (e.g., a failed upload
+  // retry leaving stale shards under an unexpected prefix), this
+  // catches it. Cheap — list() is one Blob op when there's nothing
+  // to delete.
   await garbageCollectOldGenerations(generatedAt);
 }
 
