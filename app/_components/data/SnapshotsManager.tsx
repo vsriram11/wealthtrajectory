@@ -205,18 +205,28 @@ export function SnapshotsManager() {
     setSnapshots(list);
   };
 
-  // Async IndexedDB load on expand. The setSnapshots inside
-  // refresh() is reached after an await — it's not synchronous in
-  // this effect body — but ESLint can't trace through the async
-  // call. The React 19 alternative (Suspense + `use()`) would
-  // require returning a Promise from the parent and would
-  // restructure the on-demand expand flow. Keep as-is and disable;
-  // the load is gated by the `open` flag, so it never cascades
-  // unprompted.
+  // Compute the demo gate as a reactive value so the load effect
+  // can depend on it cleanly (an inline `isDemoHouseholdStrict(...)`
+  // in the deps array would re-evaluate every render).
+  const isStrictDemo = isDemoHouseholdStrict(household);
+
+  // Load eagerly on mount AND on `open` toggle. The summary text
+  // ("N recorded · oldest <date>" vs "None yet — capture one to
+  // anchor your history") needs `snapshots` populated even while
+  // the panel is collapsed; otherwise a demo visitor sees "None
+  // yet" in the collapsed header even though the synthetic 10y
+  // timeline is what's actually feeding the chart on the home
+  // page. Also re-fires when the demo gate flips (a strict-demo
+  // → customized transition or vice versa).
   /* eslint-disable react-hooks/set-state-in-effect */
   useEffect(() => {
-    if (open) void refresh();
-  }, [open]);
+    void refresh();
+    // The refresh closure reads `household` + `demoAnchor`; React's
+    // exhaustive-deps would want `refresh` in the array, but
+    // `refresh` is recreated every render so we'd cascade. Track
+    // the gating signals explicitly instead.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, isStrictDemo, demoAnchor]);
   /* eslint-enable react-hooks/set-state-in-effect */
 
   // Apply the global member filter. `memberFilteredSnapshots`
