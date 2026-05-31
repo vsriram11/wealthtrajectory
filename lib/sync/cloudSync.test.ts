@@ -419,6 +419,12 @@ describe("pushToDrive — pre-flight guards", () => {
       baselineAssumptions: useAppStore.getState().assumptions,
     });
     expect(await pushToDrive(useAppStore)).toBe("error");
+    // Surface an explanatory message — "Sync now" clicks while
+    // mid-session shouldn't fail silently. Pinned so a future
+    // refactor doesn't drop the user-facing reason.
+    expect(useAppStore.getState().googleSyncError).toMatch(
+      /time-travel/i,
+    );
   });
 
   it("returns 'blocked-by-encryption' when blocked reason is already 'encrypted'", async () => {

@@ -182,6 +182,11 @@ export async function pullFromDrive(
   // gate, signing in mid-session causes the user's backdated work
   // to vanish + leaves the time-travel banner pointing at a
   // stale baseline that no longer matches anything in memory.
+  //
+  // Returns "throttled" (not "error") so the silent-mode callers
+  // (tab-resume sync, sign-in initial pull) treat it as a benign
+  // no-op rather than surfacing a sync error to the user mid-
+  // session — they'll just retry once the session ends.
   if (s.timeTravelActive) return "throttled";
   if (!force) {
     if (s.googleSyncing) return "throttled";
@@ -376,7 +381,17 @@ export async function pushToDrive(
   // every other tab). The CloudSyncer subscribe handler already
   // gates on timeTravelActive; this is the same gate at the
   // chokepoint that AuthHydrator's sign-in flow uses directly.
-  if (s.timeTravelActive) return "error";
+  if (s.timeTravelActive) {
+    // Surface a message so a "Sync now" click (or any explicit
+    // user-initiated push) explains the no-op instead of failing
+    // silently.
+    s.setGoogleSyncState({
+      googleSyncing: false,
+      googleSyncError:
+        "Sync is paused while you're in time-travel mode. Save or Exit the session to resume.",
+    });
+    return "error";
+  }
   // Note: the previous `isDemoHousehold(s.household)` paranoia check
   // has been removed under Frame B. `mode === "real"` is the single
   // source of truth for "user-owned data worth uploading"; an
