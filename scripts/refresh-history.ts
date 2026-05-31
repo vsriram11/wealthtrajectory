@@ -22,7 +22,7 @@
 
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import { put } from "@vercel/blob";
+import { list, put, del } from "@vercel/blob";
 
 import {
   NUM_HISTORY_SHARDS,
@@ -429,6 +429,73 @@ async function main() {
   );
   console.log(`Manifest uploaded: ${manifestUrl}`);
   console.log(`Atomic swap complete: generatedAt=${generatedAt}`);
+
+  // Stage 6: GARBAGE COLLECT old versioned generations.
+  //
+  // Critical for free-tier storage: each refresh adds ~500MB of
+  // shards under a NEW versioned prefix. Without GC, two refreshes
+  // exceed the 1GB Hobby cap. Vercel Blob doesn't auto-delete
+  // unreferenced files.
+  //
+  // We GC AFTER the manifest swap (not before): if upload had
+  // failed, the prior manifest is still pointing at prior shards
+  // and we mustn't delete them. After a successful swap the live
+  // manifest references ONLY the new generation's shards, so the
+  // prior generation's prefix can safely go.
+  //
+  // Integrated into the refresh script (not a separate cron) so
+  // the operational invariant "after every successful refresh,
+  // storage = ~500MB" holds atomically.
+  await garbageCollectOldGenerations(generatedAt);
+}
+
+async function garbageCollectOldGenerations(currentGen: number): Promise<void> {
+  console.log("GC: scanning for stale shard generations…");
+  const toDelete: string[] = [];
+  let cursor: string | undefined;
+  try {
+    do {
+      const page = await list({
+        prefix: "quote-history/",
+        cursor,
+        limit: 1000,
+      });
+      for (const b of page.blobs) {
+        // Keep the well-known manifest path.
+        if (b.pathname === "quote-history/manifest.json") continue;
+        // Keep shards under the current (just-uploaded) generation.
+        if (b.pathname.startsWith(`quote-history/${currentGen}/`)) continue;
+        toDelete.push(b.url);
+      }
+      cursor = page.cursor;
+    } while (cursor);
+  } catch (e) {
+    console.warn(
+      `GC list failed: ${e instanceof Error ? e.message : e}; storage may grow this cycle.`,
+    );
+    return;
+  }
+  if (toDelete.length === 0) {
+    console.log("GC: nothing to delete; storage already clean.");
+    return;
+  }
+  console.log(`GC: deleting ${toDelete.length} stale blobs…`);
+  const BATCH = 100;
+  let deleted = 0;
+  for (let i = 0; i < toDelete.length; i += BATCH) {
+    const chunk = toDelete.slice(i, i + BATCH);
+    try {
+      await del(chunk);
+      deleted += chunk.length;
+    } catch (e) {
+      console.warn(
+        `GC delete batch ${i}-${i + chunk.length} failed: ${e instanceof Error ? e.message : e}`,
+      );
+      // Best-effort: continue with remaining batches. A failed
+      // delete leaves an orphan but doesn't corrupt the cache.
+    }
+  }
+  console.log(`GC: deleted ${deleted}/${toDelete.length} stale blobs.`);
 }
 
 main().catch((e) => {
