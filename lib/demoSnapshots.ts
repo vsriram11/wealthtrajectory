@@ -379,21 +379,35 @@ function monthAnchor(now: number, monthsAgo: number): number {
 
 /**
  * Time-varying targetAllocation across the demo timeline. Models
- * the realistic "younger investor was more aggressive 5 years ago,
+ * the realistic "younger investor was more aggressive 10 years ago,
  * gradually shifted toward conservative as they aged" arc:
  *
- *   - monthsAgo=60 (5y ago): equity 65 / bond 20 / cash 5 / crypto 5 / real_estate 5
- *   - monthsAgo=0 (today):   equity 75 / bond 12 / cash 3 / crypto 4 / real_estate 6
+ *   - monthsAgo=horizon (oldest): equity 65 / bond 20 / cash 5 / crypto 5 / real_estate 5
+ *   - monthsAgo=0 (today):        equity 75 / bond 12 / cash 3 / crypto 4 / real_estate 6
  *
  * Linear interpolation between the two endpoints — no fancy curve,
  * just enough drift that a target-vs-actual visualization would
  * have something interesting to show. Returns null when the
  * configured drift would produce nonsensical (negative) weights;
  * defensive bound.
+ *
+ * R1 audit: the denominator was previously hardcoded to 60 (5y).
+ * With the 10y horizon the older HALF of the timeline collapsed
+ * to alpha=0 — every snapshot from monthsAgo=60..120 shared the
+ * identical "past" endpoint, producing a flat first-half on the
+ * TargetDriftCard that contradicted the docstring. Parameterizing
+ * by `horizon` restores the linear interpolation across the FULL
+ * window regardless of how `months` is configured by callers.
  */
-function backdatedTarget(monthsAgo: number): TargetAllocation | null {
-  // alpha = 1 at today, 0 at 5 years ago.
-  const alpha = Math.max(0, Math.min(1, 1 - monthsAgo / 60));
+function backdatedTarget(
+  monthsAgo: number,
+  horizon: number,
+): TargetAllocation | null {
+  // alpha = 1 at today, 0 at `horizon` months ago. Defensive
+  // div-by-zero guard: a horizon of 0 means no historical drift
+  // is meaningful — pin alpha=1 (today's target) for all input.
+  const alpha =
+    horizon <= 0 ? 1 : Math.max(0, Math.min(1, 1 - monthsAgo / horizon));
   const past = {
     equity: 0.65,
     bond: 0.2,
@@ -419,16 +433,21 @@ function backdatedTarget(monthsAgo: number): TargetAllocation | null {
 
 /**
  * Per-month household annual income trajectory. Models realistic
- * compensation growth: starts at ~$155k 5 years ago, ends at
- * $250k today (≈10% annualized — a plausible mid-career raise
- * cadence including a job change). Linear interpolation; the
- * appState captures this with each snapshot so a future
- * income-history visualization has real data.
+ * compensation growth: starts at ~$155k at the OLDEST snapshot,
+ * ends at $250k today (≈5% annualized over a decade — plausible
+ * mid-career raise cadence including a job change). Linear
+ * interpolation; the appState captures this with each snapshot so
+ * a future income-history visualization has real data.
+ *
+ * R1 audit: same parameterization fix as backdatedTarget — the
+ * old denominator (60) flattened income to $155k across the older
+ * half of the 10y window.
  */
-function backdatedAnnualIncome(monthsAgo: number): number {
+function backdatedAnnualIncome(monthsAgo: number, horizon: number): number {
   const PAST = 155_000;
   const TODAY = 250_000;
-  const alpha = Math.max(0, Math.min(1, 1 - monthsAgo / 60));
+  const alpha =
+    horizon <= 0 ? 1 : Math.max(0, Math.min(1, 1 - monthsAgo / horizon));
   return Math.round(PAST + alpha * (TODAY - PAST));
 }
 
@@ -462,9 +481,9 @@ export function buildDemoSnapshots(
       scenarios: [],
       healthPlans: [],
       healthImportanceWeights: {},
-      targetAllocation: backdatedTarget(monthsAgo),
+      targetAllocation: backdatedTarget(monthsAgo, months),
       glidePath: null,
-      householdAnnualIncomeUSD: backdatedAnnualIncome(monthsAgo),
+      householdAnnualIncomeUSD: backdatedAnnualIncome(monthsAgo, months),
     };
     out.push({
       t,

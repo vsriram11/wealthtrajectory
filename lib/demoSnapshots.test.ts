@@ -196,9 +196,55 @@ describe("buildDemoSnapshots", () => {
     const today = snaps[snaps.length - 1].appState!.householdAnnualIncomeUSD!;
     expect(past).toBeLessThan(today);
     // Ratio should be in the "plausible compensation growth"
-    // band (between 1.3x and 2.0x over 5 years).
+    // band (between 1.3x and 2.0x over 10 years).
     expect(today / past).toBeGreaterThan(1.3);
     expect(today / past).toBeLessThan(2.0);
+  });
+
+  it("appState.targetAllocation interpolates across the FULL window, not just the most recent 5y (R1 audit)", () => {
+    // Audit R1 fix: previously backdatedTarget divided monthsAgo
+    // by a hardcoded 60, so any snapshot older than 5 years was
+    // pinned to the "past" endpoint (alpha clamped to 0). With
+    // the 10y window that meant the OLDEST 11 of 21 snapshots
+    // had identical target allocations — the TargetDriftCard
+    // would show a flat line for the first half of the timeline,
+    // contradicting the docstring promise of "linear
+    // interpolation between two endpoints."
+    //
+    // Contract: every monthsAgo step away from `now` should
+    // shift the equity weight monotonically (strictly less
+    // equity-heavy in the past), no two adjacent older snapshots
+    // should be exactly equal across the whole 10y span.
+    const snaps = buildDemoSnapshots(NOW);
+    const equityWeights = snaps.map((s) => s.appState!.targetAllocation!.equity!);
+    // Strictly monotonic (today → past = decreasing equity weight).
+    // Iterate from newest to oldest.
+    for (let i = snaps.length - 1; i > 0; i--) {
+      expect(equityWeights[i]).toBeGreaterThan(equityWeights[i - 1]);
+    }
+    // Spot check: the snapshot at monthsAgo≈60 (halfway through
+    // the 10y window) should sit ROUGHLY at the midpoint between
+    // the two endpoints, not at the past endpoint.
+    const newestEq = equityWeights[equityWeights.length - 1]; // 0.75
+    const oldestEq = equityWeights[0]; // 0.65
+    const midIdx = Math.floor(equityWeights.length / 2);
+    const midEq = equityWeights[midIdx];
+    expect(midEq).toBeGreaterThan(oldestEq + 0.001);
+    expect(midEq).toBeLessThan(newestEq - 0.001);
+  });
+
+  it("appState.householdAnnualIncomeUSD interpolates across the FULL window (R1 audit)", () => {
+    // Same R1 issue as targetAllocation: backdatedAnnualIncome
+    // divided monthsAgo by a hardcoded 60. With months=120 the
+    // oldest 11 snapshots all reported the IDENTICAL $155k
+    // past-endpoint income — no realistic comp-growth trajectory
+    // across the older half.
+    const snaps = buildDemoSnapshots(NOW);
+    const incomes = snaps.map((s) => s.appState!.householdAnnualIncomeUSD!);
+    // Strictly monotonic increasing as we approach today.
+    for (let i = 1; i < incomes.length; i++) {
+      expect(incomes[i]).toBeGreaterThan(incomes[i - 1]);
+    }
   });
 });
 
