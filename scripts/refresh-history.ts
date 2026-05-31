@@ -20,7 +20,7 @@
  * monthly.
  */
 
-import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { list, put, del } from "@vercel/blob";
 
@@ -88,28 +88,38 @@ const HISTORY_INTERVAL = "1d";
 const FETCH_SPACING_MS = 200; // polite throttle, ~5 req/s
 const UNIVERSE_PATH = resolve(process.cwd(), "data", "etf-universe.json");
 
-// Resume-checkpoint path + freshness rules.
+// Resume-checkpoint layout + freshness rules.
 //
 // The fetch loop is the slowest stage (~13 min for 4000 tickers
 // at 200ms throttle). When the upload stage subsequently fails
 // (storage quota, blob API hiccup, etc.), we want re-runs to skip
 // the Yahoo round-trip and resume at upload. The checkpoint
-// captures validated shards + corporate-action streams to a local
-// JSON file; the next run loads it and jumps straight to pre-GC +
+// captures validated shards + corporate-action streams to local
+// disk; the next run loads it and jumps straight to pre-GC +
 // upload.
+//
+// Why a DIRECTORY (not a single file): the full payload is ~520 MB
+// of JSON, which exceeds V8's 512 MB max-string limit — a single
+// JSON.stringify() of the whole structure throws RangeError. We
+// split per shard so each file's JSON fits comfortably; the layout
+// mirrors the Vercel Blob shards too.
+//
+// Layout:
+//   tmp/checkpoint/meta.json        — {createdAt, universeHash, numShards}
+//   tmp/checkpoint/shard-NNN.json   — {tickers, dividends, splits} for that shard
 //
 // TTL: 24h. Prices stale beyond that → force fresh fetch.
 // Universe hash: rejects checkpoint when etf-universe.json has
 //   changed since the checkpoint was written (otherwise we'd
 //   publish a stale ticker set).
-// File: tmp/ is gitignored. ~520 MB at full universe; fits local
-//   disk easily, not committed.
-const CHECKPOINT_PATH = resolve(
-  process.cwd(),
-  "tmp",
-  "refresh-checkpoint.json",
-);
+// tmp/ is gitignored; not committed.
+const CHECKPOINT_DIR = resolve(process.cwd(), "tmp", "checkpoint");
+const CHECKPOINT_META_PATH = resolve(CHECKPOINT_DIR, "meta.json");
 const CHECKPOINT_TTL_MS = 24 * 60 * 60 * 1000;
+
+function checkpointShardPath(i: number): string {
+  return resolve(CHECKPOINT_DIR, `shard-${String(i).padStart(3, "0")}.json`);
+}
 
 type HistoryPoint = [number, number]; // [t_ms, price]
 type DividendEvent = [number, number]; // [t_ms, amount_per_share]
@@ -480,60 +490,116 @@ function universeHash(tickers: string[]): string {
   return h.toString(16);
 }
 
-type Checkpoint = {
+type CheckpointMeta = {
   createdAt: number;
   universeHash: string;
+  numShards: number;
+};
+
+type Checkpoint = {
+  meta: CheckpointMeta;
   shards: TickerShard[];
   dividendShards: DividendShard[];
   splitShards: SplitShard[];
 };
 
+type CheckpointShardFile = {
+  tickers: TickerShard;
+  dividends: DividendShard;
+  splits: SplitShard;
+};
+
 async function loadCheckpoint(
   expectedHash: string,
 ): Promise<Checkpoint | null> {
-  let raw: string;
+  // Read meta first — fastest invalidation path. If meta is missing
+  // or invalid/stale, don't bother reading 256 shard files.
+  let metaRaw: string;
   try {
-    raw = await readFile(CHECKPOINT_PATH, "utf8");
+    metaRaw = await readFile(CHECKPOINT_META_PATH, "utf8");
   } catch {
     return null; // no checkpoint, normal case
   }
-  let cp: Checkpoint;
+  let meta: CheckpointMeta;
   try {
-    cp = JSON.parse(raw) as Checkpoint;
+    meta = JSON.parse(metaRaw) as CheckpointMeta;
   } catch (e) {
     console.warn(
-      `Checkpoint at ${CHECKPOINT_PATH} is corrupted (${e instanceof Error ? e.message : e}); ignoring.`,
+      `Checkpoint meta corrupted (${e instanceof Error ? e.message : e}); ignoring.`,
     );
     return null;
   }
-  // Sanity-check the structural shape — if any of these fail the
-  // checkpoint is unusable and we fall back to a fresh fetch.
   if (
-    typeof cp.createdAt !== "number" ||
-    typeof cp.universeHash !== "string" ||
-    !Array.isArray(cp.shards) ||
-    cp.shards.length !== NUM_HISTORY_SHARDS ||
-    !Array.isArray(cp.dividendShards) ||
-    cp.dividendShards.length !== NUM_HISTORY_SHARDS ||
-    !Array.isArray(cp.splitShards) ||
-    cp.splitShards.length !== NUM_HISTORY_SHARDS
+    typeof meta.createdAt !== "number" ||
+    typeof meta.universeHash !== "string" ||
+    meta.numShards !== NUM_HISTORY_SHARDS
   ) {
-    console.warn("Checkpoint shape invalid; ignoring.");
+    console.warn("Checkpoint meta shape invalid; ignoring.");
     return null;
   }
-  if (Date.now() - cp.createdAt > CHECKPOINT_TTL_MS) {
+  if (Date.now() - meta.createdAt > CHECKPOINT_TTL_MS) {
     console.log(
-      `Checkpoint is ${Math.round((Date.now() - cp.createdAt) / 3600_000)}h old (> 24h TTL); ignoring.`,
+      `Checkpoint is ${Math.round((Date.now() - meta.createdAt) / 3600_000)}h old (> 24h TTL); ignoring.`,
     );
     return null;
   }
-  if (cp.universeHash !== expectedHash) {
+  if (meta.universeHash !== expectedHash) {
     console.log(
       "Checkpoint universe hash mismatch (etf-universe.json changed); ignoring.",
     );
     return null;
   }
-  return cp;
+
+  // Meta is good; pull the per-shard files. Any missing/corrupt
+  // shard file invalidates the whole checkpoint (we can't publish a
+  // partial set).
+  const shards: TickerShard[] = Array.from(
+    { length: NUM_HISTORY_SHARDS },
+    () => ({}),
+  );
+  const dividendShards: DividendShard[] = Array.from(
+    { length: NUM_HISTORY_SHARDS },
+    () => ({}),
+  );
+  const splitShards: SplitShard[] = Array.from(
+    { length: NUM_HISTORY_SHARDS },
+    () => ({}),
+  );
+  for (let i = 0; i < NUM_HISTORY_SHARDS; i++) {
+    let raw: string;
+    try {
+      raw = await readFile(checkpointShardPath(i), "utf8");
+    } catch {
+      console.warn(`Checkpoint shard ${i} missing; ignoring whole checkpoint.`);
+      return null;
+    }
+    let parsed: CheckpointShardFile;
+    try {
+      parsed = JSON.parse(raw) as CheckpointShardFile;
+    } catch {
+      console.warn(
+        `Checkpoint shard ${i} corrupted; ignoring whole checkpoint.`,
+      );
+      return null;
+    }
+    if (
+      !parsed.tickers ||
+      typeof parsed.tickers !== "object" ||
+      !parsed.dividends ||
+      typeof parsed.dividends !== "object" ||
+      !parsed.splits ||
+      typeof parsed.splits !== "object"
+    ) {
+      console.warn(
+        `Checkpoint shard ${i} shape invalid; ignoring whole checkpoint.`,
+      );
+      return null;
+    }
+    shards[i] = parsed.tickers;
+    dividendShards[i] = parsed.dividends;
+    splitShards[i] = parsed.splits;
+  }
+  return { meta, shards, dividendShards, splitShards };
 }
 
 async function saveCheckpoint(
@@ -542,24 +608,34 @@ async function saveCheckpoint(
   dividendShards: DividendShard[],
   splitShards: SplitShard[],
 ): Promise<void> {
-  const cp: Checkpoint = {
+  await mkdir(CHECKPOINT_DIR, { recursive: true });
+  // Write shards first, meta LAST. If the process is killed mid-save,
+  // the next run sees no meta and treats the checkpoint as absent —
+  // safer than seeing meta but only some shards.
+  let totalBytes = 0;
+  for (let i = 0; i < NUM_HISTORY_SHARDS; i++) {
+    const payload = JSON.stringify({
+      tickers: shards[i],
+      dividends: dividendShards[i],
+      splits: splitShards[i],
+    });
+    totalBytes += payload.length;
+    await writeFile(checkpointShardPath(i), payload);
+  }
+  const meta: CheckpointMeta = {
     createdAt: Date.now(),
     universeHash: uHash,
-    shards,
-    dividendShards,
-    splitShards,
+    numShards: NUM_HISTORY_SHARDS,
   };
-  await mkdir(resolve(CHECKPOINT_PATH, ".."), { recursive: true });
-  const payload = JSON.stringify(cp);
-  await writeFile(CHECKPOINT_PATH, payload);
+  await writeFile(CHECKPOINT_META_PATH, JSON.stringify(meta));
   console.log(
-    `Checkpoint saved: ${(payload.length / 1024 / 1024).toFixed(0)} MB at ${CHECKPOINT_PATH}`,
+    `Checkpoint saved: ${NUM_HISTORY_SHARDS} shard files, ${(totalBytes / 1024 / 1024).toFixed(0)} MB total at ${CHECKPOINT_DIR}/`,
   );
 }
 
 async function deleteCheckpoint(): Promise<void> {
   try {
-    await unlink(CHECKPOINT_PATH);
+    await rm(CHECKPOINT_DIR, { recursive: true, force: true });
     console.log("Checkpoint cleared (publish succeeded).");
   } catch {
     /* not present is fine */
@@ -579,7 +655,7 @@ async function main() {
   // and resume at pre-GC + upload.
   const checkpoint = await loadCheckpoint(uHash);
   if (checkpoint) {
-    const ageMin = Math.round((Date.now() - checkpoint.createdAt) / 60_000);
+    const ageMin = Math.round((Date.now() - checkpoint.meta.createdAt) / 60_000);
     const tickerCount = checkpoint.shards.reduce(
       (s, sh) => s + Object.keys(sh).length,
       0,
