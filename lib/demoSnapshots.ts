@@ -5,54 +5,77 @@ import { DEMO_ASSUMPTIONS, DEMO_BUDGET, DEMO_HOUSEHOLD, DEMO_INCOME_STREAMS } fr
 import type { TargetAllocation } from "@/lib/portfolio/targetAllocation";
 
 /**
- * Demo-mode synthetic snapshot history — 60 monthly snapshots
- * (5 years) ending at `now`, anchored to first-of-month at noon
- * UTC (matches the production monthly-auto-snapshot anchoring).
+ * Demo-mode synthetic snapshot history — 21 anchors spaced every
+ * 6 months over a 10-year window (default), ending at `now`.
+ * Historical anchors land on first-of-month at noon UTC (matches
+ * the production monthly-auto-snapshot anchoring); the newest
+ * anchor pins to `now` itself so the chart's right edge sits at
+ * wall-clock time.
  *
- * Purpose: the new History tab on the Allocation page needs
- * substantive data to render meaningfully. In real mode that comes
- * from the user's own snapshot accumulation. In demo mode, IDB is
- * inert (PersistenceHydrator gates writes by mode === "real") so
- * without these synthesized snapshots the History tab would always
- * be empty for the demo persona.
+ * Purpose: the History tab on the Allocation page (and the
+ * home-page NW chart's interpolation between anchors) needs
+ * substantive data to render meaningfully. In real mode that
+ * comes from the user's own snapshot accumulation. In demo mode,
+ * IDB is inert (PersistenceHydrator gates writes by mode ===
+ * "real") so without these synthesized snapshots the History tab
+ * would be empty for the demo persona.
  *
  * DESIGN
  *
- *   - "today's" household (DEMO_HOUSEHOLD) is treated as the END
- *     of the 60-month window. We back-cast prior months by
- *     SCALING each holding's `valueUSD` by a per-class growth
- *     trajectory that's deterministic, reproducible, and broadly
- *     realistic for the relevant asset class.
+ *   - "today's" household (DEMO_HOUSEHOLD) is the END of the
+ *     window. Each historical snapshot's holdings vary BOTH
+ *     `shares` AND `lastPriceUSD` (and therefore valueUSD) per
+ *     the trajectories below — collapsing only `valueUSD` (as
+ *     the legacy 60-monthly factory did) would defeat the chart's
+ *     interpolation, which multiplies snap.shares by historical
+ *     price-at-bucket-t.
  *
- *   - Per-class trajectory =
- *       base annual growth (compounded backwards)
- *     * deterministic monthly noise (PRNG seeded by month index
- *       so the same demo session always sees the same history)
- *     * mid-window drawdown event (months -30 to -18 simulating
- *       a 2022-style bear) — equity ~-20%, bond ~-12%, crypto
- *       ~-65%, real-estate ~-8%.
+ *   - SHARES trajectory: a `(1 - elapsed)^1.5` curve ramping
+ *     from 5% of today's share count at acquisition up to 100%
+ *     today. Models a realistic accumulation arc (younger
+ *     investor → mid-career raises → today's share count).
+ *
+ *   - PRICE trajectory (live-priceable kinds): per-class CAGR
+ *     compounded BACKWARDS from today's lastPriceUSD, with
+ *     deterministic noise (mulberry32 seeded by class hash ×
+ *     monthsAgo) and a mid-window drawdown bell envelope (~24
+ *     months ago, depth varies by class — crypto ~65%, equity
+ *     ~20%) that models a recent bear-market dip in sparklines.
+ *
+ *   - ACQUISITION TIMING: per-ticker map (BTC: 5y ago,
+ *     TQQQ/NTSX/AVUV: 3y, QQQM: 2y). Snapshots OLDER than a
+ *     ticker's acquisition drop the holding entirely — the chart
+ *     shows a step up in NW when the holding first enters the
+ *     portfolio, modeling a real "we bought it then" moment.
+ *
+ *   - Cash holdings scale by the share-accumulation curve only
+ *     (savings accumulated over time). Real estate / private
+ *     stock / other are held flat across the window — modeling
+ *     RE acquisition + matching mortgage appearance is its own
+ *     feature, and private-stock has discrete 409A jumps that
+ *     don't fit a smooth-CAGR shape.
  *
  *   - Every snapshot carries the FULL household composition
- *     (back-scaled holdings + members + accounts shape preserved
- *     identically to DEMO_HOUSEHOLD) so per-member views work
- *     across the timeline. Liabilities are NOT back-scaled
- *     (mortgages amortize forward in real life, but the demo
- *     uses fixed principals and modeling that decay deterministically
- *     would add complexity beyond the History tab's needs).
+ *     (members + accounts shape preserved from DEMO_HOUSEHOLD —
+ *     accounts whose every holding was dropped get filtered out
+ *     unless all-cash). Liabilities are NOT back-scaled (mortgages
+ *     amortize forward in real life, but modeling that
+ *     deterministically would add complexity beyond the demo's
+ *     needs).
  *
- *   - Each snapshot also carries an `appState` matching the
- *     current demo plan slices, so any future "target alloc over
- *     time" / "assumption drift" visualization gets sensible
- *     demo data (constant targets + constant assumptions across
- *     the 5y window — realistic for most users who don't churn
- *     these settings).
+ *   - Each snapshot's `appState` captures targetAllocation and
+ *     householdAnnualIncomeUSD on per-monthsAgo linear-
+ *     interpolation curves spanning the FULL window. Other plan
+ *     slices (assumptions, budget, income streams) are held
+ *     constant — realistic for most users who don't churn these
+ *     settings.
  *
  * PURITY
  *
- *   Pure function of (now, optional months). No Date.now() at
- *   module scope, no Math.random() — the PRNG is a small inline
- *   LCG. Lift into any context (worker / SSR / test) without
- *   modification.
+ *   Pure function of (now, optional months, optional
+ *   intervalMonths). No Date.now() at module scope, no
+ *   Math.random() — the PRNG is a small inline LCG. Lift into
+ *   any context (worker / SSR / test) without modification.
  */
 
 /**
@@ -158,11 +181,14 @@ const NOISE_AMP: Record<AssetClass, number> = {
 };
 
 /**
- * Mid-window drawdown intensity per class (peak-to-trough loss
- * as a fraction). Applied across a 12-month window centered ~24
- * months ago, with a smooth bell-shaped envelope so the dip is
- * visible in sparklines without looking like a single-bar
- * artifact.
+ * Drawdown intensity per class (peak-to-trough loss as a
+ * fraction). Applied across a 12-month window centered at
+ * monthsAgo=24 (~2 years before `now`), with a smooth bell-
+ * shaped envelope so the dip is visible in sparklines without
+ * looking like a single-bar artifact. Positioned in the recent-
+ * past quartile of the 10y window — models a fresh memory of a
+ * bear-market dip rather than the centered "mid-window" framing
+ * the previous 5y default used.
  */
 const DRAWDOWN_DEPTH: Record<AssetClass, number> = {
   equity: 0.2,
