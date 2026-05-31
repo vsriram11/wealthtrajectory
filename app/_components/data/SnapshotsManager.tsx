@@ -230,11 +230,18 @@ export function SnapshotsManager() {
   );
 
   // Frame B (no-sign-in): SnapshotsManager renders in demo mode
-  // too. When the user clicks Save, the persistence subscriber
-  // auto-promotes the session to real mode (preserving current
-  // state) and the snapshot writes to IDB normally. The "Use mock
-  // data" button in DemoHeader gives users a one-click escape back
-  // to the demo seed if they want to discard their edits.
+  // too. When the user clicks Save, we explicitly promoteToReal
+  // BEFORE writing the snapshot — the snapshot persists to IDB
+  // and becomes part of the user's real history. (Audit R7
+  // corrected the PR commit's claim that "the persistence
+  // subscriber auto-promotes" on snapshot writes — actually the
+  // subscriber only fires on tracked-slice changes, not on
+  // bumpSnapshotsRevision, so without an explicit promote here
+  // the user stayed in demo mode while a demo-shaped snapshot
+  // was written to IDB.) The "Use mock data" button in
+  // DemoHeader gives users a one-click escape back to the demo
+  // seed if they want to discard their edits + snapshots.
+  const promoteToReal = useAppStore((s) => s.promoteToReal);
   void mode;
 
   const handleAdd = async () => {
@@ -242,6 +249,13 @@ export function SnapshotsManager() {
     if (!Number.isFinite(t)) return;
     setBusy(true);
     try {
+      // Auto-promote demo → real if needed BEFORE writing. The
+      // snapshot is the user's first deliberate "save my history"
+      // act; even if no other slice has been edited yet, this
+      // qualifies as an edit and the snapshot should anchor a real
+      // session (not pollute the demo state). promoteToReal is a
+      // no-op in real mode.
+      promoteToReal();
       const snap: Snapshot = {
         t,
         // Round-1/2 audit fix: use the SAME NW the user saw in the
@@ -299,6 +313,9 @@ export function SnapshotsManager() {
     void (async () => {
       setBusy(true);
       try {
+        // Audit R7: promote demo→real before any IDB write so the
+        // snapshots store stays consistent with the mode flag.
+        promoteToReal();
         await deleteSnapshot(t);
         bumpSnapshotsRevision();
         await refresh();
@@ -369,6 +386,9 @@ export function SnapshotsManager() {
     }
     setEditNWError("");
     setBusy(true);
+    // Audit R7: promote demo→real before any IDB write so the
+    // snapshots store stays consistent with the mode flag.
+    promoteToReal();
     // R1-D6 audit HIGH fix: if `moveSnapshot` succeeds (deletes the
     // old row, writes the new one) but then `recordSnapshot` throws,
     // OR if moveSnapshot itself fails mid delete-then-put, IDB has
