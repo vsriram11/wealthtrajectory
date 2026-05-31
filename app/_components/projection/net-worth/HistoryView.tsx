@@ -167,7 +167,16 @@ export function HistoryView({
     if (useSyntheticDemo) {
       void Promise.resolve().then(() => {
         if (cancelled) return;
-        setSnapshots(buildDemoSnapshots(demoAnchor));
+        // Pass the LIVE household (post-PriceRefresher) so snap.shares
+        // are derived from actual today-price shares, not the
+        // preset.referencePriceUSD-derived shares baked into the
+        // DEMO_HOUSEHOLD constant. Without this, snap.shares ×
+        // cache_real_price > live_household.valueUSD by 15-25% (the
+        // ratio of real_price / preset.referencePriceUSD), producing
+        // a plateau-above-live cliff at the chart's right edge.
+        setSnapshots(
+          buildDemoSnapshots(demoAnchor, undefined, undefined, household),
+        );
       });
       return () => {
         cancelled = true;
@@ -179,7 +188,11 @@ export function HistoryView({
     return () => {
       cancelled = true;
     };
-  }, [snapshotsRevision, useSyntheticDemo, demoAnchor]);
+    // household is read inside the closure when in demo mode — list
+    // it as a dep so a PriceRefresher update (changing
+    // household.holdings[].valueUSD/shares) re-runs the build with
+    // the latest shares.
+  }, [snapshotsRevision, useSyntheticDemo, demoAnchor, household]);
 
   // setLoading(true) below is the canonical "start an async data
   // load" pattern. The React 19 idiomatic alternative is Suspense

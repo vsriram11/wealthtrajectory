@@ -292,7 +292,25 @@ function hashCls(cls: AssetClass): number {
  * curve only land for the production default and floored at ~39%
  * of today for shorter (months=60) windows (R8 audit fix).
  */
-function buildBackdatedHousehold(monthsAgo: number, horizon: number): Household {
+function buildBackdatedHousehold(
+  monthsAgo: number,
+  horizon: number,
+  /**
+   * The household to back-scale FROM. Defaults to the canonical
+   * DEMO_HOUSEHOLD constant, but callers should pass the LIVE
+   * household when one is available — PriceRefresher recomputes
+   * `shares = valueUSD / live_price` on its first fetch, which
+   * usually shrinks shares below the preset-derived value
+   * (preset.referencePriceUSD is typically below real today's
+   * price). Reading from DEMO_HOUSEHOLD here would back-scale the
+   * preset-derived shares while the chart's compose uses the
+   * cache's real-price history → snap.shares × real_price
+   * systematically exceeds live valueUSD → chart plateau sits
+   * 15-25% above the live NW pin. The user-reported "$1.7M
+   * plateau vs $1.5M live NW cliff" was this exact mismatch.
+   */
+  base: Household = DEMO_HOUSEHOLD,
+): Household {
   /**
    * For each holding, return a backdated version OR `null` to
    * signal "drop this holding from the snapshot" (pre-acquisition).
@@ -363,8 +381,8 @@ function buildBackdatedHousehold(monthsAgo: number, horizon: number): Household 
   };
 
   return {
-    ...DEMO_HOUSEHOLD,
-    accounts: DEMO_HOUSEHOLD.accounts
+    ...base,
+    accounts: base.accounts
       .map((a) => ({
         ...a,
         holdings: a.holdings
@@ -378,7 +396,7 @@ function buildBackdatedHousehold(monthsAgo: number, horizon: number): Household 
       .filter(
         (a) =>
           a.holdings.length > 0 ||
-          DEMO_HOUSEHOLD.accounts.find((orig) => orig.id === a.id)?.holdings.every(
+          base.accounts.find((orig) => orig.id === a.id)?.holdings.every(
             (h) => h.kind === "cash",
           ),
       ),
@@ -495,6 +513,27 @@ export function buildDemoSnapshots(
   now: number,
   months: number = MONTHS_DEFAULT,
   intervalMonths: number = INTERVAL_MONTHS_DEFAULT,
+  /**
+   * Live household to back-scale from. Defaults to the canonical
+   * DEMO_HOUSEHOLD constant, but the chart/UI consumers should
+   * pass the LIVE household (post-PriceRefresher) — otherwise the
+   * shares used in snapshot composition will be the preset-derived
+   * shares (`valueUSD / preset.referencePriceUSD`) which usually
+   * exceed the live shares (`valueUSD / actual_today_price`)
+   * because preset references typically lag the real market.
+   *
+   * Concretely: DEMO_HOUSEHOLD.VOO has valueUSD=$95k and the
+   * preset references VOO at $520, so shares = 182.7. If actual
+   * VOO today is $620, PriceRefresher recomputes to keep valueUSD
+   * at $95k → live shares = 153.2. Reading from DEMO_HOUSEHOLD
+   * here back-scales 182.7, while the chart's compose uses the
+   * cache's actual $620 prices → the plateau sits at
+   * 182.7 × $620 = $113k vs live's 153.2 × $620 = $95k (which
+   * matches headline NW). That gap × 30 days × every holding
+   * compounds into the user-reported 15-25% plateau-above-live
+   * cliff at the right edge.
+   */
+  baseHousehold?: Household,
 ): Snapshot[] {
   // Guard against silly input (negative / zero months OR interval)
   // — return an empty history rather than throwing.
@@ -523,7 +562,7 @@ export function buildDemoSnapshots(
   }
   for (const monthsAgo of monthsAgoList) {
     const t = monthAnchor(now, monthsAgo);
-    const household = buildBackdatedHousehold(monthsAgo, months);
+    const household = buildBackdatedHousehold(monthsAgo, months, baseHousehold);
     const netWorth = householdNetWorth(household);
     const appState: SnapshotAppState = {
       // Assumptions + budget + income-stream SHAPE held constant

@@ -190,7 +190,14 @@ export function SnapshotsManager() {
     //    IDB only.
     if (isDemoHouseholdStrict(household)) {
       const idb = await loadSnapshots();
-      const demo = buildDemoSnapshots(demoAnchor);
+      // Pass the LIVE household so snap.shares are anchored to the
+      // post-PriceRefresher dollar values (same fix as HistoryView).
+      const demo = buildDemoSnapshots(
+        demoAnchor,
+        undefined,
+        undefined,
+        household,
+      );
       const idbByT = new Map(idb.map((s) => [s.t, s]));
       const merged: Snapshot[] = demo.map((d) => idbByT.get(d.t) ?? d);
       const demoTs = new Set(demo.map((d) => d.t));
