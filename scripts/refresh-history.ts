@@ -181,6 +181,92 @@ async function loadPriorShards(
   }
 }
 
+/**
+ * Pre-upload sanity check on the in-memory shard set. Distinguishes
+ * FATAL conditions (would actively serve worse data than the prior
+ * manifest — abort, don't publish) from WARNINGS (small issues that
+ * should be visible in the logs but don't justify holding the whole
+ * refresh).
+ *
+ * Tunable thresholds err on the SOFT side: false positives waste
+ * one cron run; false negatives publish bad data. Better to skip
+ * an occasional refresh than to corrupt the cache.
+ */
+function validateShards(
+  shards: ShardPayload[],
+  priorTickerCount: number,
+): { fatal: string[]; warnings: string[]; summary: string } {
+  const fatal: string[] = [];
+  const warnings: string[] = [];
+
+  const total = shards.reduce((s, sh) => s + Object.keys(sh).length, 0);
+  let pathologicallyShort = 0;
+  let nonFiniteValues = 0;
+  let totalPoints = 0;
+  for (const shard of shards) {
+    for (const points of Object.values(shard)) {
+      totalPoints += points.length;
+      if (points.length < 30) pathologicallyShort++;
+      for (const pt of points) {
+        if (
+          !Array.isArray(pt) ||
+          pt.length !== 2 ||
+          !Number.isFinite(pt[0]) ||
+          pt[0] <= 0 ||
+          !Number.isFinite(pt[1]) ||
+          pt[1] <= 0
+        ) {
+          nonFiniteValues++;
+        }
+      }
+    }
+  }
+
+  // FATAL: catastrophic fetch loss. If we have far fewer tickers
+  // than the prior run, something went badly wrong (Yahoo blanket
+  // 429, parser regression, etc.). Threshold: lose more than 20%
+  // of prior coverage = abort.
+  if (priorTickerCount > 0 && total < priorTickerCount * 0.8) {
+    fatal.push(
+      `ticker coverage dropped from ${priorTickerCount} → ${total} (${((1 - total / priorTickerCount) * 100).toFixed(1)}% loss; > 20% triggers abort)`,
+    );
+  }
+
+  // FATAL: any non-finite or non-positive data point — these
+  // would crash the chart's binary search or produce NaN NW
+  // values for users.
+  if (nonFiniteValues > 0) {
+    fatal.push(
+      `${nonFiniteValues} data points are non-finite / non-positive — refusing to publish`,
+    );
+  }
+
+  // FATAL: absolute floor. Even a brand-new install should not
+  // produce fewer than 100 tickers — anything less means fetch
+  // catastrophically failed.
+  if (total < 100) {
+    fatal.push(
+      `total tickers ${total} < absolute floor (100); fetch failure suspected`,
+    );
+  }
+
+  // WARN: holdings with very few data points. Could be a brand-
+  // new ticker (legit — only 30 days of history) or a fetch
+  // partial failure (only some points returned). Surface for
+  // visibility but don't block.
+  if (pathologicallyShort > total * 0.05) {
+    warnings.push(
+      `${pathologicallyShort} tickers (${((pathologicallyShort / total) * 100).toFixed(1)}%) have < 30 data points`,
+    );
+  }
+
+  return {
+    fatal,
+    warnings,
+    summary: `${total} tickers, ${totalPoints.toLocaleString()} data points, ${pathologicallyShort} sparse, ${nonFiniteValues} bad`,
+  };
+}
+
 async function main() {
   // Stage 1: load the universe.
   const universeRaw = await readFile(UNIVERSE_PATH, "utf8");
@@ -237,6 +323,47 @@ async function main() {
   );
   console.log(
     `Refreshed: ${refreshedCount}/${tickers.length}, missing: ${failedCount}, total in shards (with prior merges): ${totalPopulated}`,
+  );
+
+  // Stage 3.5: PRE-UPLOAD VALIDATION.
+  //
+  // Don't push corrupted data over a known-good prior version.
+  // Rate-limited runs, parser bugs, or stale JSON in the prior
+  // manifest could leave the in-memory shards in a degraded state
+  // that's WORSE than not refreshing. Concrete failure modes
+  // we're checking for:
+  //   - Catastrophic fetch loss (e.g., Yahoo rate-limited every
+  //     single ticker for the entire run; shard set is mostly
+  //     empty or has < the universe size — strong signal something
+  //     went wrong rather than just an off month).
+  //   - Non-finite or negative prices smuggled in via a parser
+  //     edge case.
+  //   - Per-ticker histories that are pathologically short
+  //     (single data point, all-zero series, etc.).
+  //   - Significant regression vs the prior shard set's coverage.
+  //
+  // On hard failure: abort BEFORE the atomic manifest swap. The
+  // prior manifest stays live; users continue getting the
+  // last-good cache. On soft warnings: log + proceed (the new
+  // data is mostly good, log lets the operator notice).
+  const priorTickerCount = priorShards
+    ? priorShards.reduce((s, sh) => s + Object.keys(sh).length, 0)
+    : 0;
+  const validation = validateShards(shards, priorTickerCount);
+  if (validation.fatal.length > 0) {
+    console.error("FATAL pre-upload validation failures:");
+    for (const f of validation.fatal) console.error(`  - ${f}`);
+    console.error(
+      "Aborting upload. Prior manifest at quote-history/manifest.json stays live.",
+    );
+    process.exit(2);
+  }
+  if (validation.warnings.length > 0) {
+    console.warn("Pre-upload validation warnings (proceeding):");
+    for (const w of validation.warnings) console.warn(`  - ${w}`);
+  }
+  console.log(
+    `Validation passed: ${validation.summary} (proceeding with upload)`,
   );
 
   // Stage 4: ATOMIC PUBLISH.
