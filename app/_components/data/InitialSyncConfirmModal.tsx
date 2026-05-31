@@ -49,23 +49,34 @@ export function InitialSyncConfirmModal() {
     setBusy(true);
     setError(null);
     try {
-      // Mark the modal as resolved BEFORE the push so a re-render
-      // mid-push doesn't reopen it. The push itself sets
-      // googleLastSyncAt + lastSyncOutcome on success.
-      setGoogleSyncState({ pendingInitialSyncConfirm: false });
+      // Keep `pendingInitialSyncConfirm: true` THROUGHOUT the push.
+      // The pre-fix code cleared it BEFORE awaiting pushToDrive, which
+      // meant a failed push would unmount the modal mid-handler (the
+      // `if (!pending) return null` guard at the top of render)  —
+      // the user would see the buttons vanish without an actionable
+      // error. The audit fix: only clear on success, so a failure
+      // leaves the modal open with the inline error visible and the
+      // Push button re-enabled for retry.
+      //
+      // Busy is the re-entry guard during the await; double-clicking
+      // Push can't queue a second concurrent pushToDrive call because
+      // both buttons disable on `disabled={busy}`.
       const result = await pushToDrive(useAppStore, {
         bypassInitialSyncGate: true,
       });
       if (result !== "ok") {
         // pushToDrive already wrote a user-visible error to
-        // googleSyncError. Surface a brief in-modal hint too so
-        // the user knows the action they triggered didn't land.
+        // googleSyncError. Surface a brief in-modal hint too so the
+        // user knows the action they triggered didn't land — and
+        // because we kept the modal open, the user can read it AND
+        // retry from the same surface (or Skip to defer).
         setError(
           "Push failed — see the sync status banner for details.",
         );
         return;
       }
       setGoogleSyncState({
+        pendingInitialSyncConfirm: false,
         googleSyncError: null,
         googleSyncBlockedReason: null,
         lastSyncOutcome: "uploaded-local",
