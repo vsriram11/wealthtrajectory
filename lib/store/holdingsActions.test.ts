@@ -437,6 +437,63 @@ describe("live-pricing flows", () => {
     expect(s.state.household.accounts[0].holdings[0].valueUSD).toBe(100);
   });
 
+  it("convertHoldingToLive preserves shares (does NOT recompute from value÷price)", () => {
+    // User-reported MAJOR bug: previously this recomputed
+    // shares = value / livePrice, which silently DROPPED shares
+    // when the user resumed live tracking from a manual price.
+    // For TQQQ owned at 100 shares × $52 manual = $5,200,
+    // switching to live ($84) used to give shares = $5,200/$84
+    // = 61.9 — the user lost 38 shares.
+    //
+    // Resuming live tracking must preserve the share count
+    // (user owns shares, not a dollar amount). valueUSD floats
+    // to shares × livePrice.
+    const s = makeFakeStore({
+      household: {
+        id: "h1",
+        members: [{ id: "m1", displayName: "Alex" }],
+        accounts: [
+          {
+            id: "acc1",
+            displayName: "x",
+            category: "BROKERAGE",
+            ownerId: "m1",
+            monthlyContributionUSD: 0,
+            holdings: [
+              {
+                kind: "equity",
+                id: "h1",
+                symbol: "TQQQ",
+                shares: 100,
+                lastPriceUSD: 52,
+                lastPricedAt: 1_700_000_000_000,
+                isManualPrice: true,
+                enteredAsShares: false,
+                acquiredAt: null,
+                valueUSD: 5_200,
+                expectedRealCAGR: 0.07,
+                leverage: 3,
+                styleBox: { LARGE_BLEND: 1 } as never,
+                geography: { US: 1, DEVELOPED: 0, EMERGING: 0 },
+              },
+            ],
+          },
+        ],
+        liabilities: [],
+      },
+    });
+    const a = createHoldingsActions(s.set);
+    a.convertHoldingToLive("h1" as never, 84, 1_700_000_001_000);
+    const h = s.state.household.accounts[0].holdings[0];
+    if (h.kind !== "equity") throw new Error("test fixture drifted");
+    expect(h.isManualPrice).toBe(false);
+    // CRITICAL: shares preserved at 100.
+    expect(h.shares).toBe(100);
+    expect(h.lastPriceUSD).toBe(84);
+    // valueUSD floats to shares × live price.
+    expect(h.valueUSD).toBe(8_400);
+  });
+
   it("convertHoldingToManual flips isManualPrice + freezes value (next live-fetch skips)", () => {
     const s = makeFakeStore({
       household: {

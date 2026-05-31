@@ -199,14 +199,26 @@ export function createHoldingsActions(
         mapHolding(s, id, (h) => {
           if (!isLivePriceable(h)) return h;
           if (livePrice <= 0) return h;
-          const value = h.valueUSD;
+          // PRESERVE SHARES, not value. User-reported MAJOR bug:
+          // previously this recomputed `shares = value / livePrice`
+          // which destroyed the user's share count when they
+          // resumed live tracking from a manual price. For TQQQ
+          // owned at 100 shares × $52 manual = $5,200, switching
+          // to live ($84) used to give shares = $5,200/$84 = 61.9
+          // — silently dropped 38 shares.
+          //
+          // The user owns a position MEASURED IN SHARES (for any
+          // live-priceable instrument — ETFs, stocks, bonds).
+          // Resuming live tracking should update the PRICE while
+          // keeping the share count intact. Value floats to the
+          // new shares × live price.
           return {
             ...h,
-            shares: value / livePrice,
+            shares: h.shares,
             lastPriceUSD: livePrice,
             lastPricedAt: pricedAt,
             isManualPrice: false,
-            valueUSD: value,
+            valueUSD: h.shares * livePrice,
           };
         }),
       ),
