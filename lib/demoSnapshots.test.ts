@@ -172,6 +172,35 @@ describe("buildDemoSnapshots", () => {
     expect(snaps).toHaveLength(5);
   });
 
+  it("always emits a 'today' anchor (monthsAgo=0) even when months is not a multiple of intervalMonths (R3 audit)", () => {
+    // R3 audit fix: the loop `for (let m = months; m >= 0; m -=
+    // intervalMonths)` silently dropped the monthsAgo=0 anchor
+    // whenever `months % intervalMonths !== 0`. A caller passing
+    // (now, 10, 6) got snapshots at [10, 4] — no "today" pin, so
+    // the chart's right edge would be 4 months IN THE PAST. The
+    // production default (120, 6) is clean, but the function's
+    // contract should guarantee "the timeline ends at today"
+    // regardless of multiplicity.
+    const snaps = buildDemoSnapshots(NOW, 10, 6);
+    // Newest snapshot at exactly `now` (the round-2 BLOCK fix's
+    // contract for the monthsAgo=0 anchor).
+    expect(snaps[snaps.length - 1].t).toBe(NOW);
+  });
+
+  it("always emits the oldest-requested anchor exactly at monthsAgo=months (R3 audit)", () => {
+    // R3 audit: the loop already starts at monthsAgo=months so
+    // this case isn't broken today — but pin it as part of the
+    // contract so future refactors that switch to a different
+    // emission order can't silently truncate the requested
+    // window.
+    const snaps = buildDemoSnapshots(NOW, 10, 6);
+    // Oldest snapshot at monthsAgo=10 — newest at now.
+    // monthAnchor maps monthsAgo=10 → first-of-month 10 months ago.
+    expect(snaps[0].t).toBeLessThan(NOW);
+    // 10 months back from 2026-05-29 = 2025-07-01.
+    expect(snaps[0].t).toBe(Date.UTC(2025, 6, 1, 12, 0, 0, 0));
+  });
+
   it("appState.targetAllocation drifts across the timeline (more aggressive in the past)", () => {
     const snaps = buildDemoSnapshots(NOW);
     const past = snaps[0].appState!.targetAllocation!;

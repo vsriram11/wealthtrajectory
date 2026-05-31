@@ -464,7 +464,24 @@ export function buildDemoSnapshots(
   // ..., intervalMonths, 0. The newest (monthsAgo=0) is "today";
   // the oldest is `months` months ago. With months=120 and
   // intervalMonths=6 that's 21 anchors evenly spread over a decade.
+  //
+  // R3 audit: collect the monthsAgo values first, then ensure the
+  // endpoints are present. The bare loop can silently drop the
+  // monthsAgo=0 "today" anchor when months isn't a clean multiple
+  // of intervalMonths (e.g. (10, 6) emits [10, 4]) — the chart's
+  // right edge would then float in the past. The default
+  // (120, 6) is clean, but the function's contract should
+  // guarantee both endpoints for any caller.
+  const monthsAgoList: number[] = [];
   for (let monthsAgo = months; monthsAgo >= 0; monthsAgo -= intervalMonths) {
+    monthsAgoList.push(monthsAgo);
+  }
+  // Ensure monthsAgo=0 is the LAST entry (the "today" anchor).
+  // The loop drops it whenever months % intervalMonths !== 0.
+  if (monthsAgoList[monthsAgoList.length - 1] !== 0) {
+    monthsAgoList.push(0);
+  }
+  for (const monthsAgo of monthsAgoList) {
     const t = monthAnchor(now, monthsAgo);
     const household = buildBackdatedHousehold(monthsAgo);
     const netWorth = householdNetWorth(household);
