@@ -20,7 +20,7 @@
  * monthly.
  */
 
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { list, put, del } from "@vercel/blob";
 
@@ -87,6 +87,29 @@ const HISTORY_PERIOD1_SEC = Math.floor(
 const HISTORY_INTERVAL = "1d";
 const FETCH_SPACING_MS = 200; // polite throttle, ~5 req/s
 const UNIVERSE_PATH = resolve(process.cwd(), "data", "etf-universe.json");
+
+// Resume-checkpoint path + freshness rules.
+//
+// The fetch loop is the slowest stage (~13 min for 4000 tickers
+// at 200ms throttle). When the upload stage subsequently fails
+// (storage quota, blob API hiccup, etc.), we want re-runs to skip
+// the Yahoo round-trip and resume at upload. The checkpoint
+// captures validated shards + corporate-action streams to a local
+// JSON file; the next run loads it and jumps straight to pre-GC +
+// upload.
+//
+// TTL: 24h. Prices stale beyond that → force fresh fetch.
+// Universe hash: rejects checkpoint when etf-universe.json has
+//   changed since the checkpoint was written (otherwise we'd
+//   publish a stale ticker set).
+// File: tmp/ is gitignored. ~520 MB at full universe; fits local
+//   disk easily, not committed.
+const CHECKPOINT_PATH = resolve(
+  process.cwd(),
+  "tmp",
+  "refresh-checkpoint.json",
+);
+const CHECKPOINT_TTL_MS = 24 * 60 * 60 * 1000;
 
 type HistoryPoint = [number, number]; // [t_ms, price]
 type DividendEvent = [number, number]; // [t_ms, amount_per_share]
@@ -431,19 +454,151 @@ function validateShards(
   };
 }
 
+/**
+ * Deterministic hash of the universe ticker list — used to detect
+ * etf-universe.json changes between a checkpoint write and a
+ * subsequent resume attempt. If the universe has shifted (new
+ * tickers added, old ones dropped), the checkpoint's shard set
+ * is wrong for the current run; reject and re-fetch.
+ *
+ * FNV-1a 32-bit — same family as shardForSymbol, but operates on
+ * the whole sorted list so reorderings don't false-positive.
+ */
+function universeHash(tickers: string[]): string {
+  const sorted = [...tickers].sort();
+  let h = 0x811c9dc5;
+  for (const t of sorted) {
+    for (let i = 0; i < t.length; i++) {
+      h ^= t.charCodeAt(i);
+      h = Math.imul(h, 0x01000193) >>> 0;
+    }
+    // Separator byte (0x1f, "unit separator") so ["AB","C"] and
+    // ["A","BC"] hash differently.
+    h ^= 0x1f;
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return h.toString(16);
+}
+
+type Checkpoint = {
+  createdAt: number;
+  universeHash: string;
+  shards: TickerShard[];
+  dividendShards: DividendShard[];
+  splitShards: SplitShard[];
+};
+
+async function loadCheckpoint(
+  expectedHash: string,
+): Promise<Checkpoint | null> {
+  let raw: string;
+  try {
+    raw = await readFile(CHECKPOINT_PATH, "utf8");
+  } catch {
+    return null; // no checkpoint, normal case
+  }
+  let cp: Checkpoint;
+  try {
+    cp = JSON.parse(raw) as Checkpoint;
+  } catch (e) {
+    console.warn(
+      `Checkpoint at ${CHECKPOINT_PATH} is corrupted (${e instanceof Error ? e.message : e}); ignoring.`,
+    );
+    return null;
+  }
+  // Sanity-check the structural shape — if any of these fail the
+  // checkpoint is unusable and we fall back to a fresh fetch.
+  if (
+    typeof cp.createdAt !== "number" ||
+    typeof cp.universeHash !== "string" ||
+    !Array.isArray(cp.shards) ||
+    cp.shards.length !== NUM_HISTORY_SHARDS ||
+    !Array.isArray(cp.dividendShards) ||
+    cp.dividendShards.length !== NUM_HISTORY_SHARDS ||
+    !Array.isArray(cp.splitShards) ||
+    cp.splitShards.length !== NUM_HISTORY_SHARDS
+  ) {
+    console.warn("Checkpoint shape invalid; ignoring.");
+    return null;
+  }
+  if (Date.now() - cp.createdAt > CHECKPOINT_TTL_MS) {
+    console.log(
+      `Checkpoint is ${Math.round((Date.now() - cp.createdAt) / 3600_000)}h old (> 24h TTL); ignoring.`,
+    );
+    return null;
+  }
+  if (cp.universeHash !== expectedHash) {
+    console.log(
+      "Checkpoint universe hash mismatch (etf-universe.json changed); ignoring.",
+    );
+    return null;
+  }
+  return cp;
+}
+
+async function saveCheckpoint(
+  uHash: string,
+  shards: TickerShard[],
+  dividendShards: DividendShard[],
+  splitShards: SplitShard[],
+): Promise<void> {
+  const cp: Checkpoint = {
+    createdAt: Date.now(),
+    universeHash: uHash,
+    shards,
+    dividendShards,
+    splitShards,
+  };
+  await mkdir(resolve(CHECKPOINT_PATH, ".."), { recursive: true });
+  const payload = JSON.stringify(cp);
+  await writeFile(CHECKPOINT_PATH, payload);
+  console.log(
+    `Checkpoint saved: ${(payload.length / 1024 / 1024).toFixed(0)} MB at ${CHECKPOINT_PATH}`,
+  );
+}
+
+async function deleteCheckpoint(): Promise<void> {
+  try {
+    await unlink(CHECKPOINT_PATH);
+    console.log("Checkpoint cleared (publish succeeded).");
+  } catch {
+    /* not present is fine */
+  }
+}
+
 async function main() {
   // Stage 1: load the universe.
   const universeRaw = await readFile(UNIVERSE_PATH, "utf8");
   const { tickers } = JSON.parse(universeRaw) as { tickers: string[] };
   console.log(`Universe: ${tickers.length} tickers`);
+  const uHash = universeHash(tickers);
+
+  // Stage 1.5: check for a resume checkpoint. If a recent run got
+  // through validation but failed during upload, the checkpoint
+  // holds the validated shard set — we can skip Stages 2-3 entirely
+  // and resume at pre-GC + upload.
+  const checkpoint = await loadCheckpoint(uHash);
+  if (checkpoint) {
+    const ageMin = Math.round((Date.now() - checkpoint.createdAt) / 60_000);
+    const tickerCount = checkpoint.shards.reduce(
+      (s, sh) => s + Object.keys(sh).length,
+      0,
+    );
+    console.log(
+      `Resuming from checkpoint (${ageMin} min old, ${tickerCount} tickers). Skipping Yahoo fetch.`,
+    );
+  }
 
   // Stage 2: prior-shard fetch (so we can merge tickers that fail
   // to refetch this run instead of dropping them wholesale). Loads
   // prices + dividends + splits in parallel — each stream merges
   // independently.
+  //
+  // Skipped on resume: the checkpoint already contains the merged
+  // shard set; we don't need the prior state to seed anything.
   const blobBaseUrl = process.env.NEXT_PUBLIC_QUOTE_HISTORY_BLOB_BASE;
   let priorState: PriorShardState | null = null;
-  if (blobBaseUrl) {
+  if (!checkpoint && blobBaseUrl) {
     console.log(`Loading prior shards from ${blobBaseUrl}…`);
     priorState = await loadPriorShards(blobBaseUrl);
     if (priorState) {
@@ -466,50 +621,61 @@ async function main() {
   // Stage 3: fetch + bucket by shard. Start from prior contents so
   // tickers we fail to refetch this run keep their last-good data
   // (prices AND corporate-action streams).
-  const shards: TickerShard[] = priorState
-    ? priorState.tickers.map((s) => ({ ...s }))
-    : Array.from({ length: NUM_HISTORY_SHARDS }, () => ({}));
-  const dividendShards: DividendShard[] = priorState
+  //
+  // On resume: the checkpoint's shards ARE the validated set; drop
+  // them straight into the working buffers and skip the Yahoo loop.
+  const shards: TickerShard[] = checkpoint
+    ? checkpoint.shards
+    : priorState
+      ? priorState.tickers.map((s) => ({ ...s }))
+      : Array.from({ length: NUM_HISTORY_SHARDS }, () => ({}));
+  const dividendShards: DividendShard[] = checkpoint
+    ? checkpoint.dividendShards
+    : priorState
     ? priorState.dividends.map((s) => ({ ...s }))
     : Array.from({ length: NUM_HISTORY_SHARDS }, () => ({}));
-  const splitShards: SplitShard[] = priorState
+  const splitShards: SplitShard[] = checkpoint
+    ? checkpoint.splitShards
+    : priorState
     ? priorState.splits.map((s) => ({ ...s }))
     : Array.from({ length: NUM_HISTORY_SHARDS }, () => ({}));
-  let refreshedCount = 0;
-  let failedCount = 0;
-  for (let i = 0; i < tickers.length; i++) {
-    const t = tickers[i];
-    const shardIdx = shardForSymbol(t);
-    const fetched = await fetchHistory(t);
-    if (fetched) {
-      shards[shardIdx][t] = fetched.prices;
-      // Always replace dividend/split streams (don't try to merge
-      // incrementally): the full window is refetched each run so
-      // the freshly-parsed list is canonical for the [period1, now]
-      // range. Empty arrays are still meaningful — they say "we
-      // checked and this ticker has no dividends/splits."
-      dividendShards[shardIdx][t] = fetched.dividends;
-      splitShards[shardIdx][t] = fetched.splits;
-      refreshedCount++;
-    } else {
-      // Keep prior data for this ticker if we have it; only counts
-      // as failed if the ticker is entirely missing now.
-      if (!(t in shards[shardIdx])) failedCount++;
+  if (!checkpoint) {
+    let refreshedCount = 0;
+    let failedCount = 0;
+    for (let i = 0; i < tickers.length; i++) {
+      const t = tickers[i];
+      const shardIdx = shardForSymbol(t);
+      const fetched = await fetchHistory(t);
+      if (fetched) {
+        shards[shardIdx][t] = fetched.prices;
+        // Always replace dividend/split streams (don't try to merge
+        // incrementally): the full window is refetched each run so
+        // the freshly-parsed list is canonical for the [period1, now]
+        // range. Empty arrays are still meaningful — they say "we
+        // checked and this ticker has no dividends/splits."
+        dividendShards[shardIdx][t] = fetched.dividends;
+        splitShards[shardIdx][t] = fetched.splits;
+        refreshedCount++;
+      } else {
+        // Keep prior data for this ticker if we have it; only counts
+        // as failed if the ticker is entirely missing now.
+        if (!(t in shards[shardIdx])) failedCount++;
+      }
+      if (i % 50 === 0 && i > 0) {
+        console.log(
+          `  ${i}/${tickers.length} processed (refreshed=${refreshedCount}, missing=${failedCount})`,
+        );
+      }
+      await new Promise((r) => setTimeout(r, FETCH_SPACING_MS));
     }
-    if (i % 50 === 0 && i > 0) {
-      console.log(
-        `  ${i}/${tickers.length} processed (refreshed=${refreshedCount}, missing=${failedCount})`,
-      );
-    }
-    await new Promise((r) => setTimeout(r, FETCH_SPACING_MS));
+    const totalPopulated = shards.reduce(
+      (s, sh) => s + Object.keys(sh).length,
+      0,
+    );
+    console.log(
+      `Refreshed: ${refreshedCount}/${tickers.length}, missing: ${failedCount}, total in shards (with prior merges): ${totalPopulated}`,
+    );
   }
-  const totalPopulated = shards.reduce(
-    (s, sh) => s + Object.keys(sh).length,
-    0,
-  );
-  console.log(
-    `Refreshed: ${refreshedCount}/${tickers.length}, missing: ${failedCount}, total in shards (with prior merges): ${totalPopulated}`,
-  );
 
   // Stage 3.5: PRE-UPLOAD VALIDATION.
   //
@@ -556,6 +722,13 @@ async function main() {
   console.log(
     `Validation passed: ${validation.summary} (proceeding with upload)`,
   );
+
+  // Stage 3.6: SAVE CHECKPOINT (only if we actually fetched this
+  // run — on resume we already have a checkpoint and re-saving
+  // would just rewrite the same 520 MB blob for no benefit).
+  if (!checkpoint) {
+    await saveCheckpoint(uHash, shards, dividendShards, splitShards);
+  }
 
   // Stage 4: PRE-GC + PUBLISH.
   //
@@ -663,6 +836,11 @@ async function main() {
   // catches it. Cheap — list() is one Blob op when there's nothing
   // to delete.
   await garbageCollectOldGenerations(generatedAt);
+
+  // Stage 7: clear the resume checkpoint. The publish succeeded;
+  // there's nothing to resume to. Leaving the checkpoint in place
+  // would just have the next run skip fetch when prices are stale.
+  await deleteCheckpoint();
 }
 
 async function garbageCollectOldGenerations(currentGen: number): Promise<void> {
