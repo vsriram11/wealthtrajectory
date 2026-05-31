@@ -52,14 +52,33 @@ export const CPI_ANNUAL_DECEMBER: ReadonlyArray<{
 ];
 
 /**
- * Interpolate the CPI level at a specific UTC timestamp. Returns
- * null when the timestamp falls outside the covered window — caller
- * should treat that as "real CAGR unavailable" rather than guessing.
+ * Default assumed annual CPI rate (2.5%) used to extrapolate beyond
+ * the published series. Matches the app's plan-level inflation
+ * default. Picks the published series first, only falls back to
+ * extrapolation when the timestamp postdates the latest tabulated
+ * year — the published values are anchors, never replaced.
+ */
+const ASSUMED_FORWARD_CPI_RATE = 0.025;
+
+/**
+ * Interpolate the CPI level at a specific UTC timestamp.
  *
- * The interpolation pins each year's value to Dec 31 (end of year)
- * and linearly bridges between consecutive years. A timestamp on
- * Jul 1 2010 sits halfway between Dec 31 2009's CPI and Dec 31
- * 2010's CPI.
+ * Coverage rules:
+ *   - Inside the published window (2004 through the latest
+ *     tabulated year): linear interpolation between Dec-of-year
+ *     anchors.
+ *   - PAST the published window: extrapolate from the latest
+ *     tabulated CPI using `ASSUMED_FORWARD_CPI_RATE`. Without
+ *     this, a session whose wall-clock sits in a year not yet
+ *     published surfaces "real CAGR unavailable" everywhere —
+ *     the trailing few months of any chart range hit a null
+ *     factor. Extrapolation produces a slightly-conservative
+ *     estimate (the published rate often beats 2.5% in recent
+ *     years) but a finite number that drives the real-CAGR
+ *     math cleanly.
+ *   - BEFORE the published window (pre-2004): returns null. The
+ *     static-cache window starts Dec 2005, so this branch only
+ *     fires on misuse and shouldn't be papered over with a guess.
  */
 export function cpiAt(t: number): number | null {
   const date = new Date(t);
@@ -74,8 +93,22 @@ export function cpiAt(t: number): number | null {
   // Bridge from prior-year-end to this-year-end at `yearFraction`.
   const prior = CPI_ANNUAL_DECEMBER.find((r) => r.year === year - 1);
   const current = CPI_ANNUAL_DECEMBER.find((r) => r.year === year);
-  if (!prior || !current) return null;
-  return prior.cpi + yearFraction * (current.cpi - prior.cpi);
+  if (prior && current) {
+    return prior.cpi + yearFraction * (current.cpi - prior.cpi);
+  }
+  // Forward extrapolation: timestamp postdates the published
+  // series. Walk forward from the latest tabulated year applying
+  // the assumed rate.
+  const latest = CPI_ANNUAL_DECEMBER[CPI_ANNUAL_DECEMBER.length - 1];
+  if (latest && year > latest.year) {
+    const fullYearsAhead = year - latest.year - 1;
+    const cpiAtPriorYearEnd =
+      latest.cpi * Math.pow(1 + ASSUMED_FORWARD_CPI_RATE, fullYearsAhead);
+    const cpiAtThisYearEnd =
+      cpiAtPriorYearEnd * (1 + ASSUMED_FORWARD_CPI_RATE);
+    return cpiAtPriorYearEnd + yearFraction * (cpiAtThisYearEnd - cpiAtPriorYearEnd);
+  }
+  return null;
 }
 
 /**

@@ -60,11 +60,24 @@ describe("cpiAt", () => {
     expect(cpiAt(t)).toBeNull();
   });
 
-  it("returns null for a timestamp after the latest covered year", () => {
-    // The window ends with the latest year in the data. 2030 is
-    // well beyond it.
-    const t = Date.UTC(2030, 5, 1);
-    expect(cpiAt(t)).toBeNull();
+  it("extrapolates forward past the published series at the assumed CPI rate", () => {
+    // The published window ends at the latest tabulated year. Past
+    // that we forward-extrapolate using the 2.5% assumed rate so a
+    // session whose wall-clock postdates the series doesn't surface
+    // "real CAGR unavailable" for the trailing months of every
+    // chart. Pin the extrapolation against an arithmetic check
+    // (2030 is ~4.5 years past 2025).
+    const last = CPI_ANNUAL_DECEMBER[CPI_ANNUAL_DECEMBER.length - 1];
+    const yearsAhead = 2030 - last.year;
+    const t = Date.UTC(2030, 5, 1); // mid-2030
+    const cpi = cpiAt(t);
+    expect(cpi).not.toBeNull();
+    // Lower bound: at most yearsAhead-1 compoundings (Dec of year-1).
+    const lowerBound = last.cpi * Math.pow(1.025, yearsAhead - 2);
+    // Upper bound: at most yearsAhead compoundings (Dec of year).
+    const upperBound = last.cpi * Math.pow(1.025, yearsAhead);
+    expect(cpi!).toBeGreaterThan(lowerBound);
+    expect(cpi!).toBeLessThan(upperBound);
   });
 });
 
@@ -79,9 +92,16 @@ describe("inflationFactor", () => {
     expect(f!).toBeCloseTo(260.47 / 219.18, 3);
   });
 
-  it("returns null when either endpoint falls outside the covered window", () => {
+  it("returns null only when the start endpoint falls BEFORE the covered window", () => {
+    // Pre-2004: still null (the static cache starts Dec 2005 so
+    // this would only fire on misuse).
     expect(inflationFactor(Date.UTC(2003, 0, 1), Date.UTC(2010, 0, 1))).toBeNull();
-    expect(inflationFactor(Date.UTC(2010, 0, 1), Date.UTC(2030, 0, 1))).toBeNull();
+    // Past the END of the published series: NOT null any more —
+    // we forward-extrapolate so the trailing months of a chart
+    // range never null out.
+    expect(
+      inflationFactor(Date.UTC(2010, 0, 1), Date.UTC(2030, 0, 1)),
+    ).not.toBeNull();
   });
 
   it("returns 1.0 (no inflation) when start === end", () => {

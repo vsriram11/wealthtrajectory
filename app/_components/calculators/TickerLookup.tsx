@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 
 import { inflationFactor } from "@/lib/data/cpiHistory";
 import { formatUSD } from "@/lib/format";
@@ -133,6 +133,16 @@ function TickerView({
   data: TickerData;
 }) {
   const stats = useMemo(() => computeStats(data), [data]);
+  // Inception detection: the static cache window starts Dec 1
+  // 2005; if the ticker's first datapoint is later than that, the
+  // ticker's actual inception is what we surface to the user
+  // (rather than padding the chart with a flat pre-inception
+  // segment). For tickers that genuinely span the full window we
+  // suppress the line — no useful information to add.
+  const STATIC_CACHE_START_MS = Date.UTC(2005, 11, 1); // Dec 1 2005
+  const isPostCacheInception =
+    data.history.length > 0 &&
+    data.history[0].t > STATIC_CACHE_START_MS + 30 * 86_400_000;
 
   return (
     <div className="mt-4 space-y-4">
@@ -140,9 +150,20 @@ function TickerView({
         <div>
           <h2 className="text-lg font-semibold text-text num">{symbol}</h2>
           <div className="text-[11px] text-text-dim">
-            Data through{" "}
-            {new Date(data.lastPoint.t).toLocaleDateString()} ·{" "}
-            {data.history.length.toLocaleString()} daily points
+            {isPostCacheInception ? (
+              <>
+                Inception {new Date(data.history[0].t).toLocaleDateString()}{" "}
+                · data through{" "}
+                {new Date(data.lastPoint.t).toLocaleDateString()} ·{" "}
+                {data.history.length.toLocaleString()} daily points
+              </>
+            ) : (
+              <>
+                Data through{" "}
+                {new Date(data.lastPoint.t).toLocaleDateString()} ·{" "}
+                {data.history.length.toLocaleString()} daily points
+              </>
+            )}
           </div>
         </div>
         {data.currentPrice != null && (
@@ -157,7 +178,7 @@ function TickerView({
 
       <PriceChart history={data.history} />
 
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+      <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
         <StatCard
           label="Dividend yield (TTM)"
           value={
@@ -179,6 +200,11 @@ function TickerView({
               : "—"
           }
           sub={`${stats.years.toFixed(1)} yr window`}
+          realValue={
+            stats.realPriceCAGR != null
+              ? `${(stats.realPriceCAGR * 100).toFixed(2)}% real`
+              : null
+          }
         />
         <StatCard
           label="Annual CAGR (total return)"
@@ -188,18 +214,10 @@ function TickerView({
               : "—"
           }
           sub="price + reinvested dividends"
-        />
-        <StatCard
-          label="Annual real CAGR"
-          value={
+          realValue={
             stats.realTotalReturnCAGR != null
-              ? `${(stats.realTotalReturnCAGR * 100).toFixed(2)}%`
-              : "—"
-          }
-          sub={
-            stats.cumulativeInflation != null
-              ? `inflation × ${stats.cumulativeInflation.toFixed(2)} over window`
-              : "CPI window unavailable"
+              ? `${(stats.realTotalReturnCAGR * 100).toFixed(2)}% real`
+              : null
           }
         />
       </div>
@@ -261,10 +279,19 @@ function StatCard({
   label,
   value,
   sub,
+  realValue,
 }: {
   label: string;
   value: string;
   sub: string;
+  /**
+   * Optional inflation-adjusted version of the headline value.
+   * Rendered as a smaller, dimmer line just under the nominal
+   * figure so the two are visually paired without competing —
+   * the user wanted the real CAGR "smartly placed below the
+   * nominal in those cards" rather than as its own card.
+   */
+  realValue?: string | null;
 }) {
   return (
     <div className="rounded-lg border border-border bg-bg-elevated px-3 py-2">
@@ -274,6 +301,9 @@ function StatCard({
       <div className="mt-0.5 num text-base font-semibold text-text">
         {value}
       </div>
+      {realValue && (
+        <div className="num text-[11px] text-text-muted">{realValue}</div>
+      )}
       <div className="mt-0.5 text-[10px] text-text-dim">{sub}</div>
     </div>
   );
@@ -284,10 +314,21 @@ function PriceChart({
 }: {
   history: ReadonlyArray<{ t: number; p: number }>;
 }) {
+  // SVG dimensions chosen so the chart looks crisp at typical
+  // mobile + desktop widths. The right gutter (RIGHT_PAD) leaves
+  // room for the y-axis label on the rightmost tick without
+  // crowding the line. The bottom gutter (BOTTOM_PAD) holds the
+  // x-axis date labels.
   const W = 800;
-  const H = 200;
-  const PAD = 4;
-  const path = useMemo(() => {
+  const H = 260;
+  const LEFT_PAD = 4;
+  const RIGHT_PAD = 4;
+  const TOP_PAD = 8;
+  const BOTTOM_PAD = 28;
+  const PLOT_W = W - LEFT_PAD - RIGHT_PAD;
+  const PLOT_H = H - TOP_PAD - BOTTOM_PAD;
+
+  const chartGeometry = useMemo(() => {
     if (history.length < 2) return null;
     const tMin = history[0].t;
     const tMax = history[history.length - 1].t;
@@ -299,16 +340,35 @@ function PriceChart({
       if (pt.p > pMax) pMax = pt.p;
     }
     const pSpan = Math.max(1e-9, pMax - pMin);
-    const x = (t: number) => PAD + ((t - tMin) / tSpan) * (W - 2 * PAD);
-    const y = (p: number) => H - PAD - ((p - pMin) / pSpan) * (H - 2 * PAD);
+    const x = (t: number) => LEFT_PAD + ((t - tMin) / tSpan) * PLOT_W;
+    const y = (p: number) =>
+      TOP_PAD + (1 - (p - pMin) / pSpan) * PLOT_H;
     let d = `M ${x(history[0].t).toFixed(1)} ${y(history[0].p).toFixed(1)}`;
     for (let i = 1; i < history.length; i++) {
       d += ` L ${x(history[i].t).toFixed(1)} ${y(history[i].p).toFixed(1)}`;
     }
-    return d;
-  }, [history]);
+    // Pick ~5 date tick positions evenly across the window. Date
+    // labels render at the bottom of the chart.
+    const TICK_COUNT = 5;
+    const tickTimes: number[] = [];
+    for (let i = 0; i < TICK_COUNT; i++) {
+      tickTimes.push(tMin + (i / (TICK_COUNT - 1)) * (tMax - tMin));
+    }
+    return { d, x, y, tMin, tMax, pMin, pMax, tickTimes };
+    // PLOT_W and PLOT_H are derived from module-level constants so
+    // they're stable across renders; lint wants them in the dep
+    // array anyway for completeness.
+  }, [history, PLOT_W, PLOT_H]);
 
-  if (!path) {
+  // Hover / touch tracking. When the pointer moves across the
+  // chart, find the history point with the closest timestamp and
+  // surface its date + price in an overlay. SVG coordinates need
+  // to map back to data, so we capture the container's bounding
+  // rect for the math.
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+
+  if (!chartGeometry) {
     return (
       <div className="rounded-md border border-border bg-bg-elevated px-3 py-6 text-center text-[11px] text-text-dim">
         Not enough data points to draw a chart.
@@ -316,17 +376,137 @@ function PriceChart({
     );
   }
 
+  const { d, x, y, tMin, tMax, tickTimes } = chartGeometry;
+
+  const handleMove = (clientX: number) => {
+    const el = containerRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    // Map the pointer's pixel X to the SVG's user-space X. The SVG
+    // uses preserveAspectRatio="none" + viewBox=W, so user-space X
+    // = pointer-rel-X × (W / rect.width).
+    const userX = ((clientX - rect.left) / rect.width) * W;
+    // Map user-space X back to a timestamp.
+    const fracX = Math.max(0, Math.min(1, (userX - LEFT_PAD) / PLOT_W));
+    const targetT = tMin + fracX * (tMax - tMin);
+    // Binary-search for closest history point.
+    let lo = 0;
+    let hi = history.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (history[mid].t < targetT) lo = mid + 1;
+      else hi = mid;
+    }
+    // Prefer the closer of (lo-1, lo).
+    if (lo > 0) {
+      const a = Math.abs(history[lo - 1].t - targetT);
+      const b = Math.abs(history[lo].t - targetT);
+      if (a < b) lo = lo - 1;
+    }
+    setHoverIdx(lo);
+  };
+
+  const clearHover = () => setHoverIdx(null);
+  const hoverPoint = hoverIdx != null ? history[hoverIdx] : null;
+  const hoverX = hoverPoint ? x(hoverPoint.t) : null;
+  const hoverY = hoverPoint ? y(hoverPoint.p) : null;
+
   return (
     <div className="rounded-md border border-border bg-bg-elevated p-2">
-      <svg
-        viewBox={`0 0 ${W} ${H}`}
-        className="h-48 w-full"
-        role="img"
-        aria-label="Price history chart"
-        preserveAspectRatio="none"
+      {hoverPoint && (
+        <div className="mb-1 flex items-baseline justify-between text-[11px]">
+          <span className="text-text-dim">
+            {new Date(hoverPoint.t).toLocaleDateString()}
+          </span>
+          <span className="num font-medium text-text">
+            {formatUSD(hoverPoint.p)}
+          </span>
+        </div>
+      )}
+      <div
+        ref={containerRef}
+        className="relative w-full select-none"
+        onMouseMove={(e) => handleMove(e.clientX)}
+        onMouseLeave={clearHover}
+        onTouchStart={(e) => {
+          if (e.touches[0]) handleMove(e.touches[0].clientX);
+        }}
+        onTouchMove={(e) => {
+          if (e.touches[0]) handleMove(e.touches[0].clientX);
+        }}
+        onTouchEnd={clearHover}
       >
-        <path d={path} fill="none" stroke="currentColor" strokeWidth="1.4" />
-      </svg>
+        <svg
+          viewBox={`0 0 ${W} ${H}`}
+          className="h-56 w-full"
+          role="img"
+          aria-label="Price history chart"
+          preserveAspectRatio="none"
+        >
+          {/* Plot line */}
+          <path d={d} fill="none" stroke="currentColor" strokeWidth="1.4" />
+          {/* X-axis date labels */}
+          {tickTimes.map((t, i) => {
+            const tx = x(t);
+            // Format compactly: "MMM YY" for windows > 1y, else
+            // "MMM D" for shorter ranges.
+            const spanYears =
+              (tMax - tMin) / (365.25 * 24 * 60 * 60 * 1000);
+            const date = new Date(t);
+            const label =
+              spanYears >= 1.5
+                ? date.toLocaleDateString("en-US", {
+                    month: "short",
+                    year: "2-digit",
+                  })
+                : date.toLocaleDateString("en-US", {
+                    month: "short",
+                    day: "numeric",
+                  });
+            // Anchor middle ticks centered, first tick at start,
+            // last tick at end so labels don't clip outside the
+            // plot area.
+            const anchor =
+              i === 0 ? "start" : i === tickTimes.length - 1 ? "end" : "middle";
+            return (
+              <text
+                key={i}
+                x={tx}
+                y={H - 8}
+                textAnchor={anchor}
+                fontSize="11"
+                fill="currentColor"
+                opacity="0.5"
+              >
+                {label}
+              </text>
+            );
+          })}
+          {/* Hover indicator: vertical guide line + filled point */}
+          {hoverX != null && hoverY != null && (
+            <>
+              <line
+                x1={hoverX}
+                x2={hoverX}
+                y1={TOP_PAD}
+                y2={H - BOTTOM_PAD}
+                stroke="currentColor"
+                strokeOpacity="0.4"
+                strokeDasharray="2 3"
+                strokeWidth="1"
+              />
+              <circle
+                cx={hoverX}
+                cy={hoverY}
+                r="3.5"
+                fill="currentColor"
+                stroke="white"
+                strokeWidth="1"
+              />
+            </>
+          )}
+        </svg>
+      </div>
     </div>
   );
 }
@@ -377,6 +557,7 @@ function parseTickerData(
 type Stats = {
   years: number;
   priceCAGR: number | null;
+  realPriceCAGR: number | null;
   totalReturnCAGR: number | null;
   realTotalReturnCAGR: number | null;
   cumulativeInflation: number | null;
@@ -415,13 +596,19 @@ function computeStats(data: TickerData): Stats {
       ? Math.pow(totalReturnMultiple, 1 / years) - 1
       : null;
 
-  // Real CAGR — divide the cumulative wealth multiple by the
+  // Real CAGRs — divide the cumulative wealth multiple by the
   // cumulative inflation factor over the same window, then
-  // annualize.
+  // annualize. We compute it for BOTH price-only and total-return
+  // so each stat card can show the inflation-adjusted variant
+  // directly beneath its nominal figure (per user request).
   const cumulativeInflation = inflationFactor(first.t, last.t);
   const realTotalReturnCAGR =
     totalReturnMultiple > 0 && cumulativeInflation != null && cumulativeInflation > 0
       ? Math.pow(totalReturnMultiple / cumulativeInflation, 1 / years) - 1
+      : null;
+  const realPriceCAGR =
+    priceMultiple > 0 && cumulativeInflation != null && cumulativeInflation > 0
+      ? Math.pow(priceMultiple / cumulativeInflation, 1 / years) - 1
       : null;
 
   // TTM dividend yield: sum dividends in the trailing 365 days,
@@ -440,6 +627,7 @@ function computeStats(data: TickerData): Stats {
   return {
     years,
     priceCAGR,
+    realPriceCAGR,
     totalReturnCAGR,
     realTotalReturnCAGR,
     cumulativeInflation,
