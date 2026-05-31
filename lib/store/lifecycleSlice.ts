@@ -263,8 +263,18 @@ export function createLifecycleSliceActions(
         subscriptionCheckedAt: s.subscriptionCheckedAt,
       })),
 
-    promoteToReal: () =>
-      set((s) => (s.mode === "real" ? {} : { mode: "real" })),
+    promoteToReal: () => {
+      // Skip the `set` entirely in the no-op case. Zustand's setter
+      // produces a FRESH state object reference even when the patch
+      // is `{}` (Object.assign returns a new object), which fires
+      // every subscriber listener with a shallow-equal-but-not-
+      // identical state. Harmless under the existing diff-check
+      // gates, but wasteful — and R7 now calls promoteToReal()
+      // before every snapshot write (Add / Save edit / Delete),
+      // amplifying the wasted dispatches. Audit R15.
+      if (get().mode === "real") return;
+      set(() => ({ mode: "real" }));
+    },
 
     resetToDemo: () => {
       void config.clearRealState();
