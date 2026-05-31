@@ -55,7 +55,80 @@ import type { TargetAllocation } from "@/lib/portfolio/targetAllocation";
  *   modification.
  */
 
-const MONTHS_DEFAULT = 60;
+/**
+ * Default snapshot horizon: 120 months (10 years). Long enough to
+ * showcase composition drift (members aged, accounts opened, BTC /
+ * leveraged ETFs hadn't been bought yet 10y ago, savings rate
+ * grew) AND interpolation behavior (the chart blends snapshot
+ * anchors with quote-driven historical prices — varying SHARES
+ * across snapshots is what exercises that path; pre-Frame-B the
+ * factory only varied valueUSD which collapsed the share dimension).
+ */
+const MONTHS_DEFAULT = 120;
+
+/**
+ * Default interval between snapshots: 6 months. 21 snapshots cover
+ * the 10y window cleanly (0, 6, 12, ..., 120 monthsAgo). Tighter
+ * intervals risk staleness if the share-accumulation curve is
+ * sampled too finely (each anchor introduces a small step), and
+ * wider intervals lose the "smooth interpolation between" feel.
+ */
+const INTERVAL_MONTHS_DEFAULT = 6;
+
+/**
+ * Per-ticker acquisition timing (months ago) for snapshots older
+ * than this value the holding is excluded entirely — modeling
+ * "the user hadn't bought this asset yet."
+ *
+ * Story:
+ *   - BTC: bought ~5 years ago (post-2020 crypto adoption).
+ *   - TQQQ / NTSX: bought ~3 years ago (post-COVID leveraged-ETF
+ *     popularization).
+ *   - AVUV: bought ~3 years ago (small-cap value factor became
+ *     accessible via cheap ETFs around then).
+ *   - QQQM: bought ~2 years ago (Invesco's cheap-share-class
+ *     substitute for QQQ).
+ *
+ * Tickers NOT in this map default to "always held within the
+ * window" (acquired >= MONTHS_DEFAULT months ago).
+ */
+const ACQUIRED_MONTHS_AGO: Record<string, number> = {
+  BTC: 60,
+  TQQQ: 36,
+  NTSX: 36,
+  AVUV: 36,
+  QQQM: 24,
+};
+
+/**
+ * Share-accumulation curve: fraction of TODAY's share count the
+ * user held at `monthsAgo`. Returns 0 when the holding hadn't been
+ * acquired yet — caller drops it from the snapshot's household.
+ *
+ * Curve shape (accelerating):
+ *   - Acquisition (elapsed = 0):  5% of today's shares
+ *   - Halfway through window:     ~32%
+ *   - Today (elapsed = 1):        100%
+ *
+ * The acceleration models a realistic savings trajectory: a
+ * younger investor at acquisition was just starting; contributions
+ * compounded as career income grew, with the bulk of share
+ * accumulation happening in the most recent years.
+ *
+ * Exported so tests can pin the curve at specific (monthsAgo,
+ * acquiredMonthsAgo) pairs.
+ */
+function shareAccumulationFactor(
+  monthsAgo: number,
+  acquiredMonthsAgo: number,
+): number {
+  if (monthsAgo > acquiredMonthsAgo) return 0;
+  if (monthsAgo === 0) return 1;
+  if (acquiredMonthsAgo === 0) return 1;
+  const elapsed = (acquiredMonthsAgo - monthsAgo) / acquiredMonthsAgo;
+  // (1 - x)^1.5 between 0 and 1; bounded into [0.05, 1].
+  return 0.05 + 0.95 * Math.pow(elapsed, 1.5);
+}
 
 /** Per-class annualized growth rate used to back-cast each holding. */
 const ANNUAL_GROWTH: Record<AssetClass, number> = {
@@ -186,31 +259,89 @@ function hashCls(cls: AssetClass): number {
  * across the timeline so per-position CAGR queries work).
  */
 function buildBackdatedHousehold(monthsAgo: number): Household {
-  const scale = (h: Holding): Holding => {
+  /**
+   * For each holding, return a backdated version OR `null` to
+   * signal "drop this holding from the snapshot" (pre-acquisition).
+   * Composing shares × price separately (rather than scaling
+   * valueUSD wholesale) is what enables the chart's interpolation
+   * to do meaningful work: `composeNetWorthAt(snap.household,
+   * quotes, t)` multiplies the snap's `shares` by quote-derived
+   * historical prices, so varying shares across snapshots produces
+   * a chart where each segment reflects "the composition you had
+   * then × the prices that were realized then" — which is the
+   * truthful answer, vs the legacy uniform-share approach that
+   * conflated growth-by-deposit and growth-by-price-appreciation
+   * into a single back-scaled valueUSD.
+   */
+  const scale = (h: Holding): Holding | null => {
     const cls = holdingClass(h);
-    const factor = classBackFactor(cls, monthsAgo);
-    // Defense in depth: if DEMO_HOUSEHOLD ever ships a NaN value
-    // (or a future test injects one to verify resilience), the
-    // multiplication would propagate NaN through householdNetWorth
-    // and then maybeRecordSnapshot's `<= 0` gate would skip it
-    // silently — invisible demo-history truncation. Floor to 0
-    // so the math degrades gracefully (per CLAUDE.md "no NaN
-    // poisoning of downstream accumulators").
-    const newValue = Number.isFinite(h.valueUSD)
-      ? h.valueUSD * factor
-      : 0;
-    // Shape-preserving back-scale: just update valueUSD. The
-    // returned holding keeps every other field (kind, geo, shares,
-    // etc) identical so downstream engines work without special-
-    // casing demo rows.
-    return { ...h, valueUSD: newValue };
+    const symbol = "symbol" in h ? (h as { symbol: string }).symbol : "";
+    const acquiredMa = ACQUIRED_MONTHS_AGO[symbol] ?? MONTHS_DEFAULT;
+    const sharesFactor = shareAccumulationFactor(monthsAgo, acquiredMa);
+
+    // Live-priceable kinds: vary shares AND back-project lastPriceUSD
+    // by the class CAGR (and drawdown noise) so valueUSD = shares ×
+    // price stays self-consistent at the snapshot level.
+    if (
+      h.kind === "equity" ||
+      h.kind === "bond" ||
+      h.kind === "commodity" ||
+      h.kind === "crypto"
+    ) {
+      if (sharesFactor === 0) return null; // pre-acquisition: drop
+      const priceFactor = classBackFactor(cls, monthsAgo);
+      const newShares = Number.isFinite(h.shares) ? h.shares * sharesFactor : 0;
+      const newPrice = Number.isFinite(h.lastPriceUSD)
+        ? h.lastPriceUSD * priceFactor
+        : 0;
+      const newValue = newShares * newPrice;
+      return {
+        ...h,
+        shares: newShares,
+        lastPriceUSD: newPrice,
+        valueUSD: newValue,
+      };
+    }
+
+    // Cash: scale by the share-accumulation curve (savings
+    // accumulated over time). No price dimension.
+    if (h.kind === "cash") {
+      const newValue = Number.isFinite(h.valueUSD)
+        ? h.valueUSD * sharesFactor
+        : 0;
+      return { ...h, valueUSD: newValue };
+    }
+
+    // Real estate / private stock / other: keep value constant.
+    // Real estate handling assumes the property was owned through
+    // the entire window (simplest demo story); modeling acquisition
+    // would require a "step up" in NW at the purchase moment and a
+    // matching mortgage liability appearance, which is its own
+    // feature. Private stock has discrete 409A jumps that don't
+    // fit a smooth CAGR curve, so we hold it flat across history.
+    return h;
   };
+
   return {
     ...DEMO_HOUSEHOLD,
-    accounts: DEMO_HOUSEHOLD.accounts.map((a) => ({
-      ...a,
-      holdings: a.holdings.map(scale),
-    })),
+    accounts: DEMO_HOUSEHOLD.accounts
+      .map((a) => ({
+        ...a,
+        holdings: a.holdings
+          .map(scale)
+          .filter((h): h is Holding => h !== null),
+      }))
+      // Drop accounts whose every holding was excluded (would render
+      // as a phantom $0 account row in SnapshotsManager / historical
+      // views). Keep cash-only accounts even at $0 — they're still
+      // a legitimate account that existed.
+      .filter(
+        (a) =>
+          a.holdings.length > 0 ||
+          DEMO_HOUSEHOLD.accounts.find((orig) => orig.id === a.id)?.holdings.every(
+            (h) => h.kind === "cash",
+          ),
+      ),
   };
 }
 
@@ -304,14 +435,17 @@ function backdatedAnnualIncome(monthsAgo: number): number {
 export function buildDemoSnapshots(
   now: number,
   months: number = MONTHS_DEFAULT,
+  intervalMonths: number = INTERVAL_MONTHS_DEFAULT,
 ): Snapshot[] {
-  // Guard against silly input (negative / zero months) — return
-  // an empty history rather than throwing.
-  if (months <= 0) return [];
+  // Guard against silly input (negative / zero months OR interval)
+  // — return an empty history rather than throwing.
+  if (months <= 0 || intervalMonths <= 0) return [];
   const out: Snapshot[] = [];
-  // i=0 → oldest (months-1 months ago); i=months-1 → newest (today).
-  for (let i = 0; i < months; i++) {
-    const monthsAgo = months - 1 - i;
+  // Emit snapshots at monthsAgo = months, months - intervalMonths,
+  // ..., intervalMonths, 0. The newest (monthsAgo=0) is "today";
+  // the oldest is `months` months ago. With months=120 and
+  // intervalMonths=6 that's 21 anchors evenly spread over a decade.
+  for (let monthsAgo = months; monthsAgo >= 0; monthsAgo -= intervalMonths) {
     const t = monthAnchor(now, monthsAgo);
     const household = buildBackdatedHousehold(monthsAgo);
     const netWorth = householdNetWorth(household);
@@ -347,6 +481,8 @@ export function buildDemoSnapshots(
 export const __testHooks = {
   classBackFactor,
   monthAnchor,
+  shareAccumulationFactor,
+  ACQUIRED_MONTHS_AGO,
 };
 
 // Re-export the date helper used by callers (HistoryTab).

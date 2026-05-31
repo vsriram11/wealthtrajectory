@@ -48,20 +48,27 @@ describe("snapshot lifecycle — end-to-end integration", () => {
       demoSnapshots,
     } = await freshModules();
     // Use the demo snapshot generator as the source of "realistic"
-    // data. 60 monthly snapshots × multiple asset classes.
+    // data. 61 monthly snapshots × multiple asset classes (the
+    // signature is `months=N, intervalMonths=1` → N+1 snapshots
+    // spanning monthsAgo = N down through 0 inclusive). Passing
+    // intervalMonths=1 explicitly so this test stays independent of
+    // the production default (6-month anchors). The class-series
+    // engine should handle any sampling cadence, so monthly is the
+    // most-stressful choice here.
     const now = Date.UTC(2026, 4, 15, 12);
-    const snaps = demoSnapshots.buildDemoSnapshots(now, 60);
+    const snaps = demoSnapshots.buildDemoSnapshots(now, 60, 1);
+    expect(snaps).toHaveLength(61);
     // Persist them all through the public write API.
     await persistence.replaceAllSnapshots(snaps);
     const loaded = await persistence.loadSnapshots();
-    expect(loaded).toHaveLength(60);
+    expect(loaded).toHaveLength(61);
     // The engine consumes them and produces per-class series.
     const buckets = historicalReturns.buildAssetClassSeries(loaded);
     expect(Object.keys(buckets).length).toBeGreaterThan(0);
     // Each bucket has one point per snapshot it appears in.
     for (const [, ser] of Object.entries(buckets)) {
       expect(ser!.length).toBeGreaterThan(0);
-      expect(ser!.length).toBeLessThanOrEqual(60);
+      expect(ser!.length).toBeLessThanOrEqual(61);
     }
     // Summary rows compute without throwing.
     const rows = historicalReturns.summarizeClassReturns(buckets);

@@ -5,9 +5,16 @@ import { holdingClass, householdNetWorth } from "./types";
 const NOW = Date.UTC(2026, 4, 29, 12); // 2026-05-29 noon UTC
 
 describe("buildDemoSnapshots", () => {
-  it("returns 60 snapshots by default, oldest first, newest last", () => {
+  it("returns 21 snapshots by default (10y window, 6-month interval), oldest first, newest last", () => {
+    // The default horizon was extended to 120 months and the
+    // interval set to 6 months, producing 21 anchors at monthsAgo
+    // = 120, 114, ..., 6, 0. The increase from the legacy 60
+    // monthly snapshots is the basis for the share-accumulation
+    // story (the chart's interpolation between snapshots benefits
+    // from anchors that vary BOTH shares and price; sampling
+    // monthly was too tight relative to the share-curve resolution).
     const snaps = buildDemoSnapshots(NOW);
-    expect(snaps).toHaveLength(60);
+    expect(snaps).toHaveLength(21);
     // Sorted ascending by t.
     for (let i = 1; i < snaps.length; i++) {
       expect(snaps[i].t).toBeGreaterThan(snaps[i - 1].t);
@@ -41,9 +48,10 @@ describe("buildDemoSnapshots", () => {
     expect(newest.t).toBe(NOW);
   });
 
-  it("oldest snapshot is 59 months before the newest (5-year window)", () => {
+  it("oldest snapshot is 120 months before the newest (10-year window)", () => {
     const snaps = buildDemoSnapshots(NOW);
-    expect(snaps[0].t).toBe(Date.UTC(2021, 5, 1, 12, 0, 0, 0)); // 2021-06-01 noon
+    // 2026-05-29 noon UTC minus 120 months = 2016-05 (first of month).
+    expect(snaps[0].t).toBe(Date.UTC(2016, 4, 1, 12, 0, 0, 0)); // 2016-05-01 noon
   });
 
   it("each snapshot carries a full household + appState (per-member views work historically)", () => {
@@ -99,23 +107,69 @@ describe("buildDemoSnapshots", () => {
     expect(oldestOwners).toEqual(newestOwners);
   });
 
-  it("preserves holding ids across the timeline (per-position CAGR queries work)", () => {
+  it("recent-acquisition tickers are excluded from snapshots older than their acquisition", () => {
+    // BTC has ACQUIRED_MONTHS_AGO = 60, so any snapshot older than
+    // that must NOT include BTC. The newest snapshot DOES include
+    // BTC. This is the inception-event story: the chart shows a
+    // step up in NW when the holding first enters the portfolio.
     const snaps = buildDemoSnapshots(NOW);
-    const idsFromSnap = (i: number) =>
-      snaps[i].household!.accounts.flatMap((a) =>
-        a.holdings.map((h) => h.id),
-      );
-    expect(idsFromSnap(0)).toEqual(idsFromSnap(snaps.length - 1));
+    const oldestSymbols = new Set(
+      snaps[0].household!.accounts.flatMap((a) =>
+        a.holdings.map((h) => ("symbol" in h ? h.symbol : "")),
+      ),
+    );
+    const newestSymbols = new Set(
+      snaps[snaps.length - 1].household!.accounts.flatMap((a) =>
+        a.holdings.map((h) => ("symbol" in h ? h.symbol : "")),
+      ),
+    );
+    expect(oldestSymbols.has("BTC")).toBe(false);
+    expect(newestSymbols.has("BTC")).toBe(true);
+    expect(oldestSymbols.has("TQQQ")).toBe(false);
+    expect(newestSymbols.has("TQQQ")).toBe(true);
+    // Always-held tickers (VTI / VOO) must be present in BOTH.
+    expect(oldestSymbols.has("VTI")).toBe(true);
+    expect(newestSymbols.has("VTI")).toBe(true);
   });
 
-  it("returns empty array for months <= 0 (degenerate input safety)", () => {
+  it("varies SHARES across snapshots — older snapshots have fewer shares of the same ticker", () => {
+    // The whole reason for the 10y / 6mo rebuild: snapshots should
+    // exercise the chart's interpolation by varying shares (not
+    // just valueUSD). Pin that the OLDEST snapshot has strictly
+    // fewer VTI shares than the NEWEST.
+    const snaps = buildDemoSnapshots(NOW);
+    const sharesOf = (snap: typeof snaps[number], symbol: string): number => {
+      for (const a of snap.household!.accounts) {
+        for (const h of a.holdings) {
+          if ("symbol" in h && h.symbol === symbol) {
+            return h.shares;
+          }
+        }
+      }
+      return 0;
+    };
+    const oldestVTI = sharesOf(snaps[0], "VTI");
+    const newestVTI = sharesOf(snaps[snaps.length - 1], "VTI");
+    expect(oldestVTI).toBeGreaterThan(0);
+    expect(newestVTI).toBeGreaterThan(oldestVTI);
+    // Share accumulation curve floors at 5% of today's shares,
+    // so the ratio should be roughly in [0.05, 0.5] at the oldest
+    // window edge.
+    expect(oldestVTI).toBeLessThan(newestVTI * 0.5);
+    expect(oldestVTI).toBeGreaterThan(newestVTI * 0.02);
+  });
+
+  it("returns empty array for months <= 0 OR intervalMonths <= 0 (degenerate input safety)", () => {
     expect(buildDemoSnapshots(NOW, 0)).toEqual([]);
     expect(buildDemoSnapshots(NOW, -5)).toEqual([]);
+    expect(buildDemoSnapshots(NOW, 60, 0)).toEqual([]);
+    expect(buildDemoSnapshots(NOW, 60, -1)).toEqual([]);
   });
 
-  it("respects a custom months parameter (12 months → 12 snapshots)", () => {
-    const snaps = buildDemoSnapshots(NOW, 12);
-    expect(snaps).toHaveLength(12);
+  it("respects custom months + intervalMonths (12 months / 3-month interval → 5 snapshots)", () => {
+    // monthsAgo emitted: 12, 9, 6, 3, 0 → 5 snapshots.
+    const snaps = buildDemoSnapshots(NOW, 12, 3);
+    expect(snaps).toHaveLength(5);
   });
 
   it("appState.targetAllocation drifts across the timeline (more aggressive in the past)", () => {
