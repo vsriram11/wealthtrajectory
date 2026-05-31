@@ -166,6 +166,16 @@ export type LifecycleSliceContext = LifecycleSliceState &
     googleSyncing: boolean;
     googleSyncError: string | null;
     googleLastSyncAt: number | null;
+    /**
+     * Layer 2 (Audit R5): included so lifecycle resets can clear
+     * the modal-backing flag. Without the explicit clear, a user
+     * clicking "Use mock data" while the InitialSyncConfirmModal is
+     * open would reset every other slice to demo BUT leave the
+     * modal mounted (rendering "Push current data to Drive?" over
+     * demo-seed state). Clicking Push would then surface a
+     * confusing "Household is still the demo seed" error.
+     */
+    pendingInitialSyncConfirm: boolean;
     user: GoogleProfile | null;
     subscription: "free" | "pro";
     subscriptionCheckedAt: number | null;
@@ -258,6 +268,13 @@ export function createLifecycleSliceActions(
         googleSyncing: false,
         googleSyncError: null,
         googleLastSyncAt: s.googleLastSyncAt,
+        // Audit R5 (Layer 1/2/3): clear the modal-backing flag on
+        // mode reset. Without this, a user with the modal open who
+        // clicks "Start Fresh" / a code path that calls
+        // switchToReal leaves the modal mounted asking to push the
+        // (now-blanked) household to Drive. The push would surface
+        // a strict-demo refusal but the modal's prompt is misleading.
+        pendingInitialSyncConfirm: false,
         user: s.user,
         subscription: s.subscription,
         subscriptionCheckedAt: s.subscriptionCheckedAt,
@@ -290,6 +307,12 @@ export function createLifecycleSliceActions(
         googleSyncing: false,
         googleSyncError: null,
         googleLastSyncAt: s.googleLastSyncAt,
+        // Audit R5 (Layer 1/2/3): clear the modal-backing flag on
+        // mode reset to demo. Same reasoning as switchToReal: the
+        // modal must not survive a lifecycle reset that no longer
+        // matches its prompt ("Push current data to Drive?" when
+        // the data is now the demo seed).
+        pendingInitialSyncConfirm: false,
         user: s.user,
         subscription: s.subscription,
         subscriptionCheckedAt: s.subscriptionCheckedAt,

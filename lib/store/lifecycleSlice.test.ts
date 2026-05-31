@@ -78,6 +78,9 @@ function makeFakeStore(seed: Partial<LifecycleSliceContext> = {}) {
     baselineHousehold: null,
     baselineAssumptions: null,
     editingSnapshotT: null,
+    // Layer 2 (Audit R5) — included so the context shape matches
+    // production and the explicit-clear assertions can read it.
+    pendingInitialSyncConfirm: false,
     ...seed,
   };
   return {
@@ -141,6 +144,43 @@ describe("switchToReal", () => {
     // Sync flags reset
     expect(s.state.googleSyncing).toBe(false);
     expect(s.state.googleSyncError).toBeNull();
+  });
+
+  // Audit R5 (Layer 1/2/3): pendingInitialSyncConfirm is the
+  // modal-backing flag. Lifecycle resets MUST clear it so the
+  // InitialSyncConfirmModal doesn't survive a transition that
+  // makes its prompt nonsensical (e.g., user clicks "Start
+  // Fresh" while the modal is open asking to push their current
+  // data — switchToReal blanks that data, the modal should not
+  // continue offering to push it).
+  it("clears pendingInitialSyncConfirm so the modal doesn't survive the reset", () => {
+    const s = makeFakeStore({
+      mode: "demo",
+      pendingInitialSyncConfirm: true,
+      user: { email: "a@b.com" } as never,
+    });
+    const a = createLifecycleSliceActions(s.set, s.get, config);
+    a.switchToReal();
+    expect(s.state.pendingInitialSyncConfirm).toBe(false);
+  });
+});
+
+describe("resetToDemo", () => {
+  // Symmetric to the switchToReal R5 test: resetToDemo must also
+  // clear pendingInitialSyncConfirm. A user clicking "Use mock
+  // data" from the header while the modal is open would otherwise
+  // get the demo seed underneath the modal — and clicking Push
+  // would surface a "Household is still the demo seed" error
+  // (after my Layer 3 strict-demo guard).
+  it("clears pendingInitialSyncConfirm so the modal doesn't survive resetToDemo", () => {
+    const s = makeFakeStore({
+      mode: "real",
+      pendingInitialSyncConfirm: true,
+      user: { email: "a@b.com" } as never,
+    });
+    const a = createLifecycleSliceActions(s.set, s.get, config);
+    a.resetToDemo();
+    expect(s.state.pendingInitialSyncConfirm).toBe(false);
   });
 });
 
