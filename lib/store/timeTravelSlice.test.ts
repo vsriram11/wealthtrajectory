@@ -201,6 +201,82 @@ describe("Time-travel slice — exitTimeTravelDiscard", () => {
     a.exitTimeTravelDiscard();
     expect(s.state.household.accounts[0]?.id).toBe(baselineFirstAccountId);
   });
+
+  it("reverts isManualPrice flag flipped during the session (user-reported bug fix)", () => {
+    // Scenario: user enters time-travel, sets a manual price for
+    // a stock whose historical price fetch failed. They exit
+    // (with or without save). The manual flag MUST NOT stick to
+    // the live state — otherwise the next live-refresh skips the
+    // holding and the live NW is stuck at the user's historical
+    // override.
+    const liveTrackedHolding = {
+      kind: "equity" as const,
+      id: "TQQQ_HOLDING",
+      symbol: "TQQQ",
+      shares: 100,
+      lastPriceUSD: 80,
+      lastPricedAt: 1_700_000_000_000,
+      isManualPrice: false, // CRITICAL: live in baseline
+      enteredAsShares: false,
+      acquiredAt: null,
+      valueUSD: 8_000,
+      expectedRealCAGR: 0.15,
+      leverage: 3,
+      styleBox: { LARGE_BLEND: 1 } as never,
+      geography: { US: 1, DEVELOPED: 0, EMERGING: 0 },
+    };
+    const baselineHousehold = {
+      id: "hh" as never,
+      members: [{ id: "m1", displayName: "Tester" } as never],
+      accounts: [
+        {
+          id: "a1" as never,
+          displayName: "Brokerage",
+          category: "BROKERAGE" as never,
+          ownerId: "m1" as never,
+          monthlyContributionUSD: 0,
+          holdings: [liveTrackedHolding],
+        },
+      ],
+      liabilities: [],
+    };
+    const s = makeFakeStore({
+      mode: "real",
+      household: baselineHousehold as never,
+    });
+    const a = createTimeTravelSliceActions(s.set);
+    a.enterTimeTravel("2025-12-30");
+    // Simulate the user manually setting a price during
+    // time-travel: replicate what setHoldingPrice would do on the
+    // store — flip the flag + change the price.
+    s.set(() => ({
+      household: {
+        ...s.state.household,
+        accounts: s.state.household.accounts.map((acct) => ({
+          ...acct,
+          holdings: acct.holdings.map((h) => ({
+            ...h,
+            isManualPrice: true,
+            lastPriceUSD: 52,
+            valueUSD: 100 * 52,
+          })) as never,
+        })),
+      } as never,
+    }));
+    // Pre-condition: in-session holding is now manual at $52.
+    const sessionHolding = s.state.household.accounts[0].holdings[0];
+    expect("isManualPrice" in sessionHolding && sessionHolding.isManualPrice).toBe(true);
+
+    // Exit-discard.
+    a.exitTimeTravelDiscard();
+
+    // Post-condition: the manual flag is reverted in live state,
+    // so the next live-refresh will pick the holding up again.
+    const liveHolding = s.state.household.accounts[0].holdings[0];
+    expect("isManualPrice" in liveHolding && liveHolding.isManualPrice).toBe(false);
+    // The price ALSO reverts via the baseline (baseline had $80).
+    expect("lastPriceUSD" in liveHolding && liveHolding.lastPriceUSD).toBe(80);
+  });
 });
 
 describe("Time-travel slice — recordTimeTravelPriceOutcome (manual-entry surfacing)", () => {

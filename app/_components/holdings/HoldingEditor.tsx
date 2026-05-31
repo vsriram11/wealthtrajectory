@@ -369,6 +369,39 @@ function EditorBody({ holding, onClose }: { holding: Holding; onClose: () => voi
         )}
         {isPricedHolding(holding) && holding.isManualPrice && (
           <div className="rounded-xl border border-border bg-bg-elevated px-4 py-3 text-[11px] text-text-muted">
+            {/* Prominent unstick affordance for live-priceable
+                holdings that got stuck on manual (often from a
+                prior time-travel session where the user typed a
+                historical price). Distinct from the small "Try
+                live tracking" hint below so it's impossible to
+                miss in the editor. Hidden during time-travel —
+                clicking it then would overwrite the user's
+                carefully-set historical price with the current
+                market price. */}
+            {isLivePriceable(holding) && !timeTravelActive && (
+              <div className="mb-3 flex items-start justify-between gap-2 rounded-lg border border-amber-300/40 bg-amber-300/10 px-2.5 py-2">
+                <div className="text-amber-300">
+                  <div className="font-semibold">
+                    ⚠ This holding is set to a manual price
+                  </div>
+                  <div className="mt-0.5 text-[10px] text-amber-300/80">
+                    Currently {formatUSD(holding.lastPriceUSD)} per
+                    share. The live market price might be very
+                    different. Resume live tracking to update
+                    automatically.
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={tryLive}
+                  disabled={refreshing}
+                  className="shrink-0 self-center rounded-md border border-amber-300/60 bg-amber-300/20 px-2.5 py-1 text-[11px] font-semibold text-amber-300 disabled:opacity-50 active:opacity-70"
+                  aria-label={`Resume live price tracking for ${holding.symbol} — overwrites the manual price with the current market price`}
+                >
+                  {refreshing ? "Switching…" : "Resume live"}
+                </button>
+              </div>
+            )}
             <div>
               {timeTravelActive ? (
                 <>
