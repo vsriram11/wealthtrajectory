@@ -16,17 +16,20 @@
 /**
  * 256 shards: each shard ends up around 15-30 tickers from a
  * ~4000-ticker universe (top 1000 ETFs + top 3000 stocks by
- * market cap). At ~17y daily history, each shard is ~1.3 MB raw
- * / ~300 KB gzipped — small enough that a typical user with
- * 20 holdings downloads ~20 × 300 KB ≈ 6 MB on first load
- * (cached forever in IDB after).
+ * market cap). At ~20y daily history (since Dec 2005), each
+ * shard is ~1.5 MB raw / ~350 KB gzipped — small enough that a
+ * typical user with 20 holdings downloads ~20 × 350 KB ≈ 7 MB
+ * on first load (cached forever in IDB after).
+ *
+ * Dividend + split event payloads add ~1-2 KB per ticker to
+ * each shard (small relative to the price series).
  *
  * Free-tier safety at 256 shards:
  *   - Writes: 256/refresh × 12 refreshes/year = 256/month. Well
  *     under the 2000/month Vercel Blob cap.
  *   - Reads (origin ops): 256 × ~20 regions per refresh ≈ 5,120/
  *     month. Under the 10k/month cap.
- *   - Blob origin transfer: 256 × 300 KB × 20 regions ≈ 1.5 GB/
+ *   - Blob origin transfer: 256 × 350 KB × 20 regions ≈ 1.8 GB/
  *     month. Under the 10 GB cap.
  *
  * Why 256 specifically (vs 32 or 128): with N tickers and S
@@ -60,9 +63,41 @@ export function shardForSymbol(symbol: string): number {
 
 export type ShardHistoryPoint = [number, number]; // [t_ms, adjclose]
 
+/**
+ * Cash dividend per share, in the ticker's reporting currency
+ * (USD for the current universe). Tuple-packed to keep the JSON
+ * compact: `[t_ms, amount]`.
+ */
+export type ShardDividend = [number, number]; // [t_ms, amount_per_share]
+
+/**
+ * Stock split. Tuple-packed `[t_ms, numerator, denominator]`.
+ * A 2-for-1 split is `[t, 2, 1]` (holders receive 2 new shares
+ * for every 1 old). Reverse splits use numerator < denominator.
+ *
+ * Consumers should be aware that Yahoo's `adjclose` time series
+ * already factors splits + dividends into prices; this raw
+ * event stream is for downstream features that want the original
+ * timing (e.g., "what was your share count after this split?").
+ */
+export type ShardSplit = [number, number, number]; // [t_ms, numerator, denominator]
+
 export type ShardPayload = {
   generatedAt: number;
   tickers: Record<string, ShardHistoryPoint[]>;
+  /**
+   * Optional: per-ticker dividend event stream since the shard's
+   * start date (Dec 2005 for the production cache). Older shards
+   * generated before dividend support landed will omit this key
+   * entirely — readers MUST treat missing as "no dividends known
+   * for any ticker in this shard", not as an error.
+   */
+  dividends?: Record<string, ShardDividend[]>;
+  /**
+   * Optional: per-ticker split event stream. Same back-compat
+   * rules as `dividends` — missing key on older shards is fine.
+   */
+  splits?: Record<string, ShardSplit[]>;
 };
 
 export type HistoryManifest = {

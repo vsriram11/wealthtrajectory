@@ -24,3 +24,6 @@ test-results/
 
 # Lighthouse CI local reports
 .lighthouseci/
+
+# refresh-history.ts resume checkpoint (~520 MB; never committed)
+tmp/
