@@ -11,7 +11,6 @@ import {
 } from "@/lib/sync/googleDrive";
 import { exportData } from "@/lib/persistence/dataIO";
 import { pullFromDrive, pushToDrive } from "@/lib/sync/cloudSync";
-import { isDemoHousehold } from "@/lib/types";
 import {
   generateSessionId,
   isWithinClaimGrace,
@@ -153,13 +152,24 @@ export function AuthHydrator() {
           // UX via the state pullFromDrive already set.
         } else if (
           s.mode === "real" &&
-          s.household.accounts.length > 0 &&
-          !isDemoHousehold(s.household)
+          s.household.accounts.length > 0
         ) {
-          // Existing local-only real data: push it up as the initial
-          // backup. The isDemoHousehold check is paranoia — if some
-          // future bug leaves us in real mode with the demo household,
-          // refuse to write demo data over the user's Drive backup.
+          // Existing local real-mode data: push it up as the initial
+          // backup. Under Frame B, `mode === "real"` is the
+          // authoritative signal that the user has data worth
+          // preserving — it covers both classic "started fresh in
+          // real mode" AND the auto-promoted-from-demo case (where
+          // household IDs may still look demo-ish but the user has
+          // made at least one edit to a persisted slice; that edit
+          // is what triggered promoteToReal).
+          //
+          // We DELIBERATELY removed the prior `!isDemoHousehold`
+          // gate here. Pre-Frame-B it was paranoia (mode==real and
+          // household==demo was impossible by construction). Post-
+          // Frame-B that combination IS the auto-promote outcome;
+          // gating on it routed those edits into the wipe branch
+          // below and destroyed user data on sign-in.
+          //
           // (No shrinkage guard needed here — this branch is only
           // reached when `existing` is null, i.e. Drive has no backup
           // yet. Routed through pushToDrive — its shrinkage guard
@@ -178,7 +188,7 @@ export function AuthHydrator() {
               lastSyncOutcome: "uploaded-local",
             });
           }
-        } else if (s.mode !== "real" || isDemoHousehold(s.household)) {
+        } else if (s.mode !== "real") {
           // Signed-in user starting fresh — drop them into empty real mode.
           s.switchToReal();
           // Round-2 audit fix: include snapshots even on the

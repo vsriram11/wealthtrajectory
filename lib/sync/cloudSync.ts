@@ -317,14 +317,21 @@ export async function pullFromDrive(
  * Pre-flight guards (in order):
  *   1. Signed in. Else "error".
  *   2. mode === "real". Else "error" (never upload demo data).
- *   3. Not isDemoHousehold (paranoia). Else "error".
- *   4. Encryption block clear. Else "blocked-by-encryption".
- *   5. Initial Drive pull confirmed (googleLastSyncAt is set),
+ *      Under Frame B, `mode === "real"` is the authoritative signal
+ *      that the user has data worth uploading — including the auto-
+ *      promoted-from-demo case where household IDs may still look
+ *      demo-ish but the user has made edits. The previous
+ *      `!isDemoHousehold` paranoia check was incompatible with
+ *      Frame B (it routed auto-promoted edits into an error and
+ *      stranded the user data local-only on initial sign-in) and
+ *      has been dropped — mode is the single source of truth.
+ *   3. Encryption block clear. Else "blocked-by-encryption".
+ *   4. Initial Drive pull confirmed (googleLastSyncAt is set),
  *      UNLESS `bypassInitialSyncGate` is true (used by the
  *      "uploaded-fresh" branch of AuthHydrator, which is creating
  *      the first backup for a brand-new user). Else
  *      "blocked-by-initial-sync".
- *   6. Shrinkage guard: download current Drive content, refuse
+ *   5. Shrinkage guard: download current Drive content, refuse
  *      upload if doing so would wipe a non-empty collection
  *      (scenarios / goals / budgetItems) down to empty. THROWS
  *      `DriveUnreadableError` propagate to fail-closed
@@ -349,8 +356,11 @@ export async function pushToDrive(
   const s = store.getState();
   if (!s.user) return "error";
   if (s.mode !== "real") return "error";
-  const { isDemoHousehold } = await import("@/lib/types");
-  if (isDemoHousehold(s.household)) return "error";
+  // Note: the previous `isDemoHousehold(s.household)` paranoia check
+  // has been removed under Frame B. `mode === "real"` is the single
+  // source of truth for "user-owned data worth uploading"; an
+  // auto-promoted demo session (household IDs still demo-shaped but
+  // user has made edits) is a legitimate push.
 
   if (s.googleSyncBlockedReason === "encrypted") {
     s.setGoogleSyncState({

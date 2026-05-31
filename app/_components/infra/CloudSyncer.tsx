@@ -11,7 +11,6 @@ import {
 } from "@/lib/sync/googleDrive";
 import { exportData } from "@/lib/persistence/dataIO";
 import { loadSnapshots } from "@/lib/persistence/persistence";
-import { isDemoHousehold } from "@/lib/types";
 import {
   DriveUnreadableError,
   checkShrinkageAgainstDrive,
@@ -33,6 +32,13 @@ import {
  * footgun. The "Use mock data" button is also hidden from the header
  * when signed in (defense in depth), but the gate lives here so
  * neither path can corrupt Drive.
+ *
+ * Under Frame B, `mode === "real"` is the single authoritative
+ * signal — including the auto-promoted-from-demo case (household
+ * IDs may still look demo-ish but the user has made real edits).
+ * The previous `isDemoHousehold` belt-and-suspenders check has
+ * been removed; it incorrectly rejected auto-promoted user data,
+ * leaving genuine edits stranded local-only on signed-in devices.
  */
 export function CloudSyncer() {
   useEffect(() => {
@@ -40,11 +46,10 @@ export function CloudSyncer() {
     const unsub = useAppStore.subscribe((state, prev) => {
       if (!state.googleConnected) return;
       if (state.mode !== "real") return;
-      // Belt-and-suspenders: never upload the demo household, even if
-      // some future bug leaves us in real mode with demo data.
-      // isDemoHousehold checks for the hardcoded demo IDs that no
-      // user-created household can produce.
-      if (isDemoHousehold(state.household)) return;
+      // (Frame B: prior `isDemoHousehold` belt-and-suspenders gate
+      // removed — see component-header comment. mode === "real" is
+      // now the single source of truth for "user data worth
+      // uploading.")
       // Time-travel session gate — same reasoning as the IDB gate
       // in PersistenceHydrator. The in-memory household represents
       // a HYPOTHETICAL past state the user is editing for the
@@ -155,12 +160,9 @@ export function CloudSyncer() {
           s.setGoogleSyncState({ googleUploadScheduled: false });
           return;
         }
-        // Re-check fingerprint at fire time too — state may have
-        // changed in the 3-second debounce window.
-        if (isDemoHousehold(s.household)) {
-          s.setGoogleSyncState({ googleUploadScheduled: false });
-          return;
-        }
+        // (Frame B: prior isDemoHousehold fire-time recheck removed;
+        // mode === "real" already gates upstream and is the single
+        // source of truth post-Frame-B.)
         // CRITICAL data-integrity gate: refuse to upload until the
         // initial pull from Drive has confirmed what's already there.
         // Without this, a new device with stale or empty IDB will
