@@ -24,14 +24,16 @@ describe("shardForSymbol — deterministic hash distribution", () => {
   });
 
   it("distributes a large universe across shards reasonably evenly", () => {
-    // Property check: with ~1000 random-ish tickers, no shard
-    // should be empty AND no shard should have >2x the average
-    // share. FNV-1a isn't crypto-strong but it's perfectly
-    // adequate for bucket assignment.
+    // Property check: with ~4000 random-ish tickers (the
+    // current production universe: top 1000 ETFs + top 3000
+    // stocks), no shard should be empty AND no shard should
+    // exceed a generous multiple of the average. FNV-1a isn't
+    // crypto-strong but it's perfectly adequate for bucket
+    // assignment at this N.
+    const N = 4000;
     const counts = new Array<number>(NUM_HISTORY_SHARDS).fill(0);
     const fakeTickers: string[] = [];
-    // Use real-looking ticker shapes: 2-5 letter combos.
-    for (let i = 0; i < 1000; i++) {
+    for (let i = 0; i < N; i++) {
       const len = 2 + (i % 4); // 2..5
       let t = "";
       let v = i * 1103515245 + 12345;
@@ -44,12 +46,12 @@ describe("shardForSymbol — deterministic hash distribution", () => {
     for (const t of fakeTickers) counts[shardForSymbol(t)]++;
     const min = Math.min(...counts);
     const max = Math.max(...counts);
-    const avg = 1000 / NUM_HISTORY_SHARDS;
+    const avg = N / NUM_HISTORY_SHARDS;
     expect(min).toBeGreaterThan(0);
-    // Allow up to 2.5x avg in the heaviest bucket (loose for
-    // small-N sampling — at 1000 / 32 = 31.25 avg, this allows
-    // up to 78. In practice FNV-1a gives us much closer to ±15%).
-    expect(max).toBeLessThanOrEqual(Math.ceil(avg * 2.5));
+    // Allow up to 3× avg in the heaviest bucket — at N/NUM = 15.6
+    // avg, this allows up to 47. In practice FNV-1a gives us
+    // ~±30% at this N (small-N sampling is wider than large).
+    expect(max).toBeLessThanOrEqual(Math.ceil(avg * 3));
   });
 
   it("pins specific symbols to specific shards (cross-runtime sanity check)", () => {

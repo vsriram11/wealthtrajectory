@@ -13,7 +13,34 @@
  * pathing may include account-scoped prefixes).
  */
 
-export const NUM_HISTORY_SHARDS = 32;
+/**
+ * 256 shards: each shard ends up around 15-30 tickers from a
+ * ~4000-ticker universe (top 1000 ETFs + top 3000 stocks by
+ * market cap). At ~17y daily history, each shard is ~1.3 MB raw
+ * / ~300 KB gzipped — small enough that a typical user with
+ * 20 holdings downloads ~20 × 300 KB ≈ 6 MB on first load
+ * (cached forever in IDB after).
+ *
+ * Free-tier safety at 256 shards:
+ *   - Writes: 256/refresh × 12 refreshes/year = 256/month. Well
+ *     under the 2000/month Vercel Blob cap.
+ *   - Reads (origin ops): 256 × ~20 regions per refresh ≈ 5,120/
+ *     month. Under the 10k/month cap.
+ *   - Blob origin transfer: 256 × 300 KB × 20 regions ≈ 1.5 GB/
+ *     month. Under the 10 GB cap.
+ *
+ * Why 256 specifically (vs 32 or 128): with N tickers and S
+ * shards, per-shard size scales as N/S. Larger N (universe
+ * expansion) forces larger S to keep per-shard size small. 256
+ * gives us headroom to grow the universe to ~5000 tickers
+ * without ballooning per-shard download.
+ *
+ * Changing this constant requires a coordinated deploy: the
+ * route's shardForSymbol() and the refresh script's bucketing
+ * MUST use the same value. Bump in the same PR + redeploy
+ * before re-running the refresh.
+ */
+export const NUM_HISTORY_SHARDS = 256;
 
 /**
  * FNV-1a 32-bit hash, modulo NUM_HISTORY_SHARDS. Identical math

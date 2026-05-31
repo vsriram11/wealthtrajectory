@@ -1,28 +1,33 @@
 #!/usr/bin/env node
 /**
- * Refresh historical price data for the ETF universe and upload to
- * Vercel Blob in 32 hash-sharded JSON files.
+ * Refresh historical price data for the universe (top ETFs + top
+ * stocks by market cap) and upload to Vercel Blob as hash-sharded
+ * JSON files. Shard count + hash live in `lib/data/historyShards.ts`
+ * — both the script's bucketing and the route's lookup MUST agree,
+ * so they share that single source of truth.
  *
- * Output: 32 files at `quote-history/shard-NN.json` (NN ∈ 00..31)
- * served from Vercel Blob's CDN. Each shard ~30-40 tickers ≈
- * 2-3 MB raw, ~500-800 KB gzipped. Client maps ticker → shard via
- * the same hash function in `lib/data/historyShards.ts`, fetches
- * only the shards covering its actual holdings.
+ * Output: NUM_HISTORY_SHARDS files at
+ * `quote-history/<generatedAt>/shard-NNN.json` served from Vercel
+ * Blob's CDN, plus a stable `quote-history/manifest.json` that
+ * indexes them. Each shard at the current 256-count is ~17 tickers
+ * × ~75 KB ≈ 1.3 MB raw / ~300 KB gzipped.
  *
- * Free-tier safety:
- *  - Writes: 32 per refresh × 12 refreshes/year = 384/yr → well
- *    under 2000/mo cap.
- *  - Reads (origin ops): only on CDN miss/refill, ~20 regions × 32
- *    shards = 640 ops per global cache refresh.
- *  - Transfer: ~25 MB origin per global refresh.
+ * Free-tier safety analysis lives in `lib/data/historyShards.ts`
+ * next to NUM_HISTORY_SHARDS.
  *
- * Run: `npx tsx scripts/refresh-history.ts` (sets `BLOB_READ_WRITE_TOKEN`
- * from env). GitHub Action wires this up monthly.
+ * Run: `npx tsx scripts/refresh-history.ts` (sets
+ * `BLOB_READ_WRITE_TOKEN` from env). GitHub Action wires this up
+ * monthly.
  */
 
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { put } from "@vercel/blob";
+
+import {
+  NUM_HISTORY_SHARDS,
+  shardForSymbol,
+} from "../lib/data/historyShards";
 
 const UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
@@ -65,7 +70,6 @@ async function getSessionCookie(): Promise<string | null> {
   }
 }
 
-const NUM_SHARDS = 32;
 // Yahoo's chart endpoint accepts period1/period2 (UNIX seconds)
 // for an exact start/end window — preferred over `range=10y`
 // which depends on the wall-clock time the cron runs.
@@ -74,29 +78,12 @@ const NUM_SHARDS = 32;
 // history. Tickers that didn't exist that far back (TQQQ started
 // 2010, BITO started 2021, etc.) simply have data from their
 // inception. Yahoo returns whatever's available within the window.
-//
-// Storage impact: 17y daily ≈ 4500 points × 1020 tickers stored
-// as compact [t,p] pairs ≈ 60MB raw, ~15MB gzipped. Well under
-// Vercel Blob's 1GB free-tier storage.
 const HISTORY_PERIOD1_SEC = Math.floor(
   new Date("2007-01-01T00:00:00Z").getTime() / 1000,
 );
 const HISTORY_INTERVAL = "1d";
 const FETCH_SPACING_MS = 200; // polite throttle, ~5 req/s
 const UNIVERSE_PATH = resolve(process.cwd(), "data", "etf-universe.json");
-
-/**
- * Deterministic shard hash. MUST match `lib/data/historyShards.ts`'s
- * `shardForSymbol`. Simple FNV-1a so JS + Node agree byte-for-byte.
- */
-function shardForSymbol(symbol: string): number {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < symbol.length; i++) {
-    h ^= symbol.charCodeAt(i);
-    h = Math.imul(h, 0x01000193) >>> 0;
-  }
-  return h % NUM_SHARDS;
-}
 
 type HistoryPoint = [number, number]; // [t_ms, price]
 type ShardPayload = Record<string, HistoryPoint[]>;
@@ -171,7 +158,7 @@ async function loadPriorShards(
     };
     if (!manifest.shards) return null;
     const prior: ShardPayload[] = Array.from(
-      { length: NUM_SHARDS },
+      { length: NUM_HISTORY_SHARDS },
       () => ({}),
     );
     for (const s of manifest.shards) {
@@ -222,7 +209,7 @@ async function main() {
   // tickers we fail to refetch this run keep their last-good data.
   const shards: ShardPayload[] = priorShards
     ? priorShards.map((s) => ({ ...s }))
-    : Array.from({ length: NUM_SHARDS }, () => ({}));
+    : Array.from({ length: NUM_HISTORY_SHARDS }, () => ({}));
   let refreshedCount = 0;
   let failedCount = 0;
   for (let i = 0; i < tickers.length; i++) {
@@ -268,12 +255,14 @@ async function main() {
   // of old + new shards.
   const generatedAt = Date.now();
   const versionPrefix = `quote-history/${generatedAt}`;
-  console.log(`Uploading ${NUM_SHARDS} shards under ${versionPrefix}/…`);
+  console.log(`Uploading ${NUM_HISTORY_SHARDS} shards under ${versionPrefix}/…`);
   const blobUrls: Array<{ shard: number; url: string; size: number }> = [];
-  for (let i = 0; i < NUM_SHARDS; i++) {
+  for (let i = 0; i < NUM_HISTORY_SHARDS; i++) {
     const payload = JSON.stringify({ generatedAt, tickers: shards[i] });
     const size = Buffer.byteLength(payload, "utf8");
-    const name = `${versionPrefix}/shard-${String(i).padStart(2, "0")}.json`;
+    // 3-digit zero-padding accommodates up to 999 shards;
+    // current cap is 256.
+    const name = `${versionPrefix}/shard-${String(i).padStart(3, "0")}.json`;
     const { url } = await put(name, payload, {
       access: "public",
       contentType: "application/json",
@@ -292,7 +281,7 @@ async function main() {
   // version OR the entire new version, never a mix.
   const manifest = {
     generatedAt,
-    numShards: NUM_SHARDS,
+    numShards: NUM_HISTORY_SHARDS,
     range: `period1=${HISTORY_PERIOD1_SEC} (${new Date(HISTORY_PERIOD1_SEC * 1000).toISOString().slice(0, 10)})`,
     interval: HISTORY_INTERVAL,
     shards: blobUrls,
