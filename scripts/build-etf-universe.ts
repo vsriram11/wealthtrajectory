@@ -60,6 +60,15 @@ const ALWAYS_INCLUDE = [
   "SCHF", "SCHG", "SCHH", "SCHM", "SCHO", "SCHP", "SCHQ", "SCHA", "SCHC", "SCHE",
   "SPY", "SVXY", "TLT", "TMF", "TQQQ", "UPRO", "URTY", "USD", "VEA", "VGT",
   "VHT", "VIG", "VOO", "VTI", "VTV", "VUG", "VWO", "VXUS",
+  // Commonly-requested leveraged / inverse ETFs that don't crack
+  // top-1000 by AUM but users hold them. User-reported: SPUU,
+  // UDOW failed price lookup. SPDN / SPLV / SOXL / SOXS / TECL /
+  // TECS / TNA / TZA are similar profile (small AUM but high
+  // user interest). USMV / EFAV are low-vol factor plays. SPYG /
+  // SPYV / SPYD are SPDR core complements.
+  "SPUU", "UDOW", "SDOW", "SPDN", "SPLV", "USMV", "EFAV",
+  "SOXL", "SOXS", "TECL", "TECS", "TNA", "TZA",
+  "SPYG", "SPYV", "SPYD",
 ];
 
 /** Common ticker normalization: uppercase + dot→dash (BRK.B → BRK-B). */
