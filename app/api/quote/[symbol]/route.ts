@@ -454,13 +454,37 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
     if (cacheTooStale) {
       staticCacheStatus = "shard_too_stale";
     } else {
+      // CURRENT PRICE FRESHENING.
+      //
+      // The static cache + trailing-splice gives us a 10y daily
+      // history ending at the most recent CLOSE. But the headline
+      // NW wants an INTRADAY price — the difference is the day's
+      // move so far, which the user notices immediately as
+      // "NW dropped/jumped on reload."
+      //
+      // Quickly try Finnhub for the freshest intraday quote. If
+      // it answers, override the trailing-derived currentPrice
+      // (which is yesterday's close). If Finnhub fails, fall
+      // back to whatever the static-cache hit gave us.
+      let currentPrice = hit.quote.currentPrice;
+      const finnhub = await tryFinnhub(symbol, "5y");
+      if (
+        finnhub.ok &&
+        finnhub.quote.currentPrice != null &&
+        finnhub.quote.currentPrice > 0
+      ) {
+        currentPrice = finnhub.quote.currentPrice;
+      }
+      const finalQuote: ParsedQuote = { ...hit.quote, currentPrice };
       // DON'T poison the LRU when trailing failed — currentPrice is
       // null in that case and the LRU fallback path serves it as
       // "lru-fallback" which would propagate the null indefinitely.
-      if (hit.trailingSpliced) lruSet(symbol, hit.quote);
+      if (hit.trailingSpliced || currentPrice != null) {
+        lruSet(symbol, finalQuote);
+      }
       return json(
         {
-          ...hit.quote,
+          ...finalQuote,
           cachedFromStatic: true,
           // Surfaces staleness to the client: how old is the shard
           // we served from? UI can warn if shardGeneratedAt is too
@@ -472,16 +496,14 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
         },
         200,
         {
-          // Vercel edge cache: serve repeat requests for the same
-          // symbol from the edge — collapsing thousands of function
-          // invocations into ~one per ticker per cache window.
+          // Edge cache duration depends on whether Finnhub
+          // succeeded — when the response carries an intraday
+          // price, we want it to expire faster so the next fetch
+          // picks up market movement; when it doesn't, longer is
+          // fine.
           //
-          // Trailing-spliced (fresh tail + current price): 5 min
-          // edge cache, 1 hour stale-while-revalidate. Trailing-
-          // failed (currentPrice null, history may be stale at the
-          // tail): 30 sec edge cache, 5 min stale-while-revalidate
-          // so we retry the trailing fetch sooner instead of
-          // burning a long window serving the null price.
+          // Trailing-spliced + intraday: 5 min edge cache.
+          // Trailing-failed (currentPrice fallback to null): 30s.
           "Cache-Control": hit.trailingSpliced
             ? "public, s-maxage=300, stale-while-revalidate=3600"
             : "public, s-maxage=30, stale-while-revalidate=300",
