@@ -199,6 +199,20 @@ function EditorBody({ holding, onClose }: { holding: Holding; onClose: () => voi
     }
   };
 
+  // "Resume live tracking" pending-confirmation state.
+  // Two-stage flow: tapping the affordance fetches the live price
+  // and opens a modal asking the user whether to preserve shares
+  // (default — appropriate for ETFs/stocks where you own a fixed
+  // share count) or preserve value (old behavior — appropriate
+  // for typed-dollar positions like manual crypto entries). They
+  // can also cancel.
+  const [pendingLive, setPendingLive] = useState<{
+    livePrice: number;
+    pricedAt: number;
+    preserveSharesValue: number;
+    preserveValueShares: number;
+  } | null>(null);
+
   const tryLive = async () => {
     if (!isLivePriceable(holding)) return;
     setRefreshing(true);
@@ -206,29 +220,65 @@ function EditorBody({ holding, onClose }: { holding: Holding; onClose: () => voi
     try {
       const { getQuote } = await import("@/lib/data/quotes");
       const q = await getQuote(holding.symbol);
+      let livePrice: number | null = null;
+      let pricedAt: number = Date.now();
       if (q && q.currentPrice > 0) {
-        convertToLive(holding.id, q.currentPrice, q.fetchedAt);
+        livePrice = q.currentPrice;
+        pricedAt = q.fetchedAt;
+      } else {
+        const { getPreset } = await import("@/lib/portfolio/presets");
+        const preset = getPreset(holding.symbol);
+        if (preset) {
+          livePrice = preset.referencePriceUSD;
+          pricedAt = Date.now();
+        }
+      }
+      if (livePrice == null) {
+        setConvertError(
+          `Couldn't fetch a live price for ${holding.symbol} and it's not in our preset registry. Stays on manual.`,
+        );
         return;
       }
-      const { getPreset } = await import("@/lib/portfolio/presets");
-      const preset = getPreset(holding.symbol);
-      if (preset) {
-        // Recognized ticker but Yahoo is down; use the registry reference
-        // price so the holding leaves manual mode. The next successful
-        // PriceRefresher run will update it to the live price.
-        convertToLive(holding.id, preset.referencePriceUSD, Date.now());
-        return;
-      }
-      setConvertError(
-        `Couldn't fetch a live price for ${holding.symbol} and it's not in our preset registry. Stays on manual.`,
-      );
+      // Compute BOTH outcomes upfront so the modal can show exact
+      // numbers under each option.
+      setPendingLive({
+        livePrice,
+        pricedAt,
+        preserveSharesValue: holding.shares * livePrice,
+        preserveValueShares:
+          livePrice > 0 ? holding.valueUSD / livePrice : holding.shares,
+      });
     } finally {
       setRefreshing(false);
     }
   };
 
+  const confirmLive = (mode: "preserveShares" | "preserveValue") => {
+    if (!pendingLive) return;
+    convertToLive(
+      holding.id,
+      pendingLive.livePrice,
+      pendingLive.pricedAt,
+      mode === "preserveValue" ? { preserveValue: true } : undefined,
+    );
+    setPendingLive(null);
+  };
+
   return (
     <div className="px-5 pt-3">
+      {pendingLive && isLivePriceable(holding) && (
+        <ResumeLiveConfirm
+          symbol={holding.symbol}
+          shares={holding.shares}
+          currentManualPrice={holding.lastPriceUSD}
+          currentValue={holding.valueUSD}
+          livePrice={pendingLive.livePrice}
+          preserveSharesValue={pendingLive.preserveSharesValue}
+          preserveValueShares={pendingLive.preserveValueShares}
+          onChoose={confirmLive}
+          onCancel={() => setPendingLive(null)}
+        />
+      )}
       <div className="mx-auto mb-3 h-1 w-10 rounded-full bg-border-strong" />
       <div className="flex items-center justify-between">
         <div>
@@ -760,6 +810,120 @@ function EditorBody({ holding, onClose }: { holding: Holding; onClose: () => voi
             </div>
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Confirmation modal for "Resume live tracking" on a manual-priced
+ * holding. Surfaces the trade-off explicitly so the user can pick
+ * the right outcome:
+ *  - PRESERVE SHARES (default): the user owns a specific share
+ *    count (typical for ETFs/stocks). Live price replaces the
+ *    manual price; value floats.
+ *  - PRESERVE VALUE (old behavior): the user thinks in dollars
+ *    (typical for crypto manual entries). Share count is
+ *    recomputed from value / livePrice.
+ *  - CANCEL: stay on the manual price.
+ *
+ * Shows the EXACT resulting numbers under each option so the
+ * user can verify before committing. User-reported MAJOR bug
+ * prompted this: silently recomputing shares destroyed a user's
+ * 38 shares of TQQQ.
+ */
+function ResumeLiveConfirm({
+  symbol,
+  shares,
+  currentManualPrice,
+  currentValue,
+  livePrice,
+  preserveSharesValue,
+  preserveValueShares,
+  onChoose,
+  onCancel,
+}: {
+  symbol: string;
+  shares: number;
+  currentManualPrice: number;
+  currentValue: number;
+  livePrice: number;
+  preserveSharesValue: number;
+  preserveValueShares: number;
+  onChoose: (mode: "preserveShares" | "preserveValue") => void;
+  onCancel: () => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCancel();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onCancel]);
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label={`Resume live tracking for ${symbol}`}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 px-4"
+      onClick={onCancel}
+    >
+      <div
+        className="w-full max-w-md rounded-2xl border border-border-strong bg-bg-surface p-5 shadow-xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="text-base font-semibold text-text">
+          Resume live tracking for {symbol}
+        </div>
+        <div className="mt-1 text-[11px] text-text-dim">
+          Current: {formatUSD(currentValue)} (
+          <span className="num">{shares.toFixed(4)}</span> shares ×{" "}
+          {formatUSD(currentManualPrice)} manual)
+          <br />
+          Live price: {formatUSD(livePrice)} per share
+        </div>
+        <div className="mt-4 flex flex-col gap-2">
+          <button
+            type="button"
+            onClick={() => onChoose("preserveShares")}
+            className="flex flex-col items-stretch rounded-xl border border-accent/60 bg-accent/10 px-3 py-2.5 text-left text-[11px] text-text active:opacity-70"
+          >
+            <span className="font-semibold text-accent">
+              Keep my shares (recommended)
+            </span>
+            <span className="mt-0.5 text-text-muted">
+              <span className="num">{shares.toFixed(4)}</span> shares ×{" "}
+              {formatUSD(livePrice)} ={" "}
+              <span className="font-semibold text-text">
+                {formatUSD(preserveSharesValue)}
+              </span>
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={() => onChoose("preserveValue")}
+            className="flex flex-col items-stretch rounded-xl border border-border-strong bg-bg-elevated px-3 py-2.5 text-left text-[11px] text-text active:opacity-70"
+          >
+            <span className="font-semibold text-text">
+              Keep my dollar value
+            </span>
+            <span className="mt-0.5 text-text-muted">
+              {formatUSD(currentValue)} ÷ {formatUSD(livePrice)} ={" "}
+              <span className="font-semibold text-text num">
+                {preserveValueShares.toFixed(4)}
+              </span>{" "}
+              shares
+            </span>
+          </button>
+          <button
+            type="button"
+            onClick={onCancel}
+            className="rounded-xl border border-border-strong bg-bg-surface px-3 py-2 text-[11px] font-medium text-text-muted active:opacity-70"
+          >
+            Cancel — stay on manual
+          </button>
+        </div>
       </div>
     </div>
   );

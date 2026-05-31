@@ -63,6 +63,17 @@ export type HoldingsActions = {
     holdingId: HoldingId,
     livePrice: number,
     pricedAt: number,
+    /**
+     * Default: preserve shares (correct for instruments where the
+     * user owns a specific share count — ETFs, stocks, bonds).
+     * `preserveValue: true` switches to the old behavior of
+     * recomputing shares from valueUSD / livePrice — appropriate
+     * for first-time conversion of a typed-dollar position (e.g.
+     * crypto manual entry where the user thinks in dollars, not
+     * units). Surfaced via the editor's "Resume live tracking"
+     * confirmation dialog.
+     */
+    opts?: { preserveValue?: boolean },
   ) => void;
   /**
    * Inverse of convertHoldingToLive: switch a live-priceable
@@ -194,18 +205,35 @@ export function createHoldingsActions(
     applyLivePrice: (symbol, priceUSD, pricedAt, mode) =>
       set((s) => applyLivePriceTo(s, symbol, priceUSD, pricedAt, mode)),
 
-    convertHoldingToLive: (id, livePrice, pricedAt) =>
+    convertHoldingToLive: (id, livePrice, pricedAt, opts) =>
       set((s) =>
         mapHolding(s, id, (h) => {
           if (!isLivePriceable(h)) return h;
           if (livePrice <= 0) return h;
-          // PRESERVE SHARES, not value. User-reported MAJOR bug:
-          // previously this recomputed `shares = value / livePrice`
-          // which destroyed the user's share count when they
-          // resumed live tracking from a manual price. For TQQQ
-          // owned at 100 shares × $52 manual = $5,200, switching
-          // to live ($84) used to give shares = $5,200/$84 = 61.9
-          // — silently dropped 38 shares.
+          if (opts?.preserveValue) {
+            // Old behavior: preserve the dollar value, recompute
+            // shares from value / livePrice. Appropriate for
+            // first-time conversion of a typed-dollar position
+            // (crypto manual entry, etc.) where the user thinks
+            // in dollars, not units.
+            const value = h.valueUSD;
+            return {
+              ...h,
+              shares: value / livePrice,
+              lastPriceUSD: livePrice,
+              lastPricedAt: pricedAt,
+              isManualPrice: false,
+              valueUSD: value,
+            };
+          }
+          // Default: PRESERVE SHARES. User-reported MAJOR bug —
+          // previously this always recomputed
+          // `shares = value / livePrice` which destroyed the
+          // user's share count when they resumed live tracking
+          // from a manual price. For TQQQ owned at 100 shares ×
+          // $52 manual = $5,200, switching to live ($84) used to
+          // give shares = $5,200/$84 = 61.9 — silently dropped
+          // 38 shares.
           //
           // The user owns a position MEASURED IN SHARES (for any
           // live-priceable instrument — ETFs, stocks, bonds).
