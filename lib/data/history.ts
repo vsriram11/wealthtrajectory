@@ -79,7 +79,15 @@ export function memberFilteredSnapshots(
   return out;
 }
 
-export type HistoryRange = "1M" | "3M" | "6M" | "1Y" | "YTD" | "5Y" | "ALL";
+export type HistoryRange =
+  | "1M"
+  | "3M"
+  | "6M"
+  | "1Y"
+  | "YTD"
+  | "5Y"
+  | "ALL"
+  | "CUSTOM";
 
 export const HISTORY_RANGE_LABELS: Record<HistoryRange, string> = {
   "1M": "1M",
@@ -89,6 +97,7 @@ export const HISTORY_RANGE_LABELS: Record<HistoryRange, string> = {
   YTD: "YTD",
   "5Y": "5Y",
   ALL: "All",
+  CUSTOM: "Custom",
 };
 
 export function rangeStartMs(range: HistoryRange, now = Date.now()): number {
@@ -113,6 +122,14 @@ export function rangeStartMs(range: HistoryRange, now = Date.now()): number {
       return d.getTime();
     case "ALL":
       return 0;
+    case "CUSTOM":
+      // Custom ranges supply bounds via reconstructHistory's
+      // `custom` parameter — this helper is only consulted as the
+      // initial guess (caller overrides). Return now as a no-op
+      // start so a CUSTOM range with no bounds set degenerates to
+      // a zero-length series rather than the Unix-epoch sweep
+      // that `case "ALL"` returns.
+      return now;
   }
 }
 
@@ -140,9 +157,20 @@ export function reconstructHistory(
   range: HistoryRange,
   now = Date.now(),
   snapshots: Snapshot[] = [],
+  /**
+   * Custom range bounds. Required when range === "CUSTOM"; ignored
+   * otherwise. Both are millisecond timestamps. The caller
+   * (HistoryView's date-picker chip) is responsible for ensuring
+   * `customStart < customEnd <= now`.
+   */
+  custom?: { start: number; end: number },
 ): HistoryPoint[] {
   let start = rangeStartMs(range, now);
-  if (range === "ALL") {
+  let effectiveNow = now;
+  if (range === "CUSTOM" && custom) {
+    start = custom.start;
+    effectiveNow = Math.min(custom.end, now);
+  } else if (range === "ALL") {
     // User-reported semantic: "All" should show real recorded
     // history, not CAGR-estimated back-projection. The
     // pre-snapshot region is just synthesized from each holding's
@@ -274,10 +302,10 @@ export function reconstructHistory(
     }
   }
 
-  const days = Math.max(2, Math.ceil((now - start) / MS_PER_DAY));
+  const days = Math.max(2, Math.ceil((effectiveNow - start) / MS_PER_DAY));
   const out: HistoryPoint[] = [];
   for (let i = 0; i <= days; i++) {
-    const t = start + (i * (now - start)) / days;
+    const t = start + (i * (effectiveNow - start)) / days;
     const compSnap = pickCompositionSnapshot(richSnapshots, t);
     const composition = compSnap?.household ?? household;
     const nw =
@@ -703,13 +731,27 @@ export function overlaySnapshots(
       if (hi.t === lo.t) {
         return { t: p.t, netWorthUSD: lo.netWorthUSD };
       }
-      // Strictly between two anchors: linear interpolation on the
-      // time axis. (lo.t < p.t < hi.t guaranteed by the search.)
-      const span = hi.t - lo.t;
-      const frac = (p.t - lo.t) / span;
-      const nw =
-        lo.netWorthUSD + (hi.netWorthUSD - lo.netWorthUSD) * frac;
-      return { t: p.t, netWorthUSD: nw };
+      // Strictly between two anchors: use the COMPOSE-BASED
+      // reconstructed value already in p.netWorthUSD. The
+      // previous linear-interp overwrote it with a straight line,
+      // throwing away all market movement between snapshots
+      // (user-reported #2). The reconstructed values come from
+      // composeNetWorthAt(snap.household, quotes, bucket.t) which
+      // applies actual historical prices on each bucket date —
+      // so the chart between anchors reflects real market
+      // movement of the snap's composition.
+      //
+      // Boundary continuity: by construction, the anchor at snap.t
+      // is `effectiveSnapNW(snap, quotes, snap.t)` which equals
+      // `composeNetWorthAt(snap.household, quotes, snap.t)`. The
+      // reconstructed value at the same t uses the same compose
+      // math, so the boundary is smooth without any extra
+      // correction. (For the live anchor at the right edge, the
+      // pin still wins via the `hi.t === lo.t` branch above; the
+      // adjacent reconstructed bucket may differ slightly because
+      // live uses Finnhub intraday while reconstruction uses
+      // Yahoo's last close — acceptable single-bucket residual.)
+      return p;
     });
   }
   return out;
