@@ -357,6 +357,64 @@ describe("buildDemoSnapshots", () => {
   });
 });
 
+describe("shareAccumulationFactor (internal — share ramp curve) — R10 audit boundary pin", () => {
+  const { shareAccumulationFactor } = __testHooks;
+
+  it("returns 1 at monthsAgo=0 (today's share count)", () => {
+    expect(shareAccumulationFactor(0, 60)).toBe(1);
+    expect(shareAccumulationFactor(0, 120)).toBe(1);
+    expect(shareAccumulationFactor(0, 24)).toBe(1);
+  });
+
+  it("returns 0.05 at monthsAgo == acquiredMonthsAgo (the inception floor)", () => {
+    // The docstring promises "5% at acquisition." Pin it at the
+    // boundary for all five acquisition timings used by the demo.
+    expect(shareAccumulationFactor(60, 60)).toBeCloseTo(0.05, 10);
+    expect(shareAccumulationFactor(36, 36)).toBeCloseTo(0.05, 10);
+    expect(shareAccumulationFactor(24, 24)).toBeCloseTo(0.05, 10);
+    expect(shareAccumulationFactor(120, 120)).toBeCloseTo(0.05, 10);
+  });
+
+  it("returns 0 (drop the holding) when monthsAgo > acquiredMonthsAgo", () => {
+    // BTC at monthsAgo=66 (pre-acquisition): 0. Caller drops it.
+    expect(shareAccumulationFactor(66, 60)).toBe(0);
+    expect(shareAccumulationFactor(72, 60)).toBe(0);
+    expect(shareAccumulationFactor(120, 60)).toBe(0);
+    expect(shareAccumulationFactor(25, 24)).toBe(0);
+  });
+
+  it("strictly increases as monthsAgo decreases (more shares closer to today)", () => {
+    // Sample the curve at the snapshot grid (6-month interval)
+    // for BTC's 60-month acquisition window.
+    const samples = [60, 54, 48, 42, 36, 30, 24, 18, 12, 6, 0].map((m) =>
+      shareAccumulationFactor(m, 60),
+    );
+    for (let i = 1; i < samples.length; i++) {
+      expect(samples[i]).toBeGreaterThan(samples[i - 1]);
+    }
+  });
+
+  it("acquiredMonthsAgo=0 (acquired today) returns 1 to avoid div-by-zero", () => {
+    // Defensive: a degenerate "acquired today" entry shouldn't
+    // crash the function. Returns 1 (today's full share count).
+    expect(shareAccumulationFactor(0, 0)).toBe(1);
+  });
+
+  it("produces finite, non-negative values across the full input grid", () => {
+    // Property-style pass: every (monthsAgo, acquiredMonthsAgo)
+    // pair the demo would feed should yield a finite factor in
+    // [0, 1].
+    for (let acq = 12; acq <= 120; acq += 6) {
+      for (let m = 0; m <= acq + 12; m++) {
+        const f = shareAccumulationFactor(m, acq);
+        expect(Number.isFinite(f)).toBe(true);
+        expect(f).toBeGreaterThanOrEqual(0);
+        expect(f).toBeLessThanOrEqual(1);
+      }
+    }
+  });
+});
+
 describe("classBackFactor (internal — drawdown + growth math)", () => {
   const { classBackFactor } = __testHooks;
 
