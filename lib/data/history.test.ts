@@ -1249,20 +1249,27 @@ describe("reconstructHistory — trailing-edge intraday cliff fix", () => {
   }
 
   it("smooths the trailing region toward live intraday when cached close lags", () => {
-    // Cached quote history ends at TWO_DAYS_AGO close = $100, but
-    // the holding's lastPriceUSD = $90 (today's intraday is 10%
-    // lower than the previous close — could happen on a sharp
-    // overnight drop). Pre-fix: yesterday's bucket would read the
-    // cached close ($100 × 100 shares = $10,000) and today's pin
-    // would read live ($90 × 100 = $9,000), producing a $1,000
-    // single-day cliff. Post-fix: yesterday's bucket also uses
-    // the live price ($9,000) → smooth transition to the pin.
+    // Real-world data flow: the API route returns quote.currentPrice
+    // = live intraday (from Finnhub) + history ending at the
+    // previous trading day's close. PriceRefresher writes that
+    // currentPrice into holding.lastPriceUSD. So in practice,
+    // quote.currentPrice ≈ holding.lastPriceUSD — both reflect live
+    // intraday. The CACHED HISTORY's last close ($100 here) is
+    // what's stale, not the holding/quote.
+    //
+    // Pre-fix: bucket past history end clamped to history.last.p
+    // = $100 cached close. Today's bucket pinned to live = $90.
+    // $1,000 cliff per share.
+    // Post-fix: prefer quote.currentPrice ($90 live intraday) over
+    // the clamped close. Trailing bucket = $9,000, no cliff.
     const household = tinyHH(90);
     const quotes: Record<string, Quote> = {
       VOO: {
         symbol: "VOO",
-        currentPrice: 100, // cached close, stale relative to lastPriceUSD
+        currentPrice: 90, // LIVE intraday (matches holding.lastPriceUSD)
         history: [
+          // Cache ends 2 days ago at $100 — overnight gap drop
+          // brought live intraday today down to $90.
           { t: T_TWO_DAYS_AGO - 86_400_000, p: 100 },
           { t: T_TWO_DAYS_AGO, p: 100 },
         ],
@@ -1274,18 +1281,10 @@ describe("reconstructHistory — trailing-edge intraday cliff fix", () => {
     };
     const out = reconstructHistory(household, quotes, "1Y", T_NOW, []);
     expect(out.length).toBeGreaterThan(2);
-    // The last few buckets (all AFTER the cached history end) must
-    // use the live intraday price, NOT the cached close. Compute the
-    // value the bucket would have at each price and confirm the
-    // trailing buckets land on the intraday side.
     const live = 100 * 90; // 9,000
     const cachedClose = 100 * 100; // 10,000
     const last = out[out.length - 1].netWorthUSD;
     const secondLast = out[out.length - 2].netWorthUSD;
-    // Without the fix: secondLast === cachedClose (10,000), last ===
-    // cachedClose (10,000) — and overlaySnapshots' live pin then
-    // adds the cliff via the right-edge pin to 9,000. With the fix,
-    // both buckets sit at the live value, eliminating the gap.
     expect(secondLast).toBeCloseTo(live, -1);
     expect(last).toBeCloseTo(live, -1);
     // Specifically: secondLast should NOT be the cached close.
@@ -1323,5 +1322,138 @@ describe("reconstructHistory — trailing-edge intraday cliff fix", () => {
     // The fix's behavior shouldn't bleed into the start-of-window
     // case — the first bucket must NOT be the live intraday value.
     expect(first).not.toBeCloseTo(11_000, -1);
+  });
+
+  it("uses quote.currentPrice (not h.lastPriceUSD) when iterating a snap with back-projected prices", () => {
+    // Demo scenario (real user-reported V-bottom): the chart
+    // picks a 6-month-old snapshot for buckets near the right
+    // edge. That snap's `lastPriceUSD` was back-projected
+    // (~0.95× today) when the snap was built. Pre-fix, the
+    // trailing-clamped buckets read snap.lastPriceUSD ($95)
+    // multiplied by snap.shares (0.93× of today), producing
+    // ~0.88× of live NW — a visible V drop right before the
+    // live pin.
+    //
+    // Quote.currentPrice ($100, the live intraday) is the
+    // universal source of truth regardless of which household
+    // is being iterated. Pin that the fix uses it.
+    const snapHousehold: Household = {
+      id: "snap-h",
+      members: [{ id: "m1", displayName: "Tester" } as never],
+      accounts: [
+        {
+          id: "a1",
+          ownerId: "m1",
+          displayName: "Brokerage",
+          category: "TAXABLE",
+          holdings: [
+            {
+              id: "h1",
+              kind: "equity",
+              symbol: "VOO",
+              shares: 93, // 0.93× of "today's" 100 shares
+              valueUSD: 93 * 95, // snap intrinsic: shares × snap.lastPriceUSD
+              lastPriceUSD: 95, // BACK-PROJECTED snap price
+              lastPricedAt: T_NOW,
+              currency: "USD",
+              expenseRatio: 0,
+              geography: { US: 1, DEVELOPED: 0, EMERGING: 0 },
+              style: {},
+              leverage: 1,
+              expectedRealCAGR: 0.08,
+              isManualPrice: false,
+              acquiredAt: null,
+            } as never,
+          ] as never,
+        } as never,
+      ],
+      liabilities: [],
+    };
+    const snap: Snapshot = {
+      t: T_NOW - 180 * 86_400_000, // 6 months ago
+      netWorthUSD: 93 * 95,
+      household: snapHousehold,
+      source: "auto",
+    };
+    // Build the live household from scratch (rather than spreading
+    // through the `as never`-typed snap household, which TS can't
+    // resolve). Same shape, different shares + lastPriceUSD.
+    const liveHH: Household = {
+      id: "snap-h",
+      members: [{ id: "m1", displayName: "Tester" } as never],
+      accounts: [
+        {
+          id: "a1",
+          ownerId: "m1",
+          displayName: "Brokerage",
+          category: "TAXABLE",
+          holdings: [
+            {
+              id: "h1",
+              kind: "equity",
+              symbol: "VOO",
+              shares: 100,
+              valueUSD: 100 * 100,
+              lastPriceUSD: 100,
+              lastPricedAt: T_NOW,
+              currency: "USD",
+              expenseRatio: 0,
+              geography: { US: 1, DEVELOPED: 0, EMERGING: 0 },
+              style: {},
+              leverage: 1,
+              expectedRealCAGR: 0.08,
+              isManualPrice: false,
+              acquiredAt: null,
+            } as never,
+          ] as never,
+        } as never,
+      ],
+      liabilities: [],
+    };
+    const quotes: Record<string, Quote> = {
+      VOO: {
+        symbol: "VOO",
+        currentPrice: 100, // LIVE intraday — the universal source
+        history: [
+          { t: T_NOW - 200 * 86_400_000, p: 90 },
+          // Cache ends well before today — trailing buckets
+          // will end-clamp.
+          { t: T_NOW - 10 * 86_400_000, p: 99 },
+        ],
+        fetchedAt: T_NOW,
+        currency: "USD",
+        name: null,
+        unavailable: false,
+      },
+    };
+    const reconstructed = reconstructHistory(liveHH, quotes, "1Y", T_NOW, [
+      snap,
+    ]);
+    // Pipe through overlaySnapshots like the home chart does, so
+    // the live pin lands at the right edge.
+    const live = 100 * 100; // $10,000
+    const out = overlaySnapshots(
+      reconstructed,
+      [snap],
+      live,
+      liveHH,
+      quotes,
+      T_NOW,
+    );
+
+    // For buckets between the 6mo-ago snap and the right edge
+    // that fall PAST the cached history end (last ~10 days),
+    // pickCompositionSnapshot returns the snap. Pre-fix: bucket
+    // value = 93 shares × $95 snap.lastPriceUSD = $8,835.
+    // Post-fix: 93 shares × $100 quote.currentPrice = $9,300.
+    // The right-edge bucket pins to live: 100 × $100 = $10,000.
+    const last = out[out.length - 1].netWorthUSD;
+    const secondLast = out[out.length - 2].netWorthUSD;
+    expect(last).toBeCloseTo(live, -1); // live pin
+    // secondLast should be ~$9,300 (post-fix), NOT ~$8,835
+    // (pre-fix snap.lastPriceUSD path). Pin a tight range so a
+    // regression to either side breaks the test.
+    expect(secondLast).toBeGreaterThan(9_200);
+    expect(secondLast).toBeLessThan(9_500);
   });
 });

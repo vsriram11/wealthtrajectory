@@ -528,15 +528,47 @@ function composeNetWorthAt(
         // live at the pin. Start-of-window clamps still use the
         // historical first close (the original fix above is intact
         // for the inception case).
+        //
+        // FOLLOW-UP user-reported (demo with 21 snapshots): the
+        // chart developed a V-shaped dip in the trailing 1-2 days
+        // — buckets past the cached history's end dropped to ~88%
+        // of live NW, then back UP to live at the right edge. Root
+        // cause: when iterating a SNAPSHOT's embedded household
+        // (because pickCompositionSnapshot picked a 6-month-old
+        // snap for trailing buckets), `h.lastPriceUSD` is the
+        // snap's BACK-PROJECTED price (e.g. 0.95× today), not the
+        // live intraday. Using `h.lastPriceUSD` for the trailing
+        // clamp then anchors those buckets at "0.93× shares ×
+        // 0.95× price" ≈ 0.88× live.
+        //
+        // The Quote object's `currentPrice` field, however, is
+        // universally the LIVE intraday price regardless of which
+        // household we're iterating (it comes from the shared
+        // quote fetch). Prefer it. Fall back to `h.lastPriceUSD`
+        // only when currentPrice is missing/invalid (legacy
+        // upstream paths that didn't populate it).
         if (
           detailed.clamped &&
           q &&
           q.history.length > 0 &&
-          t > q.history[q.history.length - 1].t &&
-          Number.isFinite(h.lastPriceUSD) &&
-          h.lastPriceUSD > 0
+          t > q.history[q.history.length - 1].t
         ) {
-          price = h.lastPriceUSD;
+          const liveIntraday =
+            typeof q.currentPrice === "number" &&
+            Number.isFinite(q.currentPrice) &&
+            q.currentPrice > 0
+              ? q.currentPrice
+              : null;
+          if (liveIntraday != null) {
+            price = liveIntraday;
+          } else if (
+            Number.isFinite(h.lastPriceUSD) &&
+            h.lastPriceUSD > 0
+          ) {
+            price = h.lastPriceUSD;
+          } else {
+            price = detailed.price;
+          }
         } else {
           price = detailed.price;
         }
