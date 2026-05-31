@@ -283,8 +283,16 @@ function hashCls(cls: AssetClass): number {
  * shape; each holding's valueUSD scaled by the per-class
  * back-factor. We do NOT change holding ids (they remain stable
  * across the timeline so per-position CAGR queries work).
+ *
+ * `horizon` (months) is the caller's requested snapshot window
+ * length. Non-mapped holdings (those without a per-ticker entry
+ * in `ACQUIRED_MONTHS_AGO`, and cash) use `horizon` as their
+ * effective acquisition horizon — without this they'd inherit the
+ * MONTHS_DEFAULT (120) constant, which made the 5%-at-acquisition
+ * curve only land for the production default and floored at ~39%
+ * of today for shorter (months=60) windows (R8 audit fix).
  */
-function buildBackdatedHousehold(monthsAgo: number): Household {
+function buildBackdatedHousehold(monthsAgo: number, horizon: number): Household {
   /**
    * For each holding, return a backdated version OR `null` to
    * signal "drop this holding from the snapshot" (pre-acquisition).
@@ -302,7 +310,13 @@ function buildBackdatedHousehold(monthsAgo: number): Household {
   const scale = (h: Holding): Holding | null => {
     const cls = holdingClass(h);
     const symbol = "symbol" in h ? (h as { symbol: string }).symbol : "";
-    const acquiredMa = ACQUIRED_MONTHS_AGO[symbol] ?? MONTHS_DEFAULT;
+    // R8 audit: non-mapped tickers (and cash) use the CALLER's
+    // `horizon` as their acquisition window rather than the
+    // hardcoded MONTHS_DEFAULT (120). Without this, callers
+    // passing a shorter `months` see the share-accumulation
+    // curve land mid-ramp at the oldest snapshot instead of at
+    // the documented 5% floor.
+    const acquiredMa = ACQUIRED_MONTHS_AGO[symbol] ?? horizon;
     const sharesFactor = shareAccumulationFactor(monthsAgo, acquiredMa);
 
     // Live-priceable kinds: vary shares AND back-project lastPriceUSD
@@ -509,7 +523,7 @@ export function buildDemoSnapshots(
   }
   for (const monthsAgo of monthsAgoList) {
     const t = monthAnchor(now, monthsAgo);
-    const household = buildBackdatedHousehold(monthsAgo);
+    const household = buildBackdatedHousehold(monthsAgo, months);
     const netWorth = householdNetWorth(household);
     const appState: SnapshotAppState = {
       // Assumptions + budget + income-stream SHAPE held constant

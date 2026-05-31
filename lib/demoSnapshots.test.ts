@@ -179,6 +179,39 @@ describe("buildDemoSnapshots", () => {
     }
   });
 
+  it("non-mapped holdings ramp to 5% at the OLDEST snapshot regardless of months parameter (R8 audit)", () => {
+    // R8 audit: the share-accumulation curve hardcoded
+    // `MONTHS_DEFAULT` (=120) as the "acquisition horizon" for any
+    // holding without an explicit ACQUIRED_MONTHS_AGO entry. With
+    // the default months=120 the curve happens to hit ~5% at the
+    // oldest anchor — but for a caller-specified shorter window
+    // (say months=60), it floored at ~39% of today instead of 5%.
+    // The function's docstring promises "ramps from 5% at
+    // acquisition to 100% today" — that contract should hold for
+    // any caller-specified `months`.
+    //
+    // Test: build a 60-month snapshot history and check that
+    // VTI (an always-held ticker) at the OLDEST snapshot has ~5%
+    // of today's shares — not ~39%.
+    const snaps60 = buildDemoSnapshots(NOW, 60, 6);
+    const sharesOf = (snap: typeof snaps60[number], symbol: string): number => {
+      for (const a of snap.household!.accounts) {
+        for (const h of a.holdings) {
+          if ("symbol" in h && h.symbol === symbol) {
+            return h.shares;
+          }
+        }
+      }
+      return 0;
+    };
+    const oldest60 = sharesOf(snaps60[0], "VTI");
+    const newest60 = sharesOf(snaps60[snaps60.length - 1], "VTI");
+    // Oldest is at monthsAgo=60 (i.e., the requested horizon edge);
+    // with the fix the curve hits its 5% floor there.
+    expect(oldest60 / newest60).toBeGreaterThan(0.04);
+    expect(oldest60 / newest60).toBeLessThan(0.07);
+  });
+
   it("varies SHARES across snapshots — older snapshots have fewer shares of the same ticker", () => {
     // The whole reason for the 10y / 6mo rebuild: snapshots should
     // exercise the chart's interpolation by varying shares (not
