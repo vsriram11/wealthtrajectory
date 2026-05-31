@@ -26,6 +26,22 @@ function sleep(ms: number) {
 export function PriceRefresher() {
   const household = useAppStore((s) => s.household);
   const applyLivePrice = useAppStore((s) => s.applyLivePrice);
+  // Subscribe to `mode` so lifecycle transitions (resetToDemo,
+  // switchToReal, promoteToReal, hydrateFromPersisted's mode-flip)
+  // force a re-fire of the refresh loop. Without this, resetToDemo
+  // (the "Use mock data" / "Tap to wipe local" path) replaced the
+  // household with DEMO_HOUSEHOLD — which has the SAME symbol+id
+  // set as before, so holdingsKey didn't change and the effect
+  // didn't re-fire. Live prices stayed pinned at preset reference
+  // prices ($520 for VOO) while the static cache held real 2026
+  // closes ($690+), producing the user-reported plateau-above-live
+  // cliff on the home History chart immediately after resetting.
+  //
+  // Including `mode` is safe vs the cascade concern in the
+  // holdingsKey comment: mode only flips on lifecycle transitions,
+  // never on individual price updates, so this never produces a
+  // self-cascade.
+  const mode = useAppStore((s) => s.mode);
   // Time-travel session gate (user-reported UX bug): while the
   // user is editing a backdated session, the live-quote refresh
   // was overwriting their manual price entries with CURRENT
@@ -116,7 +132,7 @@ export function PriceRefresher() {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [holdingsKey, applyLivePrice, timeTravelActive]);
+  }, [holdingsKey, applyLivePrice, timeTravelActive, mode]);
 
   // Track symbols already historically-applied this session so a
   // mid-session holdingsKey change (e.g. user adds a new holding)
