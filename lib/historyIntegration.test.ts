@@ -82,6 +82,52 @@ describe("snapshot lifecycle — end-to-end integration", () => {
     }
   });
 
+  it("production-default demo snapshots (120,6) round-trip and per-class engine handles missing acquisition tickers (R12 audit)", async () => {
+    // R12 audit pin: with the production defaults, the demo's
+    // oldest snapshot drops BTC + 4 leveraged ETFs (they were
+    // acquired more recently than 10y). buildAssetClassSeries
+    // uses the first ∩ last intersection rule, so the OUTPUT
+    // shape is:
+    //
+    //  - Crypto: NO series (BTC was the only crypto holding and
+    //    it's absent from the oldest snapshot).
+    //  - Equity / bond / commodity / cash / real_estate: present
+    //    via always-held tickers.
+    //
+    // This regression test pins that behavior so a future
+    // refactor (e.g. changing the intersection rule) makes the
+    // change VISIBLE rather than silently shifting demo output.
+    const {
+      persistence,
+      historicalReturns,
+      demoSnapshots,
+    } = await freshModules();
+    const now = Date.UTC(2026, 4, 15, 12);
+    const snaps = demoSnapshots.buildDemoSnapshots(now); // production defaults
+    expect(snaps).toHaveLength(21);
+    await persistence.replaceAllSnapshots(snaps);
+    const loaded = await persistence.loadSnapshots();
+    expect(loaded).toHaveLength(21);
+    const buckets = historicalReturns.buildAssetClassSeries(loaded);
+    // Crypto disappears because BTC (the only crypto holding)
+    // isn't in the oldest snapshot — the intersection rule
+    // excludes it. Documented trade-off; pinning so the contract
+    // is testable.
+    expect(buckets.crypto).toBeUndefined();
+    // Other classes still present because they have always-held
+    // tickers across the window.
+    expect(buckets.equity).toBeDefined();
+    expect(buckets.equity!.length).toBe(21);
+    expect(buckets.bond).toBeDefined();
+    expect(buckets.bond!.length).toBe(21);
+    expect(buckets.cash).toBeDefined();
+    expect(buckets.cash!.length).toBe(21);
+    // Summary handles the missing crypto cleanly.
+    const rows = historicalReturns.summarizeClassReturns(buckets);
+    expect(rows.find((r) => r.assetClass === "crypto")).toBeUndefined();
+    expect(rows.find((r) => r.assetClass === "equity")).toBeDefined();
+  });
+
   it("appState round-trips through write → loadSnapshots (no field stripping)", async () => {
     const { persistence } = await freshModules();
     const snap = {
