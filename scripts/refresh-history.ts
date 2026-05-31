@@ -74,26 +74,49 @@ async function getSessionCookie(): Promise<string | null> {
 // for an exact start/end window — preferred over `range=10y`
 // which depends on the wall-clock time the cron runs.
 //
-// Start at Jan 1 2007 to give the chart "All" view 17+ years of
-// history. Tickers that didn't exist that far back (TQQQ started
-// 2010, BITO started 2021, etc.) simply have data from their
-// inception. Yahoo returns whatever's available within the window.
+// Start at Dec 1 2005 to give the chart "All" view 20+ years of
+// history AND a full quarter of dividend data BEFORE 2006 begins
+// (most large-cap ETFs pay quarterly Q4 dividends in Dec — a
+// Jan 1 2007 cutoff would clip the 2006 Q4 distribution). Tickers
+// that didn't exist that far back (TQQQ started 2010, BITO 2021,
+// etc.) simply have data from their inception. Yahoo returns
+// whatever's available within the window.
 const HISTORY_PERIOD1_SEC = Math.floor(
-  new Date("2007-01-01T00:00:00Z").getTime() / 1000,
+  new Date("2005-12-01T00:00:00Z").getTime() / 1000,
 );
 const HISTORY_INTERVAL = "1d";
 const FETCH_SPACING_MS = 200; // polite throttle, ~5 req/s
 const UNIVERSE_PATH = resolve(process.cwd(), "data", "etf-universe.json");
 
 type HistoryPoint = [number, number]; // [t_ms, price]
-type ShardPayload = Record<string, HistoryPoint[]>;
+type DividendEvent = [number, number]; // [t_ms, amount_per_share]
+type SplitEvent = [number, number, number]; // [t_ms, numerator, denominator]
+
+type TickerShard = Record<string, HistoryPoint[]>;
+type DividendShard = Record<string, DividendEvent[]>;
+type SplitShard = Record<string, SplitEvent[]>;
+
+/**
+ * Bundled fetch result from a single Yahoo /v8/finance/chart call
+ * with `events=div,split` — prices AND corporate-action streams
+ * in one round-trip. A ticker with no dividend/split history
+ * (e.g., most leveraged ETFs) returns empty arrays, not null.
+ */
+type FetchedHistory = {
+  prices: HistoryPoint[];
+  dividends: DividendEvent[];
+  splits: SplitEvent[];
+};
 
 async function fetchHistory(
   symbol: string,
   attempt = 1,
-): Promise<HistoryPoint[] | null> {
+): Promise<FetchedHistory | null> {
   const period2 = Math.floor(Date.now() / 1000);
-  const url = `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?period1=${HISTORY_PERIOD1_SEC}&period2=${period2}&interval=${HISTORY_INTERVAL}`;
+  // `events=div,split` adds Yahoo's `events.dividends` +
+  // `events.splits` objects to the response alongside the
+  // existing price series. One call, three data streams.
+  const url = `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?period1=${HISTORY_PERIOD1_SEC}&period2=${period2}&interval=${HISTORY_INTERVAL}&events=div,split`;
   try {
     const cookie = await getSessionCookie();
     const headers = browserHeaders(cookie ? { Cookie: cookie } : undefined);
@@ -114,6 +137,20 @@ async function fetchHistory(
           indicators?: {
             adjclose?: Array<{ adjclose?: Array<number | null> }>;
           };
+          events?: {
+            dividends?: Record<
+              string,
+              { amount?: number; date?: number }
+            >;
+            splits?: Record<
+              string,
+              {
+                date?: number;
+                numerator?: number;
+                denominator?: number;
+              }
+            >;
+          };
         }>;
       };
     };
@@ -122,24 +159,86 @@ async function fetchHistory(
     const ts = result.timestamp ?? [];
     const closes = result.indicators?.adjclose?.[0]?.adjclose ?? [];
     if (ts.length === 0 || closes.length === 0) return null;
-    const out: HistoryPoint[] = [];
+    const prices: HistoryPoint[] = [];
     for (let i = 0; i < ts.length; i++) {
       const p = closes[i];
       if (typeof p === "number" && Number.isFinite(p) && p > 0) {
-        out.push([ts[i] * 1000, p]);
+        prices.push([ts[i] * 1000, p]);
       }
     }
-    return out.length > 0 ? out : null;
+    if (prices.length === 0) return null;
+
+    // Parse corporate-action events. Yahoo keys both maps by
+    // unix-second timestamp string; the inner objects also carry
+    // `date` (same value as the key) — we use `date` when present,
+    // fall back to the key. Drop anything non-finite / non-positive
+    // rather than poison the stream.
+    const dividends: DividendEvent[] = [];
+    const divMap = result.events?.dividends ?? {};
+    for (const [key, ev] of Object.entries(divMap)) {
+      const tsec = typeof ev.date === "number" ? ev.date : Number(key);
+      const amt = ev.amount;
+      if (
+        Number.isFinite(tsec) &&
+        tsec > 0 &&
+        typeof amt === "number" &&
+        Number.isFinite(amt) &&
+        amt > 0
+      ) {
+        dividends.push([tsec * 1000, amt]);
+      }
+    }
+    dividends.sort((a, b) => a[0] - b[0]);
+
+    const splits: SplitEvent[] = [];
+    const splitMap = result.events?.splits ?? {};
+    for (const [key, ev] of Object.entries(splitMap)) {
+      const tsec = typeof ev.date === "number" ? ev.date : Number(key);
+      const num = ev.numerator;
+      const den = ev.denominator;
+      if (
+        Number.isFinite(tsec) &&
+        tsec > 0 &&
+        typeof num === "number" &&
+        Number.isFinite(num) &&
+        num > 0 &&
+        typeof den === "number" &&
+        Number.isFinite(den) &&
+        den > 0
+      ) {
+        splits.push([tsec * 1000, num, den]);
+      }
+    }
+    splits.sort((a, b) => a[0] - b[0]);
+
+    return { prices, dividends, splits };
   } catch {
     return null;
   }
 }
 
 /**
+ * Composite prior-shard state: prices + dividends + splits, each
+ * already bucketed by shard index. Refresh merges per-stream so
+ * a Yahoo failure on this run doesn't drop prior corporate-action
+ * data either.
+ */
+type PriorShardState = {
+  tickers: TickerShard[];
+  dividends: DividendShard[];
+  splits: SplitShard[];
+};
+
+/**
  * Fetch the previously-published manifest + shards so we can merge
  * any tickers that fail to refetch this run. Without this, a
  * single Yahoo 429 silently DROPS a ticker from the published
  * shard until next month (allowOverwrite=true publishes wholesale).
+ *
+ * Reads three parallel streams per shard: `tickers` (prices),
+ * `dividends`, `splits`. Older shards generated before dividend
+ * support landed simply lack the latter two keys — we treat them
+ * as empty maps and let the current run populate them.
  *
  * The shard payload from `quote-history/manifest.json` is the
  * source of truth — but the well-known URL only resolves if a
@@ -148,7 +247,7 @@ async function fetchHistory(
  */
 async function loadPriorShards(
   blobBaseUrl: string,
-): Promise<ShardPayload[] | null> {
+): Promise<PriorShardState | null> {
   const url = `${blobBaseUrl}quote-history/manifest.json`;
   try {
     const res = await fetch(url, { cache: "no-store" });
@@ -157,19 +256,30 @@ async function loadPriorShards(
       shards?: Array<{ shard: number; url: string }>;
     };
     if (!manifest.shards) return null;
-    const prior: ShardPayload[] = Array.from(
-      { length: NUM_HISTORY_SHARDS },
-      () => ({}),
-    );
+    const prior: PriorShardState = {
+      tickers: Array.from({ length: NUM_HISTORY_SHARDS }, () => ({})),
+      dividends: Array.from({ length: NUM_HISTORY_SHARDS }, () => ({})),
+      splits: Array.from({ length: NUM_HISTORY_SHARDS }, () => ({})),
+    };
     for (const s of manifest.shards) {
       try {
         const r = await fetch(s.url, { cache: "no-store" });
         if (!r.ok) continue;
         const payload = (await r.json()) as {
-          tickers?: ShardPayload;
+          tickers?: TickerShard;
+          dividends?: DividendShard;
+          splits?: SplitShard;
         };
         if (payload.tickers && typeof payload.tickers === "object") {
-          prior[s.shard] = payload.tickers;
+          prior.tickers[s.shard] = payload.tickers;
+        }
+        // Optional keys — older shards (pre-dividend-support) won't
+        // have them. Defaulting to {} keeps backward compat.
+        if (payload.dividends && typeof payload.dividends === "object") {
+          prior.dividends[s.shard] = payload.dividends;
+        }
+        if (payload.splits && typeof payload.splits === "object") {
+          prior.splits[s.shard] = payload.splits;
         }
       } catch {
         // Skip; this shard contributes no prior data.
@@ -193,7 +303,9 @@ async function loadPriorShards(
  * an occasional refresh than to corrupt the cache.
  */
 function validateShards(
-  shards: ShardPayload[],
+  shards: TickerShard[],
+  dividendShards: DividendShard[],
+  splitShards: SplitShard[],
   priorTickerCount: number,
 ): { fatal: string[]; warnings: string[]; summary: string } {
   const fatal: string[] = [];
@@ -220,6 +332,58 @@ function validateShards(
         }
       }
     }
+  }
+
+  // Corporate-action shape check: dividend events must be
+  // [t_ms, amount_per_share] with positive finite values; split
+  // events must be [t_ms, num, den] with positive finite ratios.
+  // These can't be FATAL on "low count" because most ETFs have no
+  // splits in 20y and many leveraged products don't pay dividends
+  // — but malformed events would later crash the consumer code,
+  // so a single bad event aborts.
+  let totalDividendEvents = 0;
+  let totalSplitEvents = 0;
+  let badEvents = 0;
+  for (const shard of dividendShards) {
+    for (const events of Object.values(shard)) {
+      totalDividendEvents += events.length;
+      for (const ev of events) {
+        if (
+          !Array.isArray(ev) ||
+          ev.length !== 2 ||
+          !Number.isFinite(ev[0]) ||
+          ev[0] <= 0 ||
+          !Number.isFinite(ev[1]) ||
+          ev[1] <= 0
+        ) {
+          badEvents++;
+        }
+      }
+    }
+  }
+  for (const shard of splitShards) {
+    for (const events of Object.values(shard)) {
+      totalSplitEvents += events.length;
+      for (const ev of events) {
+        if (
+          !Array.isArray(ev) ||
+          ev.length !== 3 ||
+          !Number.isFinite(ev[0]) ||
+          ev[0] <= 0 ||
+          !Number.isFinite(ev[1]) ||
+          ev[1] <= 0 ||
+          !Number.isFinite(ev[2]) ||
+          ev[2] <= 0
+        ) {
+          badEvents++;
+        }
+      }
+    }
+  }
+  if (badEvents > 0) {
+    fatal.push(
+      `${badEvents} dividend/split events are malformed — refusing to publish`,
+    );
   }
 
   // FATAL: catastrophic fetch loss. If we have far fewer tickers
@@ -263,7 +427,7 @@ function validateShards(
   return {
     fatal,
     warnings,
-    summary: `${total} tickers, ${totalPoints.toLocaleString()} data points, ${pathologicallyShort} sparse, ${nonFiniteValues} bad`,
+    summary: `${total} tickers, ${totalPoints.toLocaleString()} price points, ${totalDividendEvents.toLocaleString()} dividends, ${totalSplitEvents.toLocaleString()} splits, ${pathologicallyShort} sparse, ${nonFiniteValues + badEvents} bad`,
   };
 }
 
@@ -274,36 +438,58 @@ async function main() {
   console.log(`Universe: ${tickers.length} tickers`);
 
   // Stage 2: prior-shard fetch (so we can merge tickers that fail
-  // to refetch this run instead of dropping them wholesale).
+  // to refetch this run instead of dropping them wholesale). Loads
+  // prices + dividends + splits in parallel — each stream merges
+  // independently.
   const blobBaseUrl = process.env.NEXT_PUBLIC_QUOTE_HISTORY_BLOB_BASE;
-  let priorShards: ShardPayload[] | null = null;
+  let priorState: PriorShardState | null = null;
   if (blobBaseUrl) {
     console.log(`Loading prior shards from ${blobBaseUrl}…`);
-    priorShards = await loadPriorShards(blobBaseUrl);
-    if (priorShards) {
-      const priorCount = priorShards.reduce(
+    priorState = await loadPriorShards(blobBaseUrl);
+    if (priorState) {
+      const priorCount = priorState.tickers.reduce(
         (s, sh) => s + Object.keys(sh).length,
         0,
       );
-      console.log(`  → ${priorCount} prior tickers loaded`);
+      const priorDivCount = priorState.dividends.reduce(
+        (s, sh) => s + Object.keys(sh).length,
+        0,
+      );
+      console.log(
+        `  → ${priorCount} prior tickers loaded (${priorDivCount} with prior dividend data)`,
+      );
     } else {
       console.log(`  → no prior manifest (first run, or fetch failed)`);
     }
   }
 
   // Stage 3: fetch + bucket by shard. Start from prior contents so
-  // tickers we fail to refetch this run keep their last-good data.
-  const shards: ShardPayload[] = priorShards
-    ? priorShards.map((s) => ({ ...s }))
+  // tickers we fail to refetch this run keep their last-good data
+  // (prices AND corporate-action streams).
+  const shards: TickerShard[] = priorState
+    ? priorState.tickers.map((s) => ({ ...s }))
+    : Array.from({ length: NUM_HISTORY_SHARDS }, () => ({}));
+  const dividendShards: DividendShard[] = priorState
+    ? priorState.dividends.map((s) => ({ ...s }))
+    : Array.from({ length: NUM_HISTORY_SHARDS }, () => ({}));
+  const splitShards: SplitShard[] = priorState
+    ? priorState.splits.map((s) => ({ ...s }))
     : Array.from({ length: NUM_HISTORY_SHARDS }, () => ({}));
   let refreshedCount = 0;
   let failedCount = 0;
   for (let i = 0; i < tickers.length; i++) {
     const t = tickers[i];
     const shardIdx = shardForSymbol(t);
-    const history = await fetchHistory(t);
-    if (history) {
-      shards[shardIdx][t] = history;
+    const fetched = await fetchHistory(t);
+    if (fetched) {
+      shards[shardIdx][t] = fetched.prices;
+      // Always replace dividend/split streams (don't try to merge
+      // incrementally): the full window is refetched each run so
+      // the freshly-parsed list is canonical for the [period1, now]
+      // range. Empty arrays are still meaningful — they say "we
+      // checked and this ticker has no dividends/splits."
+      dividendShards[shardIdx][t] = fetched.dividends;
+      splitShards[shardIdx][t] = fetched.splits;
       refreshedCount++;
     } else {
       // Keep prior data for this ticker if we have it; only counts
@@ -346,10 +532,15 @@ async function main() {
   // prior manifest stays live; users continue getting the
   // last-good cache. On soft warnings: log + proceed (the new
   // data is mostly good, log lets the operator notice).
-  const priorTickerCount = priorShards
-    ? priorShards.reduce((s, sh) => s + Object.keys(sh).length, 0)
+  const priorTickerCount = priorState
+    ? priorState.tickers.reduce((s, sh) => s + Object.keys(sh).length, 0)
     : 0;
-  const validation = validateShards(shards, priorTickerCount);
+  const validation = validateShards(
+    shards,
+    dividendShards,
+    splitShards,
+    priorTickerCount,
+  );
   if (validation.fatal.length > 0) {
     console.error("FATAL pre-upload validation failures:");
     for (const f of validation.fatal) console.error(`  - ${f}`);
@@ -385,7 +576,20 @@ async function main() {
   console.log(`Uploading ${NUM_HISTORY_SHARDS} shards under ${versionPrefix}/…`);
   const blobUrls: Array<{ shard: number; url: string; size: number }> = [];
   for (let i = 0; i < NUM_HISTORY_SHARDS; i++) {
-    const payload = JSON.stringify({ generatedAt, tickers: shards[i] });
+    // Shard payload shape — IMPORTANT for back-compat:
+    //   - `tickers` (required, unchanged shape) — price series.
+    //     The currently-deployed route reads ONLY this field, so
+    //     adding new top-level keys is invisible to it.
+    //   - `dividends` / `splits` (optional) — corporate-action
+    //     streams. Older code ignores; newer code reads.
+    // We always write the new keys (even if both maps are empty
+    // for a shard) so the published artifact is self-describing.
+    const payload = JSON.stringify({
+      generatedAt,
+      tickers: shards[i],
+      dividends: dividendShards[i],
+      splits: splitShards[i],
+    });
     const size = Buffer.byteLength(payload, "utf8");
     // 3-digit zero-padding accommodates up to 999 shards;
     // current cap is 256.

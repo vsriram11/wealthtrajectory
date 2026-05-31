@@ -133,12 +133,21 @@ export async function getQuote(
     if (isUsableQuote(fresh)) {
       memCache.set(symbol, fresh);
       void writeCache(symbol, fresh);
+      return fresh;
     }
-    // Return the fresh quote even when it's unavailable — the
-    // caller (PriceRefresher historical-mode loop) needs the
-    // `error` field to surface a diagnostic in the time-travel
-    // banner. Previously this fell through to `return null` and
-    // the error was lost.
+    // Fresh fetch came back UNAVAILABLE (Yahoo 429, Finnhub down,
+    // etc.). Prefer the IDB-cached quote if we have one — even a
+    // stale baseline is more useful than refusing outright,
+    // especially for time-travel mode where the historical prices
+    // we need are already in the cached payload. Without this
+    // fallback, a transient upstream blip turns popular tickers
+    // like TQQQ/VOO/VTI into "Symbols failed" banners despite
+    // their full history sitting in IDB.
+    //
+    // Only when both fresh AND cached have no usable data do we
+    // hand back the unavailable response so PriceRefresher can
+    // surface its diagnostic message.
+    if (cached) return cached;
     return fresh;
   }
   if (cached) return cached;

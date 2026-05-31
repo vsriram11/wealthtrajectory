@@ -1,18 +1,38 @@
 // @vitest-environment jsdom
 import { describe, expect, it, beforeEach, vi } from "vitest";
 
-// Mock dexie so the module doesn't try to open IndexedDB. We're only
-// exercising the in-memory cache + fetchFresh path here.
+// Hoisted holder so individual tests can simulate prior IDB-cached
+// quotes by setting `dexieRowHolder.row` BEFORE the dynamic import
+// of @/lib/data/quotes. Default `undefined` mimics a fresh user
+// with no prior cache.
+const dexieRowHolder = vi.hoisted(() => ({
+  row: undefined as { quote: unknown } | undefined,
+}));
+
+// Mock dexie so the module doesn't try to open IndexedDB. The
+// `get` impl reads from the hoisted holder so tests can swap in
+// fake cached rows.
+//
+// IMPORTANT: real Dexie attaches table accessors (e.g. `db.quotes`)
+// via the `stores({...})` call rather than as plain class fields.
+// We mirror that here because the QuoteDB class in quotes.ts has
+// `quotes!: Table<...>` — under TS's `useDefineForClassFields`
+// semantics that compiles to `Object.defineProperty(this, 'quotes',
+// { value: undefined })`, which would shadow any class-field
+// initializer in this mock. Setting tables in `stores()` runs AFTER
+// the subclass's field init, so it sticks.
 vi.mock("dexie", () => {
   class FakeDexie {
-    quotes = {
-      get: async () => undefined,
-      put: async () => {},
-    };
     version() {
       return this;
     }
-    stores() {
+    stores(schema: Record<string, string>) {
+      for (const name of Object.keys(schema)) {
+        (this as unknown as Record<string, unknown>)[name] = {
+          get: async (_symbol: string) => dexieRowHolder.row,
+          put: async () => {},
+        };
+      }
       return this;
     }
     constructor(_: string) {}
@@ -23,6 +43,9 @@ vi.mock("dexie", () => {
 const fetchMock = vi.fn();
 beforeEach(() => {
   fetchMock.mockReset();
+  // Reset the per-test IDB row override so leaks across tests
+  // don't surprise the next one.
+  dexieRowHolder.row = undefined;
   // jsdom doesn't provide fetch; install ours.
   (globalThis as unknown as { fetch: typeof fetch }).fetch =
     fetchMock as unknown as typeof fetch;
@@ -125,6 +148,90 @@ describe("getQuote — does not poison the cache with zero / unavailable", () =>
     // The fetchFresh path treats non-2xx as a soft failure (null)
     // rather than throwing — consumers shouldn't crash on a 429.
     expect(out).toBeNull();
+  });
+});
+
+describe("getQuote — IDB fallback when upstream is unavailable", () => {
+  it("returns the IDB-cached quote when the fresh fetch comes back unavailable", async () => {
+    // Regression test (pre-static-cache behavior): when both
+    // Yahoo and Finnhub failed, the client used to fall back to
+    // the IDB-cached quote so the time-travel chart kept working
+    // for popular tickers like TQQQ/VOO/VTI whose full history
+    // was already on disk. A change to getQuote() to always
+    // return the fresh-unavailable response broke that fallback
+    // and surfaced "Symbols failed" banners on every transient
+    // upstream blip. Pin the fallback so it doesn't regress
+    // again.
+    vi.resetModules();
+    // Pre-seed an IDB row as if a prior successful fetch had
+    // happened — this is what users actually have on disk.
+    dexieRowHolder.row = {
+      quote: {
+        symbol: "VOO",
+        currentPrice: 580.0,
+        currency: "USD",
+        name: "Vanguard S&P 500",
+        history: [
+          { t: Date.now() - 86_400_000, p: 578.5 },
+          { t: Date.now() - 2 * 86_400_000, p: 577.0 },
+        ],
+        // Old enough that the TTL freshness check fails →
+        // forces fall-through to the fetch path.
+        fetchedAt: Date.now() - 30 * 60 * 1000,
+        unavailable: false,
+      },
+    };
+    // Fresh fetch returns the unavailable diagnostic (Yahoo
+    // 429, Finnhub down — the route returns HTTP 200 with
+    // unavailable: true).
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        symbol: "VOO",
+        currentPrice: 0,
+        currency: "USD",
+        name: null,
+        history: [],
+        asOf: Date.now(),
+        unavailable: true,
+        error: "yahoo: 429 | finnhub: rate-limit",
+      }),
+    );
+
+    const { getQuote } = await import("@/lib/data/quotes");
+    const out = await getQuote("VOO");
+    // The cached quote (with real price + history) wins over
+    // the unavailable fresh response. Without this fallback the
+    // chart breaks and the user sees a banner instead of
+    // working data.
+    expect(out?.currentPrice).toBe(580.0);
+    expect(out?.unavailable).toBe(false);
+    expect(out?.history.length).toBeGreaterThan(0);
+  });
+
+  it("surfaces the unavailable diagnostic when there is NO IDB fallback", async () => {
+    // The flip side: a brand-new user (or a ticker never
+    // fetched before) should still see the diagnostic message
+    // when the upstream is down, so PriceRefresher can show
+    // the banner. Don't accidentally swallow errors when there
+    // is nothing better to serve.
+    vi.resetModules();
+    dexieRowHolder.row = undefined; // no IDB row for this symbol
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        symbol: "WEIRDNEW",
+        currentPrice: 0,
+        currency: "USD",
+        name: null,
+        history: [],
+        asOf: Date.now(),
+        unavailable: true,
+        error: "yahoo: 404",
+      }),
+    );
+    const { getQuote } = await import("@/lib/data/quotes");
+    const out = await getQuote("WEIRDNEW");
+    expect(out?.unavailable).toBe(true);
+    expect(out?.error).toBe("yahoo: 404");
   });
 });
 
