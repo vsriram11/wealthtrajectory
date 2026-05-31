@@ -10,6 +10,7 @@ import {
   type Snapshot,
 } from "@/lib/persistence/persistence";
 import { buildDemoSnapshots } from "@/lib/demoSnapshots";
+import { isDemoHouseholdStrict } from "@/lib/demo";
 import { captureSnapshotAppState } from "@/lib/persistence/snapshotAppState";
 import {
   filterHousehold,
@@ -173,29 +174,25 @@ export function SnapshotsManager() {
   const [demoAnchor] = useState(() => Date.now());
 
   const refresh = async () => {
-    // Frame B + demo: surface the synthetic 10y / 6-month-interval
-    // demo timeline alongside (or instead of) IDB snapshots. The
-    // home-page History chart now reads these too (see HistoryView),
-    // so SnapshotsManager's list and the chart stay consistent
-    // about what historical anchors exist.
+    // Frame B-safe gate: use the strict household-identity check
+    // (NOT `mode === "demo"`) so a Frame-B-auto-promoted user who
+    // hasn't yet customized the household still sees the synthetic
+    // demo timeline. The exact same gate is in HistoryView so the
+    // home-page chart and this list stay consistent.
     //
     // Behavior:
-    //  - demo + IDB empty → show only synthetic demo snapshots
-    //    (the typical signed-out case).
-    //  - demo + IDB has entries → MERGE: IDB takes precedence
-    //    when t collides (the user explicitly recorded that one,
-    //    so respect it over the synthetic baseline). This handles
-    //    the case where a user explored, saved a snapshot, and
-    //    then refreshed: their saved row stays visible alongside
-    //    the demo backdrop.
-    //  - real mode → IDB only (unchanged).
-    if (mode === "demo") {
+    //  - strict-demo (mode could be demo OR real-but-untouched
+    //    household tree) → MERGE: IDB takes precedence when t
+    //    collides (user explicitly recorded that one), but the
+    //    synthetic 10y demo timeline supplies the rest of the
+    //    historical anchors.
+    //  - household has been customized (rename / add / etc.) →
+    //    IDB only.
+    if (isDemoHouseholdStrict(household)) {
       const idb = await loadSnapshots();
       const demo = buildDemoSnapshots(demoAnchor);
       const idbByT = new Map(idb.map((s) => [s.t, s]));
       const merged: Snapshot[] = demo.map((d) => idbByT.get(d.t) ?? d);
-      // Append any IDB rows whose t didn't collide with a demo
-      // anchor (user-recorded snapshots at off-grid times).
       const demoTs = new Set(demo.map((d) => d.t));
       for (const s of idb) {
         if (!demoTs.has(s.t)) merged.push(s);

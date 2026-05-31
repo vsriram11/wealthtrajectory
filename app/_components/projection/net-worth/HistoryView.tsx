@@ -35,6 +35,7 @@ import {
 } from "@/lib/data/history";
 import { loadSnapshots, type Snapshot } from "@/lib/persistence/persistence";
 import { buildDemoSnapshots } from "@/lib/demoSnapshots";
+import { isDemoHouseholdStrict } from "@/lib/demo";
 import {
   getCachedQuote,
   getQuote,
@@ -136,32 +137,34 @@ export function HistoryView({
   // TimeTravelBanner; auto-snapshotter writes). Without the
   // dep, this view showed stale data until next mount.
   const snapshotsRevision = useAppStore((s) => s.snapshotsRevision);
-  const mode = useAppStore((s) => s.mode);
   // Stable anchor for the synthetic demo snapshots — pin it once
   // per mount so buildDemoSnapshots returns identical timestamps
   // across re-renders (otherwise hover-state, chart-keys, and
   // memoized series would churn on every render).
   const [demoAnchor] = useState(() => Date.now());
 
+  // Use the strict household-identity check (NOT `mode === "demo"`)
+  // as the gate for synthesizing demo snapshots. Reason:
+  //   - A fresh visitor lands in mode === "demo" → strict-demo, use
+  //     the synthesized 10y timeline. ✓
+  //   - The visitor edits any persisted slice (assumptions slider,
+  //     budget item, goal, etc.) → Frame B auto-promotes mode to
+  //     "real" → BUT the household tree is still the verbatim demo
+  //     seed → still strict-demo, KEEP showing the synthetic
+  //     timeline. ✓
+  //   - The visitor renames a member or adds an account →
+  //     isDemoHouseholdStrict flips to false → switch to IDB
+  //     snapshots (their own real history starts now). ✓
+  //
+  // Without this gate, the auto-promote left the user in
+  // "real-mode-with-demo-household" — the previous `mode === "demo"`
+  // branch never fired, and the chart silently reverted to its
+  // pre-fix flat-back-projection-plus-cliff appearance.
+  const useSyntheticDemo = isDemoHouseholdStrict(household);
+
   useEffect(() => {
     let cancelled = false;
-    // Demo mode: synthesize a 10y / 6-month-interval timeline from
-    // DEMO_HOUSEHOLD so the home chart actually exercises the
-    // interpolation machinery (varied past shares + back-projected
-    // prices). Without this, signed-out demo users saw only IDB
-    // snapshots — typically 0 of them, occasionally 1 from an
-    // auto-snapshot — and the chart degenerated into a flat back-
-    // projection with a sharp drop at the right edge where the
-    // single anchor pinned to live.
-    //
-    // Real mode: load from IDB exactly as before. If a user has
-    // been auto-promoted (Frame B), their IDB snapshots are the
-    // source of truth; we don't overlay synthetic demo snapshots
-    // because those would conflict with the real history.
-    if (mode === "demo") {
-      // Run the build in a microtask so the setState is async vs
-      // the effect body — the alternative (synchronous setState
-      // here) triggers the lint rule about cascading renders.
+    if (useSyntheticDemo) {
       void Promise.resolve().then(() => {
         if (cancelled) return;
         setSnapshots(buildDemoSnapshots(demoAnchor));
@@ -176,7 +179,7 @@ export function HistoryView({
     return () => {
       cancelled = true;
     };
-  }, [snapshotsRevision, mode, demoAnchor]);
+  }, [snapshotsRevision, useSyntheticDemo, demoAnchor]);
 
   // setLoading(true) below is the canonical "start an async data
   // load" pattern. The React 19 idiomatic alternative is Suspense
