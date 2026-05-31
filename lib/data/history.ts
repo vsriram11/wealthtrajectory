@@ -306,27 +306,88 @@ export function reconstructHistory(
   const out: HistoryPoint[] = [];
   for (let i = 0; i <= days; i++) {
     const t = start + (i * (effectiveNow - start)) / days;
-    const compSnap = pickCompositionSnapshot(richSnapshots, t);
-    const composition = compSnap?.household ?? household;
-    const nw =
-      composeNetWorthAt(
-        composition,
+    // Snap-pair interpolation for INTER-snap buckets only.
+    //
+    // The previous behavior picked the latest snap with t <= bucket.t
+    // ("earlier") and composed with that. For demo data with
+    // 6-month-spaced snapshots, this meant every bucket between
+    // snap@-6 (Nov 30) and snap@0 (May 31) used snap@-6's 0.93×
+    // share count, regardless of how close to snap@0 the bucket was.
+    // Visible result: chart sits at ~93% of live across the inter-
+    // snap window, then steps UP to live at the right edge — a
+    // ~7% cliff just from the share-count step at snap@0.t.
+    //
+    // Inter-snap interpolation: when a bucket sits BETWEEN two
+    // adjacent snapshots, compose against BOTH and linearly blend
+    // by the bucket's position in the window. Adjacent to the
+    // earlier snap → 100% earlier; adjacent to the later snap →
+    // 100% later. Mid-window → 50/50. Share count smoothly
+    // accumulates across the window, eliminating the step at
+    // snap.t boundaries.
+    //
+    // Pre-first-snapshot and post-last-snapshot regions keep the
+    // ORIGINAL behavior (compose with live household, no
+    // snapAnchorT for the pre-region) so the dedicated smoothing
+    // block below — which assumes that exact compose pattern —
+    // continues to work.
+    const { earlier, later } = pickCompositionBracket(richSnapshots, t);
+    let nw: number;
+    if (earlier === null && later !== null) {
+      // Pre-first-snap region: live household + back-project from now.
+      // Preserves the smoothing-block's assumption that
+      // reconstructedAtBoundary at firstSnap.t can be computed
+      // identically from outside this loop.
+      nw =
+        composeNetWorthAt(
+          household,
+          quotes,
+          t,
+          now,
+          newlyAddedIds,
+          newlyAddedLiabilityIds,
+        ) + newlyAddedFlatUSD;
+    } else if (earlier !== null && later !== null && earlier.t !== later.t) {
+      // Inter-snap: blend compose(earlier) and compose(later).
+      const frac = Math.max(
+        0,
+        Math.min(1, (t - earlier.t) / (later.t - earlier.t)),
+      );
+      const valEarlier = composeNetWorthAt(
+        earlier.household,
         quotes,
         t,
         now,
         newlyAddedIds,
-        // Liability exclusion only applies when the composition is
-        // the LIVE household (pre-first-snapshot buckets). When
-        // composition is a snapshot's household, that snapshot's
-        // own liabilities are the authoritative record of debt at
-        // that time — nothing to filter.
-        compSnap ? new Set<string>() : newlyAddedLiabilityIds,
-        // R2 audit: when composition came from a snapshot, its
-        // holdings carry already-back-projected `lastPriceUSD`
-        // values. Project quote-missing fallbacks relative to the
-        // snap's anchor so we don't double-discount.
-        compSnap ? compSnap.t : undefined,
-      ) + newlyAddedFlatUSD;
+        new Set<string>(),
+        earlier.t,
+      );
+      const valLater = composeNetWorthAt(
+        later.household,
+        quotes,
+        t,
+        now,
+        newlyAddedIds,
+        new Set<string>(),
+        later.t,
+      );
+      nw = valEarlier * (1 - frac) + valLater * frac + newlyAddedFlatUSD;
+    } else {
+      // Exactly at a snap (earlier === later, or only one snap
+      // applies). Post-last-snap also lands here with earlier set
+      // and later null — use the earlier snap's composition.
+      const compSnap = earlier ?? later;
+      const composition = compSnap?.household ?? household;
+      nw =
+        composeNetWorthAt(
+          composition,
+          quotes,
+          t,
+          now,
+          newlyAddedIds,
+          compSnap ? new Set<string>() : newlyAddedLiabilityIds,
+          compSnap ? compSnap.t : undefined,
+        ) + newlyAddedFlatUSD;
+    }
     out.push({ t, netWorthUSD: nw });
   }
 
@@ -403,6 +464,36 @@ function pickCompositionSnapshot(
     if (rich[i].t <= t) return rich[i];
   }
   return null;
+}
+
+/**
+ * Return the pair of snapshots that BRACKET `t`. Used by
+ * reconstructHistory's snap-pair interpolation so the chart blends
+ * between two adjacent snapshots' compositions rather than
+ * step-changing at each snap boundary.
+ *
+ *   - t before the first snapshot: { earlier: null, later: first }
+ *   - t after the last snapshot:   { earlier: last, later: null }
+ *   - t equal to a snapshot's t:   both point at that snap
+ *   - t between two snaps:         each points at its side
+ */
+function pickCompositionBracket(
+  rich: Array<Snapshot & { household: Household }>,
+  t: number,
+): {
+  earlier: (Snapshot & { household: Household }) | null;
+  later: (Snapshot & { household: Household }) | null;
+} {
+  if (rich.length === 0) return { earlier: null, later: null };
+  let earlier: (Snapshot & { household: Household }) | null = null;
+  let later: (Snapshot & { household: Household }) | null = null;
+  for (let i = 0; i < rich.length; i++) {
+    if (rich[i].t <= t) earlier = rich[i];
+    if (rich[i].t >= t && later === null) {
+      later = rich[i];
+    }
+  }
+  return { earlier, later };
 }
 
 function composeNetWorthAt(
