@@ -3,12 +3,14 @@
 import { useState } from "react";
 
 import { InvestmentGrowthCalculator } from "@/app/_components/calculators/InvestmentGrowthCalculator";
+import { TickerLookup } from "@/app/_components/calculators/TickerLookup";
 import { UsTaxCalculator } from "@/app/_components/calculators/UsTaxCalculator";
 
-type CalculatorsSubTab = "investment-growth" | "us-tax";
+type CalculatorsSubTab = "investment-growth" | "ticker-lookup" | "us-tax";
 
 const SUB_TABS: { id: CalculatorsSubTab; label: string }[] = [
   { id: "investment-growth", label: "Investment growth" },
+  { id: "ticker-lookup", label: "Ticker lookup" },
   { id: "us-tax", label: "US Tax" },
 ];
 
@@ -39,7 +41,7 @@ export function CalculatorsPage() {
       <section className="px-5 pt-3">
         <div
           role="tablist"
-          aria-label="Static Calculators sub-navigation"
+          aria-label="Research sub-navigation"
           className="no-scrollbar flex gap-1 overflow-x-auto rounded-full border border-border bg-bg-surface p-1"
         >
           {SUB_TABS.map((t) => (
@@ -60,12 +62,13 @@ export function CalculatorsPage() {
           role="note"
         >
           <span className="font-medium text-text">
-            Static calculators for convenience.
+            Static calculators, ETF/Stock research, and planning.
           </span>{" "}
           These tools don&apos;t read your household — they&apos;re
-          quick what-if math for goal planning. For personalized
-          projections that use your actual portfolio, scenarios,
-          and member rollups, see the Projections and Plan pages.
+          quick what-if math, ticker reference, and goal planning.
+          For personalized projections that use your actual
+          portfolio, scenarios, and member rollups, see the
+          Projections and Plan pages.
         </div>
       </div>
 
@@ -77,6 +80,7 @@ export function CalculatorsPage() {
         aria-labelledby={`calc-tab-${tab}`}
       >
         {tab === "investment-growth" && <InvestmentGrowthCalculator />}
+        {tab === "ticker-lookup" && <TickerLookup />}
         {tab === "us-tax" && <UsTaxCalculator />}
       </div>
     </>

@@ -263,6 +263,16 @@ type StaticCacheHit = {
   quote: ParsedQuote;
   shardGeneratedAt: number;
   trailingSpliced: boolean;
+  /**
+   * Corporate-action streams from the shard payload (added in the
+   * dividend-history work). Surfaced on cache hits so consumers
+   * like TickerLookup can compute dividend yield, total-return
+   * CAGR, and a split-adjusted history without a second fetch.
+   * Empty arrays when the ticker has no events in the cached
+   * window or when the shard predates dividend support.
+   */
+  dividends: Array<{ t: number; amount: number }>;
+  splits: Array<{ t: number; numerator: number; denominator: number }>;
 };
 
 /**
@@ -342,6 +352,22 @@ async function tryStaticCache(
     range === "max" ? 0 : now - 5 * 365 * 24 * 60 * 60 * 1000;
   const clamped = merged.filter((p) => p.t >= cutoff);
   if (clamped.length === 0) return { status: "shard_history_empty" };
+
+  // Pull this ticker's dividend + split events from the shard. The
+  // keys are optional (older shards predate dividend support; we
+  // default to []), and the events are stored as packed tuples —
+  // unpack to { t, amount } / { t, numerator, denominator } for
+  // the API surface so consumers don't have to know the tuple
+  // layout. Clamp to the same range window as `clamped` above.
+  const rawDividends = shard.dividends?.[symbol] ?? [];
+  const dividends = rawDividends
+    .filter(([t]) => t >= cutoff)
+    .map(([t, amount]) => ({ t, amount }));
+  const rawSplits = shard.splits?.[symbol] ?? [];
+  const splits = rawSplits
+    .filter(([t]) => t >= cutoff)
+    .map(([t, numerator, denominator]) => ({ t, numerator, denominator }));
+
   return {
     status: "hit",
     hit: {
@@ -354,6 +380,8 @@ async function tryStaticCache(
       },
       shardGeneratedAt: shard.generatedAt,
       trailingSpliced: !!trailing && trailing.length > 0,
+      dividends,
+      splits,
     },
   };
 }
@@ -491,6 +519,13 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
           // old (e.g., > 35 days = monthly cron missed a run).
           shardGeneratedAt: hit.shardGeneratedAt,
           trailingSpliced: hit.trailingSpliced,
+          // Corporate-action streams from the shard payload. Empty
+          // arrays when the ticker has no events in the window or
+          // when the shard predates dividend support. Consumers
+          // like TickerLookup use these for yield + total-return
+          // calculations; the headline-NW path ignores them.
+          dividends: hit.dividends,
+          splits: hit.splits,
           staticCacheStatus: "hit",
           fetchedAt: Date.now(),
         },

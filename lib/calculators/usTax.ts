@@ -4,7 +4,7 @@
  * Static / portfolio-blind: pure function of inputs → result. NOT
  * connected to the household or projection layers. Intended for
  * back-of-envelope "what does my federal + state bill look like?"
- * questions on the Static Calculators page.
+ * questions on the Research page.
  *
  * What's modeled
  *   - Federal ordinary income tax (10/12/22/24/32/35/37% brackets,
