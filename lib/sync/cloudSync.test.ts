@@ -682,4 +682,67 @@ describe("pushToDrive — main flow", () => {
     expect(useAppStore.getState().googleSyncError).toContain("network down");
     expect(useAppStore.getState().googleSyncing).toBe(false);
   });
+
+  // Audit R6 (Layer 1/2/3): the AuthHydrator "fresh sign-in" path now
+  // routes through pushToDrive with bypassInitialSyncGate=true rather
+  // than calling uploadBackup directly. This test pins that even on
+  // that path, the shrinkage guard catches the stale-index race
+  // scenario — empty local household pushing over Drive that
+  // actually has accounts (the most concrete data-loss case).
+  it("bypassInitialSyncGate=true STILL refuses to wipe accounts on the fresh-install path (R6)", async () => {
+    // Set up the AuthHydrator-equivalent state: signed in, mode=real,
+    // empty household, no prior sync (googleLastSyncAt === null).
+    useAppStore.setState({
+      mode: "real",
+      household: {
+        id: "h-empty",
+        members: [{ id: "m", displayName: "U" }],
+        accounts: [],
+        liabilities: [],
+      },
+    });
+    useAppStore.getState().setGoogleSyncState({ googleLastSyncAt: null });
+
+    // Simulate the stale-index race: AuthHydrator's findBackupFile
+    // already returned null upstream, but pushToDrive's internal
+    // shrinkage-guard re-query finds the real backup.
+    findBackupFileMock.mockResolvedValueOnce({
+      id: "drive-id",
+      modifiedTime: "2026-05-15T00:00:00Z",
+    });
+    const { exportData } = await import("@/lib/persistence/dataIO");
+    // Drive backup has a populated household — 3 accounts the user
+    // would lose if we pushed the empty local state over it.
+    const driveText = exportData({
+      household: {
+        id: "h-real",
+        members: [{ id: "m", displayName: "U" }],
+        accounts: [
+          { id: "a1", category: "BROKERAGE", displayName: "A", ownerId: "m", holdings: [], monthlyContributionUSD: 0 },
+          { id: "a2", category: "BROKERAGE", displayName: "B", ownerId: "m", holdings: [], monthlyContributionUSD: 0 },
+          { id: "a3", category: "BROKERAGE", displayName: "C", ownerId: "m", holdings: [], monthlyContributionUSD: 0 },
+        ],
+        liabilities: [],
+      },
+      assumptions: useAppStore.getState().assumptions,
+      scenarios: [],
+    });
+    downloadBackupMock.mockResolvedValueOnce(driveText);
+
+    const out = await pushToDrive(useAppStore, {
+      bypassInitialSyncGate: true,
+    });
+
+    // Shrinkage guard MUST trip — 3 accounts on Drive vs 0 local is
+    // > 50% loss → catastrophic.
+    expect(out).toBe("blocked-by-shrinkage");
+    expect(useAppStore.getState().googleSyncBlockedReason).toBe(
+      "import-shrinkage",
+    );
+    // CRITICAL: no upload fires. The pre-R6 AuthHydrator's direct
+    // uploadBackup call would have PATCHed the real backup with the
+    // empty payload. This pins that the post-R6 routing through
+    // pushToDrive prevents that wipe.
+    expect(uploadBackupMock).not.toHaveBeenCalled();
+  });
 });

@@ -7,9 +7,7 @@ import {
   claimActiveSession,
   findBackupFile,
   loadActiveSession,
-  uploadBackup,
 } from "@/lib/sync/googleDrive";
-import { exportData } from "@/lib/persistence/dataIO";
 import { pullFromDrive, pushToDrive } from "@/lib/sync/cloudSync";
 import { isDemoHouseholdStrict } from "@/lib/demo";
 import {
@@ -208,45 +206,67 @@ export function AuthHydrator() {
         } else if (s.mode !== "real") {
           // Signed-in user starting fresh — drop them into empty real mode.
           s.switchToReal();
-          // Round-2 audit fix: include snapshots even on the
-          // fresh-install upload path. Typically empty for a new
-          // user but a returning user could land here too (e.g.
-          // they had local IDB snapshots from a prior signed-out
-          // session, then signed in for the first time — those
-          // pre-signin snapshots must reach Drive).
-          const snapshotsForUpload = await (
-            await import("@/lib/persistence/persistence")
-          ).loadSnapshots();
-          const json = exportData({
-            household: useAppStore.getState().household,
-            assumptions: useAppStore.getState().assumptions,
-            scenarios: useAppStore.getState().scenarios,
-            memberAssumptions: useAppStore.getState().memberAssumptions,
-            preferredMemberId: useAppStore.getState().preferredMemberId,
-            targetAllocation: useAppStore.getState().targetAllocation,
-            glidePath: useAppStore.getState().glidePath,
-            householdAnnualIncomeUSD: useAppStore.getState().householdAnnualIncomeUSD,
-            goals: useAppStore.getState().goals,
-            budgetItems: useAppStore.getState().budgetItems,
-            incomeStreams: useAppStore.getState().incomeStreams,
-            healthPlans: useAppStore.getState().healthPlans,
-            healthImportanceWeights: useAppStore.getState().healthImportanceWeights,
-            snapshots: snapshotsForUpload,
+          // Audit R6 (Layer 1/2/3): route the fresh-install upload
+          // through `pushToDrive` rather than calling `uploadBackup`
+          // directly. The previous inline path bypassed the shrinkage
+          // guard entirely — if findBackupFile returned null due to
+          // a Drive-index stale-read race (the exact failure mode
+          // Layer 1/2/3 was meant to defend against) BUT the
+          // underlying file actually existed, uploadBackup's internal
+          // findAllFiles re-search would PATCH the real backup with
+          // the empty / minimal payload, silently overwriting the
+          // user's actual data.
+          //
+          // pushToDrive's shrinkage guard does a second findBackupFile
+          // + downloadBackup + count-compare BEFORE the upload. Even
+          // if the first findBackupFile lied, the chance that the
+          // second call lies in the same way is materially lower
+          // (Drive's index has had a few hundred ms to catch up). And
+          // if it does still return null, we're no worse off than
+          // before. Defense in depth, with the right chokepoint.
+          //
+          // `bypassInitialSyncGate: true` because googleLastSyncAt is
+          // still null at this point (no prior sync) — pushToDrive
+          // would otherwise refuse with blocked-by-initial-sync.
+          const result = await pushToDrive(useAppStore, {
+            bypassInitialSyncGate: true,
           });
-          const passphrase =
-            useAppStore.getState().encryptionPassphrase;
-          const sealed = passphrase
-            ? await (
-                await import("@/lib/sync/crypto")
-              ).encryptString(json, passphrase)
-            : json;
-          await uploadBackup(token, sealed);
           if (cancelled) return;
+          if (result === "ok") {
+            s.setGoogleSyncState({
+              googleSyncBlockedReason: null,
+              lastSyncOutcome: "uploaded-fresh",
+            });
+          }
+          // For non-"ok" results (blocked-by-shrinkage / -encryption,
+          // error), pushToDrive already set the descriptive
+          // googleSyncError + (where appropriate) googleSyncBlockedReason
+          // so the dedicated banners pick up the recovery UX.
+        } else {
+          // Audit R6 (Layer 1/2/3): the previously-missing branch.
+          // Fires when: existing === null + mode === "real" +
+          // accounts.length === 0 (user has an empty real household
+          // — e.g., they previously did Start Fresh and signed in
+          // afterwards, or signed out + cleared their data + signed
+          // back in).
+          //
+          // The pre-fix code silently fell through with no
+          // setGoogleSyncState call, leaving googleLastSyncAt === null.
+          // That sticks CloudSyncer's initial-sync gate ON forever —
+          // every future edit's debounce-push gets refused with
+          // "blocked-by-initial-sync", and the user has no idea why
+          // their data isn't syncing. They'd need to manually click
+          // "Sync now" in the GoogleSyncCard to recover.
+          //
+          // Mark the initial sync as complete (mirroring the
+          // strict-demo silent-defer branch above) so the user's
+          // next edit triggers a normal debounce-push.
           s.setGoogleSyncState({
-            googleLastSyncAt: Date.now(),
+            googleSyncing: false,
             googleSyncError: null,
             googleSyncBlockedReason: null,
-            lastSyncOutcome: "uploaded-fresh",
+            googleLastSyncAt: Date.now(),
+            lastSyncOutcome: null,
           });
         }
       } catch (e) {
