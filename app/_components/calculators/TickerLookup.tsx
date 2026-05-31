@@ -3,7 +3,91 @@
 import { useMemo, useRef, useState } from "react";
 
 import { inflationFactor } from "@/lib/data/cpiHistory";
-import { formatUSD } from "@/lib/format";
+import { CustomDatePicker } from "@/app/_components/ui/CustomDatePicker";
+
+/**
+ * Format a price with exactly 2 decimal places ($580.42 vs the
+ * default formatUSD's 0-decimal whole-dollar style $580). Used
+ * everywhere ticker prices appear — the chart's hover overlay,
+ * the current-price card, the dividend per-share rows. Prices
+ * are inherently decimal; rounding to whole dollars hides the
+ * sub-dollar information the user is reading the chart for.
+ */
+const priceFmt = new Intl.NumberFormat("en-US", {
+  style: "currency",
+  currency: "USD",
+  minimumFractionDigits: 2,
+  maximumFractionDigits: 2,
+});
+const formatPrice = (n: number) => priceFmt.format(n);
+
+/** Ranges available in the Ticker lookup view. Mirrors the chip
+ * row on the home History panel. */
+type TickerRange = "1M" | "3M" | "6M" | "1Y" | "YTD" | "5Y" | "ALL" | "CUSTOM";
+
+const TICKER_RANGES: TickerRange[] = ["1M", "3M", "6M", "1Y", "YTD", "5Y", "ALL", "CUSTOM"];
+const TICKER_RANGE_LABELS: Record<TickerRange, string> = {
+  "1M": "1M",
+  "3M": "3M",
+  "6M": "6M",
+  "1Y": "1Y",
+  YTD: "YTD",
+  "5Y": "5Y",
+  ALL: "All",
+  CUSTOM: "Custom",
+};
+
+const MS_PER_DAY = 24 * 60 * 60 * 1000;
+
+function rangeBounds(
+  range: TickerRange,
+  history: ReadonlyArray<{ t: number; p: number }>,
+  custom?: { start: number; end: number },
+): { start: number; end: number } | null {
+  if (history.length === 0) return null;
+  const earliestT = history[0].t;
+  const latestT = history[history.length - 1].t;
+  if (range === "CUSTOM") {
+    if (!custom) return null;
+    const start = Math.max(custom.start, earliestT);
+    const end = Math.min(custom.end, latestT);
+    return start < end ? { start, end } : null;
+  }
+  if (range === "ALL") return { start: earliestT, end: latestT };
+  let start: number;
+  const end = latestT;
+  if (range === "YTD") {
+    const endDate = new Date(end);
+    start = Date.UTC(endDate.getUTCFullYear(), 0, 1);
+  } else {
+    const back: Record<Exclude<TickerRange, "YTD" | "ALL" | "CUSTOM">, number> = {
+      "1M": 30,
+      "3M": 90,
+      "6M": 180,
+      "1Y": 365,
+      "5Y": 365 * 5,
+    };
+    start = end - back[range] * MS_PER_DAY;
+  }
+  if (start < earliestT) start = earliestT;
+  return start < end ? { start, end } : null;
+}
+
+function clampHistory<T extends { t: number }>(
+  history: ReadonlyArray<T>,
+  bounds: { start: number; end: number },
+): T[] {
+  return history.filter((p) => p.t >= bounds.start && p.t <= bounds.end);
+}
+
+function isoFromMs(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10);
+}
+function msFromIso(iso: string): number | null {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return null;
+  const t = Date.parse(`${iso}T12:00:00Z`);
+  return Number.isFinite(t) ? t : null;
+}
 
 /**
  * Ticker lookup — a Google-style "<TICKER> stock chart" view that
@@ -132,7 +216,55 @@ function TickerView({
   symbol: string;
   data: TickerData;
 }) {
-  const stats = useMemo(() => computeStats(data), [data]);
+  const [range, setRange] = useState<TickerRange>("ALL");
+  const [customStart, setCustomStart] = useState<string>(() =>
+    data.history.length > 0
+      ? isoFromMs(data.history[0].t)
+      : isoFromMs(Date.UTC(2010, 0, 1)),
+  );
+  const [customEnd, setCustomEnd] = useState<string>(() =>
+    isoFromMs(data.lastPoint.t),
+  );
+  const customRangeBounds = useMemo(() => {
+    if (range !== "CUSTOM") return undefined;
+    const s = msFromIso(customStart);
+    const e = msFromIso(customEnd);
+    if (s == null || e == null || s >= e) return undefined;
+    return { start: s, end: e };
+  }, [range, customStart, customEnd]);
+
+  // Filter the dataset to the selected range. The chart, stat
+  // cards (CAGR, dividend yield TTM), and dividend list all read
+  // from the SAME filtered slice so any switch is consistent.
+  const rangedData = useMemo<TickerData>(() => {
+    const bounds = rangeBounds(range, data.history, customRangeBounds);
+    if (!bounds) return data;
+    const history = clampHistory(data.history, bounds);
+    const dividends = data.dividends.filter(
+      (d) => d.t >= bounds.start && d.t <= bounds.end,
+    );
+    const splits = data.splits.filter(
+      (s) => s.t >= bounds.start && s.t <= bounds.end,
+    );
+    return {
+      ...data,
+      history,
+      dividends,
+      splits,
+      lastPoint: history[history.length - 1] ?? data.lastPoint,
+    };
+  }, [data, range, customRangeBounds]);
+
+  // Pass the FULL dividend list (not just range-filtered) so the
+  // TTM-dividend lookup can reach back 12 months from the range's
+  // endpoint even when that endpoint sits less than a year into
+  // the range. Same reasoning for full history: dividend yield
+  // divides by the price AT THE ENDPOINT, and for some windows
+  // that price isn't otherwise needed.
+  const stats = useMemo(
+    () => computeStats(rangedData, data.dividends, data.history),
+    [rangedData, data.dividends, data.history],
+  );
   // Inception detection: the static cache window starts Dec 1
   // 2005; if the ticker's first datapoint is later than that, the
   // ticker's actual inception is what we surface to the user
@@ -169,14 +301,67 @@ function TickerView({
         {data.currentPrice != null && (
           <div className="text-right">
             <div className="num text-2xl font-semibold text-text">
-              {formatUSD(data.currentPrice)}
+              {formatPrice(data.currentPrice)}
             </div>
             <div className="text-[11px] text-text-dim">Current</div>
           </div>
         )}
       </header>
 
-      <PriceChart history={data.history} />
+      {/* Range selector — same chip pattern as the home History
+          panel. Switching range updates BOTH the chart and the
+          stat cards (dividend yield TTM, CAGR price + total
+          return, real variants), so the stats always describe
+          the window the user is looking at. */}
+      <div
+        role="tablist"
+        aria-label="Ticker range"
+        className="no-scrollbar flex gap-1 overflow-x-auto rounded-full border border-border bg-bg-surface p-1"
+      >
+        {TICKER_RANGES.map((r) => (
+          <button
+            key={r}
+            type="button"
+            role="tab"
+            aria-selected={range === r}
+            onClick={() => setRange(r)}
+            className={`shrink-0 rounded-full px-3 py-1 text-[11px] font-medium transition active:opacity-70 ${
+              range === r
+                ? "bg-accent text-bg"
+                : "text-text-muted hover:text-text"
+            }`}
+          >
+            {TICKER_RANGE_LABELS[r]}
+          </button>
+        ))}
+      </div>
+
+      {range === "CUSTOM" && (
+        <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border bg-bg-elevated px-3 py-2 text-[11px]">
+          <CustomDatePicker
+            label="From"
+            value={customStart}
+            max={customEnd}
+            onChange={setCustomStart}
+            ariaLabel="Custom range start date"
+          />
+          <CustomDatePicker
+            label="To"
+            value={customEnd}
+            min={customStart}
+            max={isoFromMs(data.lastPoint.t)}
+            onChange={setCustomEnd}
+            ariaLabel="Custom range end date"
+          />
+          {!customRangeBounds && (
+            <span className="text-amber-300">
+              Pick a valid range (start before end)
+            </span>
+          )}
+        </div>
+      )}
+
+      <PriceChart history={rangedData.history} />
 
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
         <StatCard
@@ -188,7 +373,7 @@ function TickerView({
           }
           sub={
             stats.ttmDividendsPerShare != null
-              ? `${formatUSD(stats.ttmDividendsPerShare)}/share`
+              ? `${formatPrice(stats.ttmDividendsPerShare)}/share`
               : "no dividends in trailing year"
           }
         />
@@ -222,13 +407,13 @@ function TickerView({
         />
       </div>
 
-      {data.dividends.length > 0 && (
+      {rangedData.dividends.length > 0 && (
         <details className="rounded-md border border-border bg-bg-elevated px-3 py-2 text-[12px] text-text-muted">
           <summary className="cursor-pointer text-text">
-            Dividend history ({data.dividends.length} events)
+            Dividend history ({rangedData.dividends.length} events in range)
           </summary>
           <ul className="mt-2 max-h-60 space-y-0.5 overflow-y-auto pr-1">
-            {[...data.dividends]
+            {[...rangedData.dividends]
               .reverse()
               .slice(0, 40)
               .map((d, i) => (
@@ -238,26 +423,26 @@ function TickerView({
                 >
                   <span>{new Date(d.t).toLocaleDateString()}</span>
                   <span className="num text-text">
-                    {formatUSD(d.amount)}/share
+                    {formatPrice(d.amount)}/share
                   </span>
                 </li>
               ))}
-            {data.dividends.length > 40 && (
+            {rangedData.dividends.length > 40 && (
               <li className="pt-1 text-[10px] text-text-dim">
-                (showing newest 40 of {data.dividends.length})
+                (showing newest 40 of {rangedData.dividends.length})
               </li>
             )}
           </ul>
         </details>
       )}
 
-      {data.splits.length > 0 && (
+      {rangedData.splits.length > 0 && (
         <details className="rounded-md border border-border bg-bg-elevated px-3 py-2 text-[12px] text-text-muted">
           <summary className="cursor-pointer text-text">
-            Split history ({data.splits.length} events)
+            Split history ({rangedData.splits.length} events in range)
           </summary>
           <ul className="mt-2 space-y-0.5 pr-1">
-            {data.splits.map((s, i) => (
+            {rangedData.splits.map((s, i) => (
               <li
                 key={i}
                 className="flex items-baseline justify-between text-[11px]"
@@ -419,7 +604,7 @@ function PriceChart({
             {new Date(hoverPoint.t).toLocaleDateString()}
           </span>
           <span className="num font-medium text-text">
-            {formatUSD(hoverPoint.p)}
+            {formatPrice(hoverPoint.p)}
           </span>
         </div>
       )}
@@ -565,7 +750,11 @@ type Stats = {
   ttmDividendsPerShare: number | null;
 };
 
-function computeStats(data: TickerData): Stats {
+function computeStats(
+  data: TickerData,
+  allDividends: ReadonlyArray<{ t: number; amount: number }> = data.dividends,
+  fullHistory: ReadonlyArray<{ t: number; p: number }> = data.history,
+): Stats {
   const { history, dividends, currentPrice } = data;
   const first = history[0];
   const last = history[history.length - 1];
@@ -578,14 +767,14 @@ function computeStats(data: TickerData): Stats {
   const priceCAGR =
     priceMultiple > 0 ? Math.pow(priceMultiple, 1 / years) - 1 : null;
 
-  // Total-return approximation: reinvest each dividend at the
-  // close on its ex-date. Accumulate a share-count multiplier from
-  // 1.0; final wealth multiple = (last price / first price) ×
-  // share multiplier. Doesn't model spread/taxes/timing; close
-  // enough for the back-of-envelope research view.
+  // Total-return approximation: reinvest each dividend in the
+  // SELECTED RANGE at the close on its ex-date. Accumulate a
+  // share-count multiplier from 1.0; final wealth multiple =
+  // (last price / first price) × share multiplier over the range.
+  // Doesn't model spread/taxes/timing; close enough for the
+  // back-of-envelope research view.
   let shareMultiplier = 1;
   for (const d of dividends) {
-    // Use the close on the ex-date (or the next available close).
     const priceOnEx = priceAtOrAfter(history, d.t);
     if (priceOnEx == null || priceOnEx <= 0) continue;
     shareMultiplier *= 1 + d.amount / priceOnEx;
@@ -611,15 +800,32 @@ function computeStats(data: TickerData): Stats {
       ? Math.pow(priceMultiple / cumulativeInflation, 1 / years) - 1
       : null;
 
-  // TTM dividend yield: sum dividends in the trailing 365 days,
-  // divide by current price.
+  // TTM dividend yield: trailing 12 months from the RANGE
+  // ENDPOINT (per user request — "ttm to be from endpoint of that
+  // date range"). The 12-month window may sit ENTIRELY before the
+  // range start (e.g. range = "1M") so we look at the full
+  // dividend list, not just range-filtered, for TTM aggregation.
+  // The yield divides by the price AT THE ENDPOINT (last.p) so a
+  // historical-endpoint range reflects that day's yield, not
+  // today's yield against a stale TTM payout sum.
   const ttmCutoff = last.t - 365 * 24 * 60 * 60 * 1000;
-  const ttmDividendsPerShare = dividends
-    .filter((d) => d.t >= ttmCutoff)
+  const ttmDividendsPerShare = allDividends
+    .filter((d) => d.t > ttmCutoff && d.t <= last.t)
     .reduce((acc, d) => acc + d.amount, 0);
+  // Endpoint price: if the range ends at the live "today",
+  // use the freshest live currentPrice; otherwise use the
+  // historical close on the endpoint date. This is exactly
+  // what the user sees in the chart's right-edge bar.
+  const endIsLive =
+    fullHistory.length > 0 &&
+    last.t >= fullHistory[fullHistory.length - 1].t;
+  const endpointPrice =
+    endIsLive && currentPrice != null && currentPrice > 0
+      ? currentPrice
+      : last.p;
   const dividendYield =
-    currentPrice != null && currentPrice > 0 && ttmDividendsPerShare > 0
-      ? ttmDividendsPerShare / currentPrice
+    endpointPrice > 0 && ttmDividendsPerShare > 0
+      ? ttmDividendsPerShare / endpointPrice
       : ttmDividendsPerShare > 0
         ? null
         : 0;
