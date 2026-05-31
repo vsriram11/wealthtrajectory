@@ -75,7 +75,7 @@ describe("buildDemoSnapshots", () => {
     expect(newest.netWorthUSD).toBe(expected);
   });
 
-  it("net worth trends generally upward over the 5-year window (back-cast values are lower)", () => {
+  it("net worth trends generally upward over the 10-year window (back-cast values are lower)", () => {
     const snaps = buildDemoSnapshots(NOW);
     const oldest = snaps[0];
     const newest = snaps[snaps.length - 1];
@@ -252,7 +252,7 @@ describe("buildDemoSnapshots", () => {
     const snaps = buildDemoSnapshots(NOW);
     const past = snaps[0].appState!.targetAllocation!;
     const today = snaps[snaps.length - 1].appState!.targetAllocation!;
-    // Realistic arc: equity was less heavy 5 years ago, bond
+    // Realistic arc: equity was less heavy a decade ago, bond
     // weight was higher. Today's target is more equity-tilted.
     expect(past.equity!).toBeLessThan(today.equity!);
     expect(past.bond!).toBeGreaterThan(today.bond!);
