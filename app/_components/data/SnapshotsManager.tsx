@@ -670,9 +670,10 @@ export function SnapshotsManager() {
             </span>{" "}
             Enter a special mode where you can edit your holdings,
             accounts, and assumptions as if at a past date. Save to
-            record a backdated snapshot; Exit to restore. None of
-            your edits in the session are persisted to IndexedDB or
-            Drive — your live data is safe.
+            record a backdated snapshot; Exit to restore. Your live
+            data is never touched — session edits are kept in a
+            separate resume record (so reload returns you to the
+            session) and Drive sync is paused for the duration.
           </button>
           <EnterTimeTravelModal
             open={timeTravelModalOpen}
