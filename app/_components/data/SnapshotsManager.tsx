@@ -229,7 +229,13 @@ export function SnapshotsManager() {
     [household, memberId],
   );
 
-  if (mode !== "real") return null;
+  // Frame B (no-sign-in): SnapshotsManager renders in demo mode
+  // too. When the user clicks Save, the persistence subscriber
+  // auto-promotes the session to real mode (preserving current
+  // state) and the snapshot writes to IDB normally. The "Use mock
+  // data" button in DemoHeader gives users a one-click escape back
+  // to the demo seed if they want to discard their edits.
+  void mode;
 
   const handleAdd = async () => {
     const t = parseISO(draftDate);

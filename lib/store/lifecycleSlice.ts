@@ -110,6 +110,21 @@ export type LifecycleSliceActions = {
   switchToReal: () => void;
   /** Drop back to the demo household + assumptions. Preserves auth. */
   resetToDemo: () => void;
+  /**
+   * Promote demo → real WITHOUT wiping the user's current state.
+   *
+   * Different from `switchToReal()` (which blanks the household to
+   * empty for the "Start Fresh" onboarding flow). This action is
+   * fired automatically by the persistence layer on the user's
+   * first edit: the demo data they were just looking at IS the
+   * starting point of THEIR data now. Flipping the flag lets the
+   * downstream gates (CloudSyncer drive-upload, hide-on-demo UI
+   * cues) start treating this as a real session without losing
+   * what the user has been building.
+   *
+   * No-op when already in real mode.
+   */
+  promoteToReal: () => void;
 };
 
 export const LIFECYCLE_SLICE_INITIAL: LifecycleSliceState = {
@@ -247,6 +262,9 @@ export function createLifecycleSliceActions(
         subscription: s.subscription,
         subscriptionCheckedAt: s.subscriptionCheckedAt,
       })),
+
+    promoteToReal: () =>
+      set((s) => (s.mode === "real" ? {} : { mode: "real" })),
 
     resetToDemo: () => {
       void config.clearRealState();

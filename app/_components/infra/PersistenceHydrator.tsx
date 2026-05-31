@@ -76,7 +76,40 @@ export function PersistenceHydrator() {
     let snapTimer: ReturnType<typeof setTimeout> | null = null;
     let sessionTimer: ReturnType<typeof setTimeout> | null = null;
     const unsub = useAppStore.subscribe((state, prev) => {
-      if (state.mode !== "real") return;
+      // Frame B (no-sign-in support): if a state change fires while
+      // we're still in demo mode, the user has just made their first
+      // edit — promote the session to real mode (preserves all
+      // current data) so the downstream IDB writes + Drive sync
+      // gates work normally. We DON'T return after promoteToReal:
+      // the synchronous re-fire would see (state.household ===
+      // prev.household) after the promote (since only mode flipped)
+      // and early-return at the diff check below — silently losing
+      // the user's edit. So we fall through and let THIS fire
+      // schedule the save with `state` still pointing at the user's
+      // actual diff vs `prev`.
+      //
+      // Filter: skip the no-op fires that happen during initial
+      // hydration (those leave all tracked slices identical and the
+      // diff check below already returns early on them).
+      if (state.mode !== "real") {
+        const noUserEdit =
+          state.household === prev.household &&
+          state.assumptions === prev.assumptions &&
+          state.memberAssumptions === prev.memberAssumptions &&
+          state.targetAllocation === prev.targetAllocation &&
+          state.glidePath === prev.glidePath &&
+          state.householdAnnualIncomeUSD === prev.householdAnnualIncomeUSD &&
+          state.goals === prev.goals &&
+          state.budgetItems === prev.budgetItems &&
+          state.incomeStreams === prev.incomeStreams &&
+          state.scenarios === prev.scenarios &&
+          state.driveEncryptionEnabled === prev.driveEncryptionEnabled &&
+          state.healthPlans === prev.healthPlans &&
+          state.healthImportanceWeights === prev.healthImportanceWeights;
+        if (noUserEdit) return;
+        useAppStore.getState().promoteToReal();
+        // Fall through to the save logic below.
+      }
       // Time-travel session gate — when active, the household /
       // assumptions in memory represent a HYPOTHETICAL past state
       // the user is editing for the purpose of taking a backdated
