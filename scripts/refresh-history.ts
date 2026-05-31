@@ -66,7 +66,21 @@ async function getSessionCookie(): Promise<string | null> {
 }
 
 const NUM_SHARDS = 32;
-const HISTORY_RANGE = "10y";
+// Yahoo's chart endpoint accepts period1/period2 (UNIX seconds)
+// for an exact start/end window — preferred over `range=10y`
+// which depends on the wall-clock time the cron runs.
+//
+// Start at Jan 1 2007 to give the chart "All" view 17+ years of
+// history. Tickers that didn't exist that far back (TQQQ started
+// 2010, BITO started 2021, etc.) simply have data from their
+// inception. Yahoo returns whatever's available within the window.
+//
+// Storage impact: 17y daily ≈ 4500 points × 1020 tickers stored
+// as compact [t,p] pairs ≈ 60MB raw, ~15MB gzipped. Well under
+// Vercel Blob's 1GB free-tier storage.
+const HISTORY_PERIOD1_SEC = Math.floor(
+  new Date("2007-01-01T00:00:00Z").getTime() / 1000,
+);
 const HISTORY_INTERVAL = "1d";
 const FETCH_SPACING_MS = 200; // polite throttle, ~5 req/s
 const UNIVERSE_PATH = resolve(process.cwd(), "data", "etf-universe.json");
@@ -91,7 +105,8 @@ async function fetchHistory(
   symbol: string,
   attempt = 1,
 ): Promise<HistoryPoint[] | null> {
-  const url = `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=${HISTORY_RANGE}&interval=${HISTORY_INTERVAL}`;
+  const period2 = Math.floor(Date.now() / 1000);
+  const url = `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?period1=${HISTORY_PERIOD1_SEC}&period2=${period2}&interval=${HISTORY_INTERVAL}`;
   try {
     const cookie = await getSessionCookie();
     const headers = browserHeaders(cookie ? { Cookie: cookie } : undefined);
@@ -278,7 +293,7 @@ async function main() {
   const manifest = {
     generatedAt,
     numShards: NUM_SHARDS,
-    range: HISTORY_RANGE,
+    range: `period1=${HISTORY_PERIOD1_SEC} (${new Date(HISTORY_PERIOD1_SEC * 1000).toISOString().slice(0, 10)})`,
     interval: HISTORY_INTERVAL,
     shards: blobUrls,
   };
