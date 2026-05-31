@@ -34,6 +34,7 @@ import {
   type HistoryRange,
 } from "@/lib/data/history";
 import { loadSnapshots, type Snapshot } from "@/lib/persistence/persistence";
+import { buildDemoSnapshots } from "@/lib/demoSnapshots";
 import {
   getCachedQuote,
   getQuote,
@@ -135,16 +136,47 @@ export function HistoryView({
   // TimeTravelBanner; auto-snapshotter writes). Without the
   // dep, this view showed stale data until next mount.
   const snapshotsRevision = useAppStore((s) => s.snapshotsRevision);
+  const mode = useAppStore((s) => s.mode);
+  // Stable anchor for the synthetic demo snapshots — pin it once
+  // per mount so buildDemoSnapshots returns identical timestamps
+  // across re-renders (otherwise hover-state, chart-keys, and
+  // memoized series would churn on every render).
+  const [demoAnchor] = useState(() => Date.now());
 
   useEffect(() => {
     let cancelled = false;
+    // Demo mode: synthesize a 10y / 6-month-interval timeline from
+    // DEMO_HOUSEHOLD so the home chart actually exercises the
+    // interpolation machinery (varied past shares + back-projected
+    // prices). Without this, signed-out demo users saw only IDB
+    // snapshots — typically 0 of them, occasionally 1 from an
+    // auto-snapshot — and the chart degenerated into a flat back-
+    // projection with a sharp drop at the right edge where the
+    // single anchor pinned to live.
+    //
+    // Real mode: load from IDB exactly as before. If a user has
+    // been auto-promoted (Frame B), their IDB snapshots are the
+    // source of truth; we don't overlay synthetic demo snapshots
+    // because those would conflict with the real history.
+    if (mode === "demo") {
+      // Run the build in a microtask so the setState is async vs
+      // the effect body — the alternative (synchronous setState
+      // here) triggers the lint rule about cascading renders.
+      void Promise.resolve().then(() => {
+        if (cancelled) return;
+        setSnapshots(buildDemoSnapshots(demoAnchor));
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
     void loadSnapshots().then((snaps) => {
       if (!cancelled) setSnapshots(snaps);
     });
     return () => {
       cancelled = true;
     };
-  }, [snapshotsRevision]);
+  }, [snapshotsRevision, mode, demoAnchor]);
 
   // setLoading(true) below is the canonical "start an async data
   // load" pattern. The React 19 idiomatic alternative is Suspense

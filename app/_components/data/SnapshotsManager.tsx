@@ -9,6 +9,7 @@ import {
   recordSnapshot,
   type Snapshot,
 } from "@/lib/persistence/persistence";
+import { buildDemoSnapshots } from "@/lib/demoSnapshots";
 import { captureSnapshotAppState } from "@/lib/persistence/snapshotAppState";
 import {
   filterHousehold,
@@ -166,8 +167,43 @@ export function SnapshotsManager() {
     return () => window.clearTimeout(id);
   }, [statusMessage]);
   const [includeComposition, setIncludeComposition] = useState(true);
+  // Stable anchor for synthesized demo snapshots — mirrors the
+  // HistoryView pattern so the demo timeline doesn't shift on
+  // re-render. Only consulted when `mode === "demo"`.
+  const [demoAnchor] = useState(() => Date.now());
 
   const refresh = async () => {
+    // Frame B + demo: surface the synthetic 10y / 6-month-interval
+    // demo timeline alongside (or instead of) IDB snapshots. The
+    // home-page History chart now reads these too (see HistoryView),
+    // so SnapshotsManager's list and the chart stay consistent
+    // about what historical anchors exist.
+    //
+    // Behavior:
+    //  - demo + IDB empty → show only synthetic demo snapshots
+    //    (the typical signed-out case).
+    //  - demo + IDB has entries → MERGE: IDB takes precedence
+    //    when t collides (the user explicitly recorded that one,
+    //    so respect it over the synthetic baseline). This handles
+    //    the case where a user explored, saved a snapshot, and
+    //    then refreshed: their saved row stays visible alongside
+    //    the demo backdrop.
+    //  - real mode → IDB only (unchanged).
+    if (mode === "demo") {
+      const idb = await loadSnapshots();
+      const demo = buildDemoSnapshots(demoAnchor);
+      const idbByT = new Map(idb.map((s) => [s.t, s]));
+      const merged: Snapshot[] = demo.map((d) => idbByT.get(d.t) ?? d);
+      // Append any IDB rows whose t didn't collide with a demo
+      // anchor (user-recorded snapshots at off-grid times).
+      const demoTs = new Set(demo.map((d) => d.t));
+      for (const s of idb) {
+        if (!demoTs.has(s.t)) merged.push(s);
+      }
+      merged.sort((a, b) => a.t - b.t);
+      setSnapshots(merged);
+      return;
+    }
     const list = await loadSnapshots();
     setSnapshots(list);
   };
