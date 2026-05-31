@@ -116,9 +116,21 @@ async function getYahooSession(
 // trailing-days gap is filled by a small dynamic Yahoo call.
 //
 // The manifest URL lives in NEXT_PUBLIC_QUOTE_HISTORY_MANIFEST.
-// When unset (local dev / no static data yet), the cache lookup
-// returns null and the route falls through to the existing
-// Yahoo+Finnhub path — no behavior change vs pre-cache.
+// When unset, we fall back to DEFAULT_MANIFEST_URL below — the
+// project's well-known Vercel Blob URL. Without that fallback,
+// every fresh Vercel deployment would silently skip the static
+// cache and hammer Yahoo / Finnhub (user-reported on Production
+// after PR #18: "VOO and MSFT return finnhub: no candle history
+// | yahoo: 429" — env var was set on Preview but not Production,
+// so Production never saw the cache).
+//
+// Forks of this repo should override the env var with their own
+// Vercel Blob URL, or delete the constant if they want the
+// dynamic fallback behavior.
+const DEFAULT_MANIFEST_URL =
+  "https://yr2lktc5f9ujt0cn.public.blob.vercel-storage.com/quote-history/manifest.json";
+const QUOTE_HISTORY_MANIFEST_URL =
+  process.env.NEXT_PUBLIC_QUOTE_HISTORY_MANIFEST || DEFAULT_MANIFEST_URL;
 
 const STATIC_CACHE_TTL_MS = 60 * 60 * 1000; // 1h
 type ManifestCache = { manifest: HistoryManifest; fetchedAt: number };
@@ -129,7 +141,7 @@ let manifestCache: ManifestCache | null = null;
 let manifestInflight: Promise<HistoryManifest | null> | null = null;
 
 async function loadManifest(): Promise<HistoryManifest | null> {
-  const manifestUrl = process.env.NEXT_PUBLIC_QUOTE_HISTORY_MANIFEST;
+  const manifestUrl = QUOTE_HISTORY_MANIFEST_URL;
   if (!manifestUrl) return null;
   if (
     manifestCache &&
@@ -298,7 +310,7 @@ async function tryStaticCache(
   symbol: string,
   range: "5y" | "max",
 ): Promise<StaticCacheResult> {
-  const manifestUrl = process.env.NEXT_PUBLIC_QUOTE_HISTORY_MANIFEST;
+  const manifestUrl = QUOTE_HISTORY_MANIFEST_URL;
   if (!manifestUrl) return { status: "no_env_var" };
   const manifest = await loadManifest();
   if (!manifest) return { status: "manifest_fetch_failed" };
