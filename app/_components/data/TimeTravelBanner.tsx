@@ -164,6 +164,54 @@ export function TimeTravelBanner() {
       // store state immediately after. Same applies to appState:
       // captureSnapshotAppState clones every field internally.
       const householdClone = structuredClone(household);
+      // Rebuild valueUSD for non-manual live-priceable holdings
+      // so the saved snap reflects HISTORICAL prices at `t`, not
+      // the live valueUSDs preserved through time-travel mode.
+      //
+      // User-reported bug: snap recorded $2.77M for Dec 30 2025,
+      // but the history chart anchored at $2.4M for that date.
+      // Cause: R1 audit fix preserves valueUSD during time-travel
+      // historical-price fetch (don't recompute mid-session).
+      // When the user saved, valueUSD was still today's price ×
+      // shares — but the chart's effectiveSnapNW correctly
+      // computed shares × historical Dec 30 close. The two
+      // disagreed because the snap captured today's prices on
+      // a past date.
+      //
+      // For each live-priceable holding in the clone:
+      //   - Manual-priced: user's typed values are authoritative,
+      //     keep as-is.
+      //   - Non-manual: valueUSD := shares × lastPriceUSD
+      //     (lastPriceUSD was already set to the historical close
+      //     by the historical-price fetch effect during the
+      //     session; if the fetch failed for this symbol it
+      //     stayed at today's price — in which case the snap is
+      //     still "wrong" but no worse than before).
+      // Cash / real_estate / private_stock / other use valueUSD
+      // unchanged — those kinds don't fluctuate with quotes.
+      for (const acct of householdClone.accounts) {
+        for (let i = 0; i < acct.holdings.length; i++) {
+          const h = acct.holdings[i];
+          if (
+            h.kind !== "equity" &&
+            h.kind !== "bond" &&
+            h.kind !== "crypto" &&
+            h.kind !== "commodity"
+          )
+            continue;
+          if (h.isManualPrice) continue;
+          if (
+            !Number.isFinite(h.shares) ||
+            !Number.isFinite(h.lastPriceUSD) ||
+            h.lastPriceUSD <= 0
+          )
+            continue;
+          acct.holdings[i] = {
+            ...h,
+            valueUSD: h.shares * h.lastPriceUSD,
+          };
+        }
+      }
       const appState = captureSnapshotAppState(useAppStore.getState());
       const snap: Snapshot = {
         t,

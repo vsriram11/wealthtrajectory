@@ -198,51 +198,49 @@ export function HistoryView({
     return { start, end };
   }, [range, customStart, customEnd]);
 
-  const series = useMemo(
-    () =>
-      overlaySnapshots(
-        reconstructHistory(
-          household,
-          quotes,
-          range,
-          undefined,
-          filteredSnapshots,
-          customRangeBounds,
-        ),
-        filteredSnapshots,
-        // Pin today's bucket to the live headline NW so the chart can
-        // never disagree with the number shown at the top of the
-        // card (and so a stale snapshot or out-of-date quote history
-        // can't drop the right edge to ~$0).
-        netWorth,
-        // Live household for the backdated-holding augmentation:
-        // snapshots recorded BEFORE the user added a backdated
-        // holding get their anchor NW bumped up to include the
-        // holding (per acquiredAt). User-reported bug: time-travel
-        // snapshot at Dec 2025 contains a private stock added in
-        // May 2026, but older auto-snapshots from Aug/Oct 2025
-        // don't — making the chart's Aug-Dec region understate.
+  // When Custom range is active with INVALID bounds (user mid-
+  // typing in the date inputs, or start >= end), suppress the
+  // chart series rather than passing degenerate input downstream.
+  // Degenerate input (e.g., start === end) collapses the bucket
+  // loop into `days = 2` with all buckets at the same `t`, which
+  // crashed the SVG path math (zero-width axis → NaN coordinates).
+  const customInvalid = range === "CUSTOM" && !customRangeBounds;
+
+  const series = useMemo(() => {
+    if (customInvalid) return [] as HistoryPoint[];
+    return overlaySnapshots(
+      reconstructHistory(
         household,
-        // Quotes + now: the snap anchor is computed via the SAME
-        // compose math as the pre-snap reconstruction so the
-        // boundary lines up. Without quotes, the anchor falls back
-        // to the recorded snap.netWorthUSD which was computed at
-        // SAVE TIME (today's prices for time-travel saves), making
-        // the chart anchor sit at today's value on a past date and
-        // creating a visible vertical jump against the
-        // back-projected pre-snap region.
         quotes,
+        range,
         undefined,
+        filteredSnapshots,
+        customRangeBounds,
       ),
-    [
-      household,
-      quotes,
-      range,
       filteredSnapshots,
+      // Pin today's bucket to the live headline NW so the chart
+      // can never disagree with the number shown at the top of
+      // the card.
       netWorth,
-      customRangeBounds,
-    ],
-  );
+      // Live household for the backdated-holding augmentation:
+      // snapshots recorded BEFORE the user added a backdated
+      // holding get their anchor NW bumped up to include the
+      // holding.
+      household,
+      // Quotes + now: snap anchor uses the SAME compose math
+      // as the pre-snap reconstruction.
+      quotes,
+      undefined,
+    );
+  }, [
+    customInvalid,
+    household,
+    quotes,
+    range,
+    filteredSnapshots,
+    netWorth,
+    customRangeBounds,
+  ]);
 
   const hasLiveData = symbols.some(
     (s) => quotes[s] && (quotes[s] as Quote).history.length > 0,
@@ -458,7 +456,18 @@ function historicalValue(
   const q = quotes[holding.symbol.toUpperCase()];
   if (!q) return holding.valueUSD;
   const r = priceAtDetailed(q, t);
-  if (r === null || r.clamped) return holding.valueUSD;
+  if (r === null) return holding.valueUSD;
+  // CRITICAL: even when `clamped` (t outside the available quote
+  // history), USE the clamped price × shares — NOT today's
+  // valueUSD. User-reported bug: with the previous "fallback to
+  // valueUSD on clamp" semantic, the bucket just before quote
+  // history's first point fell back to today's price (e.g.
+  // TQQQ today ~$84 × 100 shares = $8,400) while the bucket
+  // just after used the 2021 close (~$24 × 100 = $2,400), making
+  // the chart drop $6,000 per 100 shares of TQQQ in one bucket.
+  // Multiplied across holdings: visible $200K cliff at the
+  // quote-history start. Using the clamped price (h[0] or h[N-1])
+  // ensures both adjacent buckets agree at the boundary.
   return holding.shares * r.price;
 }
 

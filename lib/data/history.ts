@@ -457,21 +457,35 @@ function composeNetWorthAt(
       const q = quotes[h.symbol.toUpperCase()];
       let price: number;
       const detailed = q ? priceAtDetailed(q, t) : null;
-      // CRITICAL (R2 audit): treat a CLAMPED lookup as a MISS and
-      // fall through to CAGR back-projection. The old code took the
-      // clamped price (oldest sample in the history window) for any
-      // t before the window — so a 6-yr-old timepoint with a 5-yr
-      // quote history would silently use the 5-yr-old price as if
-      // it were the 6-yr-old price, making the chart flat-line at
-      // the oldest sample and inventing zero growth. Falling to the
-      // CAGR branch is the documented "estimated" behavior.
-      if (detailed && !detailed.clamped) {
+      if (detailed) {
+        // Use the quote-derived price WHETHER OR NOT it's clamped.
+        // User-reported bug: when one bucket fell INSIDE the
+        // quote history (returned actual close) and the adjacent
+        // bucket fell OUTSIDE (returned a CAGR back-projection
+        // from today's price), the chart showed a huge cliff at
+        // the quote-history boundary. For a high-growth ticker
+        // (TQQQ-like, ~15% expected real CAGR), the CAGR
+        // estimate at 5y back is ~50% of today's price — but
+        // the actual historical close can be ~10% of today's. A
+        // single-bucket cliff in the middle of the 5Y view.
+        //
+        // Fix: use the clamped price (h[0] or h[N-1]) when out
+        // of window. Pre-inception buckets sit at a flat plateau
+        // at the first historical close, smoothly transitioning
+        // at the inception date instead of cliff-dropping from a
+        // CAGR estimate.
+        //
+        // R2 audit's concern about "stale-price flatline" is
+        // satisfied because the flatline IS the first known
+        // close — not today's price. Users understand "estimated
+        // at first known price" for pre-inception buckets.
         price = detailed.price;
       } else {
         // Synthesize the back-projection from the holding's expected
-        // real CAGR. Better than a flat line when upstream history
-        // isn't available (Finnhub key missing, rate limited, etc.).
-        // Caller flags this case in the UI as "estimated".
+        // real CAGR. ONLY fires when the quote is missing entirely
+        // (no upstream data available). Better than nothing for
+        // long-tail tickers that aren't in the static cache and
+        // whose dynamic fetch failed.
         const monthsBack = (now - t) / (30.44 * 24 * 60 * 60 * 1000);
         const monthlyRate =
           h.expectedRealCAGR === 0
