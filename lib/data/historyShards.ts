@@ -107,3 +107,33 @@ export type HistoryManifest = {
   interval: string;
   shards: Array<{ shard: number; url: string; size: number }>;
 };
+
+/**
+ * Pick a Yahoo Finance `range` parameter wide enough to bridge
+ * "last day in the shard" → "now" with headroom, given the
+ * shard's generation timestamp. Used by the API route's trailing
+ * splice — when the monthly cron is on time, a 3mo window has
+ * two months of slack; when the cron is overdue (user-reported
+ * gaps of several months at one point), the window widens so
+ * the merged chart stays gap-free.
+ *
+ * Capped at 2y because beyond that the trailing payload becomes
+ * too heavy for what's supposed to be a small splice request.
+ * If a shard ever falls > 2 years behind, the chart will have an
+ * irreducible right-edge gap — but the historical part of the
+ * cache is still served (better a chart with a gap than no chart
+ * at all; dynamic Yahoo+Finnhub fallback is unreliable from
+ * Vercel IPs, which is the whole reason the static cache exists).
+ *
+ * Lives in this module rather than alongside the route handler
+ * because Next.js route files only allow specific exports
+ * (HTTP method handlers + a small set of config keys); a
+ * separate import is the path to a unit-testable helper.
+ */
+export function pickTrailingRange(shardGeneratedAt: number): string {
+  const daysSince = (Date.now() - shardGeneratedAt) / 86_400_000;
+  if (daysSince <= 60) return "3mo";
+  if (daysSince <= 150) return "6mo";
+  if (daysSince <= 330) return "1y";
+  return "2y";
+}

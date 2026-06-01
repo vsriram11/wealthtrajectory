@@ -1,6 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
-import { NUM_HISTORY_SHARDS, shardForSymbol } from "./historyShards";
+import {
+  NUM_HISTORY_SHARDS,
+  pickTrailingRange,
+  shardForSymbol,
+} from "./historyShards";
 
 describe("shardForSymbol — deterministic hash distribution", () => {
   it("returns a value in [0, NUM_HISTORY_SHARDS)", () => {
@@ -65,5 +69,49 @@ describe("shardForSymbol — deterministic hash distribution", () => {
     expect(shardForSymbol("QQQ")).toBe(shardForSymbol("QQQ"));
     // Specific values would over-constrain; the property checks
     // above + determinism cover the failure modes.
+  });
+});
+
+describe("pickTrailingRange — shard-age → Yahoo range tiering", () => {
+  // Pin all four tiers + the boundaries between them. The
+  // headline contract: an older shard MUST get at least as wide
+  // a trailing window as a younger one (monotonicity), and the
+  // window must be large enough to bridge the gap (range ≥
+  // shard age + headroom).
+  const NOW = new Date("2026-06-01T00:00:00Z").getTime();
+  function daysAgo(n: number): number {
+    return NOW - n * 86_400_000;
+  }
+
+  it.each([
+    [1, "3mo"], // fresh cron run — minimum window with headroom
+    [30, "3mo"], // common case (last monthly run was ~30d ago)
+    [60, "3mo"], // 60d boundary still picks 3mo
+    [61, "6mo"], // just over 60d → bump to 6mo
+    [100, "6mo"],
+    [150, "6mo"],
+    [151, "1y"], // just over 150d → 1y
+    [300, "1y"],
+    [330, "1y"],
+    [331, "2y"], // just over 330d → 2y cap
+    [600, "2y"],
+    [1000, "2y"], // 2y cap holds for an extremely stale shard
+  ])("shard %i days old → range=%s", (days, expected) => {
+    vi.setSystemTime(NOW);
+    expect(pickTrailingRange(daysAgo(days))).toBe(expected);
+    vi.useRealTimers();
+  });
+
+  it("is monotonic in shard age (older shard ⇒ wider or equal window)", () => {
+    vi.setSystemTime(NOW);
+    const tiers = ["3mo", "6mo", "1y", "2y"];
+    const rank = (r: string) => tiers.indexOf(r);
+    let last = -1;
+    for (const days of [1, 30, 60, 61, 100, 150, 151, 300, 330, 331, 1000]) {
+      const got = rank(pickTrailingRange(daysAgo(days)));
+      expect(got).toBeGreaterThanOrEqual(last);
+      last = got;
+    }
+    vi.useRealTimers();
   });
 });
