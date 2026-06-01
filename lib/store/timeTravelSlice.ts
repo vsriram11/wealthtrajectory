@@ -237,6 +237,18 @@ export function createTimeTravelSliceActions(
           baselineHousehold: s.household,
           baselineAssumptions: s.assumptions,
           editingSnapshotT: null,
+          // Drop to household scope on entry. If the user was
+          // viewing a specific member, the time-travel session
+          // would otherwise stay scoped to that member — NW /
+          // allocation / accounts would only show that member's
+          // portion, making the OTHER members appear to have
+          // been "zeroed out." Time-travel is fundamentally a
+          // household-level operation (the saved snapshot
+          // captures the full household), so the live session
+          // view should match. enterTimeTravelEditingSnapshot
+          // and restoreTimeTravelSession already do this; this
+          // was a missing line in the regular entry path.
+          selectedMemberId: null,
           // Reset status on entry — historical-price flow will
           // populate it as fetches complete.
           timeTravelPriceStatus: {
@@ -244,7 +256,7 @@ export function createTimeTravelSliceActions(
             clampedSymbols: [],
             failedSymbols: [],
           },
-        };
+        } as Partial<Ctx>;
       }),
     enterTimeTravelEditingSnapshot: (snap) =>
       set((s) => {

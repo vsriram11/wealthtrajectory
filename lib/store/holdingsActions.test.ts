@@ -397,6 +397,175 @@ describe("live-pricing flows", () => {
     expect(h.valueUSD).toBe(6000);
   });
 
+  it("historical mode recomputes valueUSD from shares × historical price (was: kept today's value)", () => {
+    // User-reported bug: entering time-travel showed historical
+    // prices being fetched (banner said "auto-filled: N") but
+    // NW / allocation / accounts all kept showing today's
+    // dollar values. Root cause: historical mode previously
+    // updated lastPriceUSD + lastPricedAt only, leaving
+    // valueUSD frozen at today's number.
+    //
+    // Share count is independent of price (if you owned N
+    // shares of VOO today you owned N shares of VOO yesterday
+    // too) so valueUSD at any date is shares × price-on-date.
+    // This test pins the retrodiction: 10 shares of VOO @ today
+    // $690 = $6900; at historical $400 it should read $4000.
+    const s = makeFakeStore({
+      household: {
+        id: "h1",
+        members: [{ id: "m1", displayName: "Alex" }],
+        accounts: [
+          {
+            id: "acc1",
+            displayName: "x",
+            category: "ROTH_IRA",
+            ownerId: "m1",
+            monthlyContributionUSD: 0,
+            holdings: [
+              {
+                kind: "equity",
+                id: "h1",
+                symbol: "VOO",
+                shares: 10,
+                lastPriceUSD: 690,
+                // lastPricedAt set → not a firstFetch
+                lastPricedAt: 1_700_000_000_000,
+                isManualPrice: false,
+                enteredAsShares: false,
+                acquiredAt: null,
+                valueUSD: 6900,
+                expectedRealCAGR: 0.07,
+                leverage: 1,
+                styleBox: { LARGE_BLEND: 1 } as never,
+                geography: { US: 1, DEVELOPED: 0, EMERGING: 0 },
+              },
+            ],
+          },
+        ],
+        liabilities: [],
+      },
+    });
+    const a = createHoldingsActions(s.set);
+    // 2022-01-03 close = $400/share for VOO (made-up).
+    a.applyLivePrice("VOO", 400, 1_641_168_000_000, "historical");
+    const h = s.state.household.accounts[0].holdings[0];
+    if (h.kind !== "equity") throw new Error("narrow");
+    expect(h.shares).toBe(10); // unchanged
+    expect(h.lastPriceUSD).toBe(400);
+    expect(h.lastPricedAt).toBe(1_641_168_000_000);
+    expect(h.valueUSD).toBe(4000); // shares × historical price
+  });
+
+  it("historical mode firstFetch preserves user-entered valueUSD (newly-added holding during session)", () => {
+    // For a holding ADDED during a time-travel session, the
+    // user's typed dollar value is the authoritative historical
+    // value (they're saying "I had $5000 of VOO on date X").
+    // We must NOT recompute valueUSD = shares × historical_price
+    // (would overwrite the user's input with whatever the seed
+    // shares happen to be × the fetched price). We must also
+    // NOT recompute shares from value÷historical_price (the
+    // original R1 audit concern — silently writes nonsense
+    // shares back into the user's holding).
+    const s = makeFakeStore({
+      household: {
+        id: "h1",
+        members: [{ id: "m1", displayName: "Alex" }],
+        accounts: [
+          {
+            id: "acc1",
+            displayName: "x",
+            category: "ROTH_IRA",
+            ownerId: "m1",
+            monthlyContributionUSD: 0,
+            holdings: [
+              {
+                kind: "equity",
+                id: "h1",
+                symbol: "VOO",
+                // Default seed shares; user typed "$5000"
+                // → factory wrote shares = 5000 / today's
+                // price, but we don't want to use those
+                // shares to back-derive a historical value.
+                shares: 7.246,
+                lastPriceUSD: 690,
+                lastPricedAt: null, // ← firstFetch sentinel
+                isManualPrice: false,
+                enteredAsShares: false,
+                acquiredAt: null,
+                valueUSD: 5000,
+                expectedRealCAGR: 0.07,
+                leverage: 1,
+                styleBox: { LARGE_BLEND: 1 } as never,
+                geography: { US: 1, DEVELOPED: 0, EMERGING: 0 },
+              },
+            ],
+          },
+        ],
+        liabilities: [],
+      },
+    });
+    const a = createHoldingsActions(s.set);
+    a.applyLivePrice("VOO", 400, 1_641_168_000_000, "historical");
+    const h = s.state.household.accounts[0].holdings[0];
+    if (h.kind !== "equity") throw new Error("narrow");
+    // Price metadata stamped (UI can show "as of <date>").
+    expect(h.lastPriceUSD).toBe(400);
+    expect(h.lastPricedAt).toBe(1_641_168_000_000);
+    // User's entered dollars stay authoritative.
+    expect(h.valueUSD).toBe(5000);
+    expect(h.shares).toBe(7.246);
+  });
+
+  it("historical mode skips manual-priced holdings (same gate as live mode)", () => {
+    // Manual-priced holdings don't participate in either live
+    // or historical price application — the user's typed price
+    // is sovereign.
+    const s = makeFakeStore({
+      household: {
+        id: "h1",
+        members: [{ id: "m1", displayName: "Alex" }],
+        accounts: [
+          {
+            id: "acc1",
+            displayName: "x",
+            category: "BROKERAGE",
+            ownerId: "m1",
+            monthlyContributionUSD: 0,
+            holdings: [
+              {
+                kind: "equity",
+                id: "h1",
+                symbol: "TQQQ",
+                shares: 100,
+                lastPriceUSD: 52,
+                lastPricedAt: 1_700_000_000_000,
+                isManualPrice: true,
+                enteredAsShares: false,
+                acquiredAt: null,
+                valueUSD: 5200,
+                expectedRealCAGR: 0.07,
+                leverage: 3,
+                styleBox: { LARGE_BLEND: 1 } as never,
+                geography: { US: 1, DEVELOPED: 0, EMERGING: 0 },
+              },
+            ],
+          },
+        ],
+        liabilities: [],
+      },
+    });
+    const a = createHoldingsActions(s.set);
+    a.applyLivePrice("TQQQ", 30, 1_641_168_000_000, "historical");
+    const h = s.state.household.accounts[0].holdings[0];
+    if (h.kind !== "equity") throw new Error("narrow");
+    // All four fields unchanged (manual holdings are inert
+    // to the live-price pipeline in either mode).
+    expect(h.shares).toBe(100);
+    expect(h.lastPriceUSD).toBe(52);
+    expect(h.lastPricedAt).toBe(1_700_000_000_000);
+    expect(h.valueUSD).toBe(5200);
+  });
+
   it("manual-priced holdings are skipped by applyLivePrice", () => {
     const s = makeFakeStore({
       household: {

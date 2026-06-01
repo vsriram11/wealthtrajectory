@@ -165,24 +165,42 @@ export function applyLivePriceTo<Ctx extends { household: Household }>(
           if (h.isManualPrice) return h;
           if (h.symbol.toUpperCase() !== upperSymbol) return h;
           const firstFetch = h.lastPricedAt == null;
-          // Historical mode: NEVER recompute valueUSD from
-          // existing shares × historical price. The shares were
-          // computed at TODAY's price → multiplying by past
-          // price yields garbage (audit R1 C2). Only update
-          // the lastPriceUSD + lastPricedAt fields so the UI
-          // can show "Last refreshed at <date>" without
-          // corrupting the user's dollar values.
+          // Historical mode (time-travel session). Share count
+          // is independent of price — if the user owns N shares
+          // of VOO, they owned N shares at every date in their
+          // holding history; the dollar value at any date is
+          // shares × price-on-that-date. So for an existing
+          // holding (non-firstFetch), recomputing valueUSD =
+          // shares × historical_price is the correct
+          // retrodiction. Without this, NW / allocation /
+          // accounts all keep showing today's dollars even
+          // though the banner says "BACKDATING for <date>" —
+          // the historical price is fetched but the displayed
+          // values never reflect it.
           //
-          // For the firstFetch case, same rule: user's
-          // entered dollar value is authoritative; don't divide
-          // by historical price to derive shares either (that
-          // would yield garbage shares).
+          // firstFetch case (newly-added holding during the
+          // session): user's entered dollar value is the
+          // authoritative historical value. Don't recompute
+          // valueUSD (would lose the user's input) and don't
+          // recompute shares from value/historical_price
+          // (that's the original R1 audit concern: share count
+          // derived from user-typed dollars at the historical
+          // price would silently overwrite whatever shares the
+          // user typed). Leave both alone, just stamp the
+          // price metadata so the UI can show "as of date".
           if (mode === "historical") {
+            if (firstFetch) {
+              return {
+                ...h,
+                lastPriceUSD: price,
+                lastPricedAt: pricedAt,
+              };
+            }
             return {
               ...h,
               lastPriceUSD: price,
               lastPricedAt: pricedAt,
-              // valueUSD + shares untouched.
+              valueUSD: h.shares * price,
             };
           }
           const shares =
