@@ -105,6 +105,25 @@ describe("Time-travel slice — enterTimeTravel", () => {
     expect(s.state.timeTravelDate).toBe("2022-01-01");
     expect(s.state.baselineHousehold).toBe(firstBaseline);
   });
+
+  it("drops to household scope on entry (was: stayed scoped to selected member)", () => {
+    // User-reported "HUGE PROBLEM": entering time-travel while
+    // viewing a specific member caused the OTHER members'
+    // accounts to look "zeroed out" — the member filter stayed
+    // active during the session, so NW / allocation / accounts
+    // only showed the selected member's portion of the
+    // household. The other entry paths
+    // (enterTimeTravelEditingSnapshot, restoreTimeTravelSession)
+    // already reset selectedMemberId to null on entry; this was
+    // a missing line in the regular entry path.
+    const s = makeFakeStore({ selectedMemberId: "alex" });
+    const a = createTimeTravelSliceActions(s.set);
+    a.enterTimeTravel("2022-01-01");
+    expect(s.state.selectedMemberId).toBeNull();
+    // Belt + suspenders: baseline + active still set correctly.
+    expect(s.state.timeTravelActive).toBe(true);
+    expect(s.state.baselineHousehold).not.toBeNull();
+  });
 });
 
 describe("Time-travel slice — exitTimeTravelDiscard", () => {
