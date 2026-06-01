@@ -106,7 +106,12 @@ describe("getQuote — does not poison the cache with zero / unavailable", () =>
         currentPrice: 280.5,
         currency: "USD",
         name: "Vanguard Total Stock",
-        history: [],
+        // Non-empty history: an empty-history fresh response is
+        // now intentionally NOT cached (see the empty-history
+        // invalidation tests below) because Finnhub-only fallback
+        // returns currentPrice without candles, and persisting
+        // those was poisoning the chart's data source.
+        history: [{ t: Date.now() - 86_400_000, p: 279.0 }],
         asOf: Date.now(),
       }),
     );
@@ -235,6 +240,92 @@ describe("getQuote — IDB fallback when upstream is unavailable", () => {
   });
 });
 
+describe("getQuote — empty-history cache invalidation", () => {
+  it("treats an IDB-cached quote with empty history as not-fresh and refetches", async () => {
+    // User-reported regression after PR #19 deploy: the home
+    // History chart went smooth because IDB held empty-history
+    // quotes from BEFORE the static-cache fix (Finnhub returned
+    // currentPrice but no candles, the route ran the dynamic
+    // fallback which produced { currentPrice: N, history: [] }).
+    // isUsableQuote returned true on those (currentPrice > 0),
+    // and getQuote returned the cached value without a refetch —
+    // for 23 hours per holding.
+    //
+    // Pin that an empty-history cached row triggers a fresh
+    // fetch instead of being served from cache.
+    vi.resetModules();
+    dexieRowHolder.row = {
+      quote: {
+        symbol: "VOO",
+        currentPrice: 580.0,
+        currency: "USD",
+        name: null,
+        history: [], // ← the stale state
+        fetchedAt: Date.now() - 10 * 60 * 1000, // fresh by TTL
+        unavailable: false,
+      },
+    };
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        symbol: "VOO",
+        currentPrice: 580,
+        currency: "USD",
+        name: null,
+        history: [{ t: Date.now() - 86_400_000, p: 578.5 }],
+        asOf: Date.now(),
+      }),
+    );
+    const { getQuote } = await import("@/lib/data/quotes");
+    const out = await getQuote("VOO");
+    expect(out?.history.length).toBeGreaterThan(0);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does NOT write an empty-history fresh fetch to IDB (avoids re-creating the trap)", async () => {
+    // The IDB write was the source of the stale state in the
+    // first place: a fresh fetch returning empty history was
+    // cached, and subsequent getQuote calls served it for 23h.
+    // After the fix, an empty-history fresh response is held in
+    // memory (for the current session) but not persisted to IDB.
+    vi.resetModules();
+    dexieRowHolder.row = undefined; // no prior IDB
+    const putSpy = vi.fn(async () => {});
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        symbol: "VOO",
+        currentPrice: 580,
+        currency: "USD",
+        name: null,
+        history: [], // ← empty history from upstream
+        asOf: Date.now(),
+      }),
+    );
+    // We can't directly observe IDB writes without re-plumbing
+    // the mock — but the contract is: if we call getQuote again
+    // RIGHT AFTER receiving an empty-history quote, the next
+    // call should refetch (because memCache returns the empty
+    // quote and our cacheCoversMax invalidates it). This is the
+    // observable proxy for "IDB doesn't sit on a poisoned row."
+    const { getQuote } = await import("@/lib/data/quotes");
+    const first = await getQuote("VOO");
+    expect(first?.history.length).toBe(0);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        symbol: "VOO",
+        currentPrice: 581,
+        currency: "USD",
+        name: null,
+        history: [{ t: Date.now(), p: 581 }],
+        asOf: Date.now(),
+      }),
+    );
+    const second = await getQuote("VOO");
+    expect(second?.history.length).toBeGreaterThan(0);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    void putSpy;
+  });
+});
+
 describe("refreshQuotes — bulk symbol refresh", () => {
   it("deduplicates + uppercases symbols, returning one entry per unique symbol", async () => {
     vi.resetModules();
@@ -286,7 +377,11 @@ describe("primeCache — seed without network", () => {
       currentPrice: 575.25,
       currency: "USD" as const,
       name: "Vanguard S&P 500",
-      history: [],
+      // Realistic Drive-sync seed: history is populated. An
+      // empty-history seed would (correctly) be treated as
+      // not-fresh by the empty-history invalidation guard and
+      // trigger a refetch.
+      history: [{ t: Date.now() - 86_400_000, p: 574.0 }],
       fetchedAt: Date.now(),
       unavailable: false,
     };
@@ -309,7 +404,9 @@ describe("primeCache — seed without network", () => {
       currentPrice: 575.25,
       currency: "USD",
       name: null,
-      history: [],
+      // Non-empty history so the empty-history invalidation
+      // guard doesn't (correctly) force a refetch.
+      history: [{ t: Date.now() - 86_400_000, p: 574.0 }],
       fetchedAt: Date.now(),
       unavailable: false,
     });

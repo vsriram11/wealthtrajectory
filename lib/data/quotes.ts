@@ -93,10 +93,24 @@ export async function getQuote(
   // history span as the proxy for "what range did we last
   // fetch." If the oldest point is < 6 years ago AND wantMax,
   // bypass cache to upgrade to a wider window.
+  //
+  // ALSO: any cached entry with EMPTY history is treated as
+  // not-fresh regardless of range. Empty-history entries get
+  // written when /api/quote returns currentPrice from Finnhub
+  // but no candle data (Finnhub free tier doesn't include
+  // /stock/candle, so this is the common-case failure mode when
+  // the static cache isn't reachable). Before this guard, those
+  // empty entries would sit in IDB for 23h and short-circuit
+  // every getQuote — the chart would have no series to draw and
+  // would fall back to CAGR-only back-projection (smooth, no
+  // daily volatility). User-reported on the home History chart
+  // after PR #19's cache fix deployed: every refetch was
+  // returning the pre-fix empty-history IDB entry and the chart
+  // never got the real prices.
   const SIX_YEARS_MS = 6 * 365 * 24 * 60 * 60 * 1000;
   const cacheCoversMax = (q: Quote): boolean => {
-    if (!wantMax) return true;
     if (q.history.length === 0) return false;
+    if (!wantMax) return true;
     return Date.now() - q.history[0].t > SIX_YEARS_MS;
   };
 
@@ -132,7 +146,17 @@ export async function getQuote(
   if (fresh) {
     if (isUsableQuote(fresh)) {
       memCache.set(symbol, fresh);
-      void writeCache(symbol, fresh);
+      // Only persist to IDB when there's actual history. An
+      // empty-history quote (currentPrice OK but candle endpoint
+      // failed — typical of the Finnhub-only fallback path)
+      // would otherwise sit in IDB for 23h and short-circuit
+      // future getQuote calls, starving the chart of the price
+      // series it needs. The in-memory cache still gets
+      // populated so within-session callers that just need
+      // currentPrice (PriceRefresher) don't pay an extra fetch.
+      if (fresh.history.length > 0) {
+        void writeCache(symbol, fresh);
+      }
       return fresh;
     }
     // Fresh fetch came back UNAVAILABLE (Yahoo 429, Finnhub down,
