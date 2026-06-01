@@ -2,6 +2,7 @@ import { NextRequest } from "next/server";
 
 import {
   NUM_HISTORY_SHARDS,
+  pickTrailingRange,
   shardForSymbol,
   type HistoryManifest,
   type ShardPayload,
@@ -221,24 +222,24 @@ async function loadShard(
 }
 
 /**
- * Fetch just the trailing window of daily prices from Yahoo to
- * splice onto the static-cache baseline. The cache is refreshed
- * monthly so the gap between last-cached-point and "now" is at
- * most ~30 days; we fetch range=3mo to cover that window with
- * headroom (in case the refresh is overdue or a particular ticker
- * was missing from a prior shard).
+ * Fetch the trailing window of daily prices from Yahoo to splice
+ * onto the static-cache baseline. Window size scales with shard
+ * age (see pickTrailingRange) so an overdue cron run doesn't
+ * leave a hole between the shard's last day and today.
  *
  * Returns null on any failure — caller falls through to "serve
  * cache without trailing splice." Cache-without-trailing is still
- * useful: the chart's history is correct up to ~30 days ago, and
- * the headline NW just sits on the slightly-stale currentPrice
- * until the next refresh.
+ * useful: the chart's history is correct up to the last shard
+ * point, and the headline NW just sits on the slightly-stale
+ * currentPrice until the next refresh.
  */
 async function fetchTrailingFromYahoo(
   symbol: string,
+  shardGeneratedAt: number,
 ): Promise<Array<{ t: number; p: number }> | null> {
   const session = await getYahooSession(UA_VARIATIONS[0]);
-  const path = `/v8/finance/chart/${encodeURIComponent(symbol)}?range=3mo&interval=1d`;
+  const yahooRange = pickTrailingRange(shardGeneratedAt);
+  const path = `/v8/finance/chart/${encodeURIComponent(symbol)}?range=${yahooRange}&interval=1d`;
   for (const host of HOSTS) {
     for (const ua of UA_VARIATIONS) {
       try {
@@ -299,8 +300,7 @@ type StaticCacheStatus =
   | "manifest_fetch_failed"
   | "shard_fetch_failed"
   | "symbol_not_in_shard"
-  | "shard_history_empty"
-  | "shard_too_stale";
+  | "shard_history_empty";
 
 type StaticCacheResult =
   | { status: "hit"; hit: StaticCacheHit }
@@ -331,7 +331,7 @@ async function tryStaticCache(
   // dynamic fetch that probably ALSO fails.
   let merged: Array<{ t: number; p: number }>;
   let mergedCurrent: number | null;
-  const trailing = await fetchTrailingFromYahoo(symbol);
+  const trailing = await fetchTrailingFromYahoo(symbol, shard.generatedAt);
   if (trailing && trailing.length > 0) {
     // Dedupe by UTC day, not exact timestamp. Yahoo can shift a
     // given trading day's epoch slightly across endpoints/ranges,
@@ -397,9 +397,6 @@ async function tryStaticCache(
     },
   };
 }
-
-const STATIC_CACHE_MAX_STALENESS_MS = 35 * 24 * 60 * 60 * 1000; // ~5 weeks
-
 
 // ── Module-level state (persists across requests within a warm Vercel
 // function instance; resets on cold start). Two structures:
@@ -482,84 +479,87 @@ export async function GET(req: NextRequest, { params }: RouteParams) {
   // entirely. A miss (long-tail tickers, brand-new symbols) falls
   // through to the Yahoo+Finnhub path as before.
   const cacheResult = await tryStaticCache(symbol, range);
-  // Defense-in-depth: if the shard is older than 5 weeks, the
-  // monthly cron missed AND the cache is too stale to trust the
-  // trading-day boundaries. Fall through to the dynamic path
-  // rather than serve obviously-old data.
-  let staticCacheStatus: StaticCacheStatus = cacheResult.status;
+  // Serve a shard hit regardless of shardGeneratedAt age. The
+  // historical prices in the shard don't expire — AAPL's close
+  // on 2024-03-15 is the same fact whether the shard was
+  // generated yesterday or six months ago. Earlier versions of
+  // this route gated cache hits behind a 5-week staleness check
+  // and fell back to dynamic Yahoo+Finnhub when the cron lagged;
+  // that turned a small recency gap into a full outage (Vercel
+  // IPs get 429'd by Yahoo, which is the whole reason the static
+  // cache exists). The trailing-splice now widens its window
+  // based on shard age (see pickTrailingRange) so the merged
+  // chart stays gap-free up to a 2-year-old shard; beyond that
+  // there's an irreducible right-edge gap but the bulk of the
+  // history is still correct.
+  const staticCacheStatus: StaticCacheStatus = cacheResult.status;
   if (cacheResult.status === "hit") {
     const hit = cacheResult.hit;
-    const cacheTooStale =
-      Date.now() - hit.shardGeneratedAt > STATIC_CACHE_MAX_STALENESS_MS;
-    if (cacheTooStale) {
-      staticCacheStatus = "shard_too_stale";
-    } else {
-      // CURRENT PRICE FRESHENING.
-      //
-      // The static cache + trailing-splice gives us a 10y daily
-      // history ending at the most recent CLOSE. But the headline
-      // NW wants an INTRADAY price — the difference is the day's
-      // move so far, which the user notices immediately as
-      // "NW dropped/jumped on reload."
-      //
-      // Quickly try Finnhub for the freshest intraday quote. If
-      // it answers, override the trailing-derived currentPrice
-      // (which is yesterday's close). If Finnhub fails, fall
-      // back to whatever the static-cache hit gave us.
-      let currentPrice = hit.quote.currentPrice;
-      const finnhub = await tryFinnhub(symbol, "5y");
-      if (
-        finnhub.ok &&
-        finnhub.quote.currentPrice != null &&
-        finnhub.quote.currentPrice > 0
-      ) {
-        currentPrice = finnhub.quote.currentPrice;
-      }
-      const finalQuote: ParsedQuote = { ...hit.quote, currentPrice };
-      // DON'T poison the LRU when trailing failed — currentPrice is
-      // null in that case and the LRU fallback path serves it as
-      // "lru-fallback" which would propagate the null indefinitely.
-      if (hit.trailingSpliced || currentPrice != null) {
-        lruSet(symbol, finalQuote);
-      }
-      return json(
-        {
-          ...finalQuote,
-          cachedFromStatic: true,
-          // Surfaces staleness to the client: how old is the shard
-          // we served from? UI can warn if shardGeneratedAt is too
-          // old (e.g., > 35 days = monthly cron missed a run).
-          shardGeneratedAt: hit.shardGeneratedAt,
-          trailingSpliced: hit.trailingSpliced,
-          // Corporate-action streams from the shard payload. Empty
-          // arrays when the ticker has no events in the window or
-          // when the shard predates dividend support. Consumers
-          // like TickerLookup use these for yield + total-return
-          // calculations; the headline-NW path ignores them.
-          dividends: hit.dividends,
-          splits: hit.splits,
-          staticCacheStatus: "hit",
-          fetchedAt: Date.now(),
-        },
-        200,
-        {
-          // Edge cache duration depends on whether Finnhub
-          // succeeded — when the response carries an intraday
-          // price, we want it to expire faster so the next fetch
-          // picks up market movement; when it doesn't, longer is
-          // fine.
-          //
-          // Trailing-spliced + intraday: 5 min edge cache.
-          // Trailing-failed (currentPrice fallback to null): 30s.
-          "Cache-Control": hit.trailingSpliced
-            ? "public, s-maxage=300, stale-while-revalidate=3600"
-            : "public, s-maxage=30, stale-while-revalidate=300",
-          // CDN-tagged so a force-refresh can invalidate per-symbol
-          // (Vercel `revalidateTag` API).
-          "Cache-Tag": `quote:${symbol}`,
-        },
-      );
+    // CURRENT PRICE FRESHENING.
+    //
+    // The static cache + trailing-splice gives us a 10y daily
+    // history ending at the most recent CLOSE. But the headline
+    // NW wants an INTRADAY price — the difference is the day's
+    // move so far, which the user notices immediately as
+    // "NW dropped/jumped on reload."
+    //
+    // Quickly try Finnhub for the freshest intraday quote. If
+    // it answers, override the trailing-derived currentPrice
+    // (which is yesterday's close). If Finnhub fails, fall
+    // back to whatever the static-cache hit gave us.
+    let currentPrice = hit.quote.currentPrice;
+    const finnhub = await tryFinnhub(symbol, "5y");
+    if (
+      finnhub.ok &&
+      finnhub.quote.currentPrice != null &&
+      finnhub.quote.currentPrice > 0
+    ) {
+      currentPrice = finnhub.quote.currentPrice;
     }
+    const finalQuote: ParsedQuote = { ...hit.quote, currentPrice };
+    // DON'T poison the LRU when trailing failed — currentPrice is
+    // null in that case and the LRU fallback path serves it as
+    // "lru-fallback" which would propagate the null indefinitely.
+    if (hit.trailingSpliced || currentPrice != null) {
+      lruSet(symbol, finalQuote);
+    }
+    return json(
+      {
+        ...finalQuote,
+        cachedFromStatic: true,
+        // Surfaces staleness to the client: how old is the shard
+        // we served from? UI can show a "data through MM/DD"
+        // badge or warn if the cron has fallen far behind.
+        shardGeneratedAt: hit.shardGeneratedAt,
+        trailingSpliced: hit.trailingSpliced,
+        // Corporate-action streams from the shard payload. Empty
+        // arrays when the ticker has no events in the window or
+        // when the shard predates dividend support. Consumers
+        // like TickerLookup use these for yield + total-return
+        // calculations; the headline-NW path ignores them.
+        dividends: hit.dividends,
+        splits: hit.splits,
+        staticCacheStatus: "hit",
+        fetchedAt: Date.now(),
+      },
+      200,
+      {
+        // Edge cache duration depends on whether Finnhub
+        // succeeded — when the response carries an intraday
+        // price, we want it to expire faster so the next fetch
+        // picks up market movement; when it doesn't, longer is
+        // fine.
+        //
+        // Trailing-spliced + intraday: 5 min edge cache.
+        // Trailing-failed (currentPrice fallback to null): 30s.
+        "Cache-Control": hit.trailingSpliced
+          ? "public, s-maxage=300, stale-while-revalidate=3600"
+          : "public, s-maxage=30, stale-while-revalidate=300",
+        // CDN-tagged so a force-refresh can invalidate per-symbol
+        // (Vercel `revalidateTag` API).
+        "Cache-Tag": `quote:${symbol}`,
+      },
+    );
   }
 
   // Track upstream diagnostic reasons so the response payload
