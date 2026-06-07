@@ -9,8 +9,8 @@ import { UsTaxCalculator } from "@/app/_components/calculators/UsTaxCalculator";
 type CalculatorsSubTab = "investment-growth" | "ticker-lookup" | "us-tax";
 
 const SUB_TABS: { id: CalculatorsSubTab; label: string }[] = [
-  { id: "investment-growth", label: "Investment growth" },
   { id: "ticker-lookup", label: "Ticker lookup" },
+  { id: "investment-growth", label: "Investment growth" },
   { id: "us-tax", label: "US Tax" },
 ];
 
@@ -34,7 +34,7 @@ const SUB_TABS: { id: CalculatorsSubTab; label: string }[] = [
  * the surface grows.
  */
 export function CalculatorsPage() {
-  const [tab, setTab] = useState<CalculatorsSubTab>("investment-growth");
+  const [tab, setTab] = useState<CalculatorsSubTab>("ticker-lookup");
 
   return (
     <>
