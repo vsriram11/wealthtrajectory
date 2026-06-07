@@ -52,13 +52,14 @@ describe("computeCalendarYearStats", () => {
     // No dividends → total return == price return, share
     // multiplier stays at 1.
     expect(r.totalReturnNominal!).toBeCloseTo(0.2, 2);
-    // No dividends → yield is 0.
-    expect(r.dividendYield!).toBe(0);
+    // No dividends → every yield convention reports 0.
+    expect(r.dividendYieldOpening!).toBe(0);
+    expect(r.dividendYieldAverage!).toBe(0);
+    expect(r.dividendYieldTrailing!).toBe(0);
   });
 
-  it("dividend yield: sum-of-year-divs / opening price", () => {
-    // 2021: open ~100, close ~100, two $1 dividends.
-    // Expected yield = 2 / 100 = 0.02.
+  it("dividend yield (opening): sum-of-year-divs / opening price", () => {
+    // Flat 2021 at 100, two $1 dividends → opening yield = 2%.
     const history = buildHistory(2021, 2021, 100, 100);
     const dividends = [
       { t: Date.UTC(2021, 2, 15), amount: 1 },
@@ -66,7 +67,52 @@ describe("computeCalendarYearStats", () => {
     ];
     const rows = computeCalendarYearStats(history, dividends);
     expect(rows).toHaveLength(1);
-    expect(rows[0].dividendYield!).toBeCloseTo(0.02, 3);
+    expect(rows[0].dividendYieldOpening!).toBeCloseTo(0.02, 3);
+  });
+
+  it("dividend yield (average): sum-of-year-divs / mean of daily closes", () => {
+    // Linear ramp 100 → 200 across 2021 → mean close ≈ 150.
+    // $3 of dividends → average yield ≈ 3 / 150 = 2%.
+    const history = buildHistory(2021, 2021, 100, 200);
+    const dividends = [
+      { t: Date.UTC(2021, 2, 15), amount: 1 },
+      { t: Date.UTC(2021, 5, 15), amount: 1 },
+      { t: Date.UTC(2021, 8, 15), amount: 1 },
+    ];
+    const [row] = computeCalendarYearStats(history, dividends);
+    expect(row.dividendYieldAverage!).toBeCloseTo(0.02, 2);
+    // Opening yield (denom = 100) > average yield > trailing
+    // (denom = 200): a ramping price makes the three diverge in
+    // a predictable order, which itself is a useful sanity check.
+    expect(row.dividendYieldOpening!).toBeGreaterThan(
+      row.dividendYieldAverage!,
+    );
+    expect(row.dividendYieldAverage!).toBeGreaterThan(
+      row.dividendYieldTrailing!,
+    );
+  });
+
+  it("dividend yield (trailing): sum-of-year-divs / closing price", () => {
+    // 2021 ramp 100 → 200, $2 of dividends → trailing yield = 1%
+    // (the headline number Yahoo / Morningstar would print).
+    const history = buildHistory(2021, 2021, 100, 200);
+    const dividends = [
+      { t: Date.UTC(2021, 2, 15), amount: 1 },
+      { t: Date.UTC(2021, 8, 15), amount: 1 },
+    ];
+    const [row] = computeCalendarYearStats(history, dividends);
+    expect(row.dividendYieldTrailing!).toBeCloseTo(0.01, 3);
+  });
+
+  it("flat-price years: all three yield conventions agree", () => {
+    // When the price never moves, open / avg / close all equal
+    // the same number → all three yields converge.
+    const history = buildHistory(2021, 2021, 100, 100);
+    const dividends = [{ t: Date.UTC(2021, 5, 15), amount: 2 }];
+    const [row] = computeCalendarYearStats(history, dividends);
+    expect(row.dividendYieldOpening!).toBeCloseTo(0.02, 3);
+    expect(row.dividendYieldAverage!).toBeCloseTo(0.02, 3);
+    expect(row.dividendYieldTrailing!).toBeCloseTo(0.02, 3);
   });
 
   it("total return > price return when dividends are paid (reinvestment lifts shares)", () => {

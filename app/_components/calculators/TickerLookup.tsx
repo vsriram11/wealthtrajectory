@@ -523,21 +523,32 @@ function CalendarYearTable({
         <h3 className="text-[11px] uppercase tracking-wider text-text-dim">
           Calendar year returns
         </h3>
-        <p className="mt-0.5 text-[10px] text-text-dim">
-          Independent of the range selector above. The most recent
-          year is YTD when the data series ends before December 31.
+        <p className="mt-0.5 text-[10px] leading-snug text-text-dim">
+          Independent of the range selector above. Yields use three
+          denominators — opening (year-start price), average (mean
+          daily close), trailing (year-end price; matches Yahoo /
+          Morningstar). The most recent year is YTD when the data
+          series ends before December 31.
         </p>
       </header>
       <div className="overflow-x-auto">
-        <table className="w-full min-w-[560px] text-[11px]">
+        <table className="w-full min-w-[680px] text-[11px]">
           <thead className="text-[10px] uppercase tracking-wider text-text-dim">
             <tr className="border-b border-border">
               <th className="px-3 py-2 text-left font-medium">Year</th>
-              <th className="px-3 py-2 text-right font-medium">Div yield</th>
-              <th className="px-3 py-2 text-right font-medium">Price (nom)</th>
-              <th className="px-3 py-2 text-right font-medium">Price (real)</th>
-              <th className="px-3 py-2 text-right font-medium">Total (nom)</th>
-              <th className="px-3 py-2 text-right font-medium">Total (real)</th>
+              <th className="px-2 py-2 text-right font-medium">
+                Yield <span className="text-text-dim">(open)</span>
+              </th>
+              <th className="px-2 py-2 text-right font-medium">
+                Yield <span className="text-text-dim">(avg)</span>
+              </th>
+              <th className="px-2 py-2 text-right font-medium">
+                Yield <span className="text-text-dim">(trail)</span>
+              </th>
+              <th className="px-2 py-2 text-right font-medium">Price (nom)</th>
+              <th className="px-2 py-2 text-right font-medium">Price (real)</th>
+              <th className="px-2 py-2 text-right font-medium">Total (nom)</th>
+              <th className="px-2 py-2 text-right font-medium">Total (real)</th>
             </tr>
           </thead>
           <tbody>
@@ -554,19 +565,25 @@ function CalendarYearTable({
                     </span>
                   )}
                 </td>
-                <td className="num px-3 py-1.5 text-right text-text">
-                  {fmtPct(row.dividendYield)}
+                <td className="num px-2 py-1.5 text-right text-text">
+                  {fmtPct(row.dividendYieldOpening)}
                 </td>
-                <td className="num px-3 py-1.5 text-right text-text">
+                <td className="num px-2 py-1.5 text-right text-text-muted">
+                  {fmtPct(row.dividendYieldAverage)}
+                </td>
+                <td className="num px-2 py-1.5 text-right text-text-muted">
+                  {fmtPct(row.dividendYieldTrailing)}
+                </td>
+                <td className="num px-2 py-1.5 text-right text-text">
                   {fmtPct(row.priceReturnNominal)}
                 </td>
-                <td className="num px-3 py-1.5 text-right text-text-muted">
+                <td className="num px-2 py-1.5 text-right text-text-muted">
                   {fmtPct(row.priceReturnReal)}
                 </td>
-                <td className="num px-3 py-1.5 text-right text-text">
+                <td className="num px-2 py-1.5 text-right text-text">
                   {fmtPct(row.totalReturnNominal)}
                 </td>
-                <td className="num px-3 py-1.5 text-right text-text-muted">
+                <td className="num px-2 py-1.5 text-right text-text-muted">
                   {fmtPct(row.totalReturnReal)}
                 </td>
               </tr>
@@ -947,8 +964,29 @@ export type CalendarYearRow = {
   year: number;
   /** True when the row covers only part of the year (inception or YTD). */
   partial: boolean;
-  /** Sum of cash dividends / opening price for the period. */
-  dividendYield: number | null;
+  /**
+   * Yield using the year's OPENING price as denominator.
+   * "If I had bought one share on the first trading day of YYYY,
+   * what fraction of my purchase price did I get back in cash
+   * dividends during that year?" Numerator and denominator share
+   * the same as-of anchor, so this number lines up cleanly with
+   * the year's price return.
+   */
+  dividendYieldOpening: number | null;
+  /**
+   * Yield using the AVERAGE close across the year as denominator.
+   * Smooths out the impact of a particularly volatile open or close
+   * — useful when the year had a sharp rally or drawdown that
+   * makes the open/end yields feel unrepresentative.
+   */
+  dividendYieldAverage: number | null;
+  /**
+   * Yield using the year's CLOSING price as denominator. This is
+   * the convention most data providers (Yahoo, Morningstar) print
+   * as "dividend yield" — they always divide trailing-12-month
+   * cash divs by the current price.
+   */
+  dividendYieldTrailing: number | null;
   /** (endPrice / startPrice) - 1. */
   priceReturnNominal: number | null;
   /** Nominal price return deflated by realized US CPI over the period. */
@@ -1042,12 +1080,21 @@ export function computeCalendarYearStats(
     const totalReturnNominal =
       totalReturnMultiple != null ? totalReturnMultiple - 1 : null;
 
-    // Dividend yield: sum of cash dividends paid in the year /
-    // opening price. The opening-price denominator (vs.
-    // closing or average) makes consecutive years comparable
-    // — it's the figure most ETF data sources publish.
-    const ttmCash = yearDivs.reduce((s, d) => s + d.amount, 0);
-    const dividendYield = start.p > 0 ? ttmCash / start.p : null;
+    // Three dividend-yield conventions, all reported. Each tells
+    // a slightly different story:
+    //   - Opening: yield to a buy-at-open holder; lines up with
+    //     the year's price return (same as-of anchor on top + bottom).
+    //   - Average: smooths out a sharp rally or drawdown within
+    //     the year — divides by the mean daily close.
+    //   - Trailing: matches what Yahoo / Morningstar publish as
+    //     "yield" (TTM divs ÷ current price), so this column lets
+    //     the user cross-check against external sources.
+    const cashTotal = yearDivs.reduce((s, d) => s + d.amount, 0);
+    const meanClose =
+      yearHistory.reduce((s, pt) => s + pt.p, 0) / yearHistory.length;
+    const dividendYieldOpening = start.p > 0 ? cashTotal / start.p : null;
+    const dividendYieldAverage = meanClose > 0 ? cashTotal / meanClose : null;
+    const dividendYieldTrailing = end.p > 0 ? cashTotal / end.p : null;
 
     // Real returns: divide the cumulative wealth multiple by the
     // cumulative CPI factor for the period, then subtract 1.
@@ -1067,7 +1114,9 @@ export function computeCalendarYearStats(
     rows.push({
       year,
       partial,
-      dividendYield,
+      dividendYieldOpening,
+      dividendYieldAverage,
+      dividendYieldTrailing,
       priceReturnNominal,
       priceReturnReal,
       totalReturnNominal,
