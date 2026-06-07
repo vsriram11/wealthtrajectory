@@ -262,8 +262,8 @@ function TickerView({
   // divides by the price AT THE ENDPOINT, and for some windows
   // that price isn't otherwise needed.
   const stats = useMemo(
-    () => computeStats(rangedData, data.dividends, data.history),
-    [rangedData, data.dividends, data.history],
+    () => computeStats(rangedData, data.dividends),
+    [rangedData, data.dividends],
   );
   // Inception detection: the static cache window starts Dec 1
   // 2005; if the ticker's first datapoint is later than that, the
@@ -365,7 +365,7 @@ function TickerView({
 
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
         <StatCard
-          label="Dividend yield (TTM)"
+          label="Dividend yield (avg TTM)"
           value={
             stats.dividendYield != null
               ? `${(stats.dividendYield * 100).toFixed(2)}%`
@@ -373,8 +373,8 @@ function TickerView({
           }
           sub={
             stats.ttmDividendsPerShare != null
-              ? `${formatPrice(stats.ttmDividendsPerShare)}/share`
-              : "no dividends in trailing year"
+              ? `${formatPrice(stats.ttmDividendsPerShare)}/share avg trailing 12m`
+              : "no dividends across range"
           }
         />
         <StatCard
@@ -856,12 +856,11 @@ type Stats = {
   ttmDividendsPerShare: number | null;
 };
 
-function computeStats(
+export function computeStats(
   data: TickerData,
   allDividends: ReadonlyArray<{ t: number; amount: number }> = data.dividends,
-  fullHistory: ReadonlyArray<{ t: number; p: number }> = data.history,
 ): Stats {
-  const { history, dividends, currentPrice } = data;
+  const { history, dividends } = data;
   const first = history[0];
   const last = history[history.length - 1];
   const years = Math.max(
@@ -906,35 +905,60 @@ function computeStats(
       ? Math.pow(priceMultiple / cumulativeInflation, 1 / years) - 1
       : null;
 
-  // TTM dividend yield: trailing 12 months from the RANGE
-  // ENDPOINT (per user request — "ttm to be from endpoint of that
-  // date range"). The 12-month window may sit ENTIRELY before the
-  // range start (e.g. range = "1M") so we look at the full
-  // dividend list, not just range-filtered, for TTM aggregation.
-  // The yield divides by the price AT THE ENDPOINT (last.p) so a
-  // historical-endpoint range reflects that day's yield, not
-  // today's yield against a stale TTM payout sum.
-  const ttmCutoff = last.t - 365 * 24 * 60 * 60 * 1000;
-  const ttmDividendsPerShare = allDividends
-    .filter((d) => d.t > ttmCutoff && d.t <= last.t)
-    .reduce((acc, d) => acc + d.amount, 0);
-  // Endpoint price: if the range ends at the live "today",
-  // use the freshest live currentPrice; otherwise use the
-  // historical close on the endpoint date. This is exactly
-  // what the user sees in the chart's right-edge bar.
-  const endIsLive =
-    fullHistory.length > 0 &&
-    last.t >= fullHistory[fullHistory.length - 1].t;
-  const endpointPrice =
-    endIsLive && currentPrice != null && currentPrice > 0
-      ? currentPrice
-      : last.p;
-  const dividendYield =
-    endpointPrice > 0 && ttmDividendsPerShare > 0
-      ? ttmDividendsPerShare / endpointPrice
-      : ttmDividendsPerShare > 0
-        ? null
-        : 0;
+  // Dividend yield (avg trailing-12m across the selected window).
+  // At each trading day t inside the range-filtered `history`,
+  // the rolling TTM yield is:
+  //   ttm_divs(t) = Σ {div.amount : t-365d < div.t ≤ t}
+  //   ttm_yield(t) = ttm_divs(t) / price(t)
+  // We then take the arithmetic mean of ttm_yield(t) across every
+  // day in the window. Answers: "what was the typical yield this
+  // ticker offered while you were holding it during this window?"
+  //
+  // Why this convention vs. the endpoint-only TTM the card used to
+  // show: a single endpoint snapshot doesn't reflect what the
+  // holder actually experienced — e.g. a range covering a yield
+  // collapse (price 2x, divs flat) would print a low number that
+  // wasn't representative of most of the holding period. Averaging
+  // across the window smooths that and matches how research tools
+  // typically aggregate.
+  //
+  // Uses a two-pointer sliding window over the FULL (unfiltered)
+  // dividend list — the trailing 365d from any day in the window
+  // may reach into history that sits OUTSIDE the window, so the
+  // full list is the right source.
+  //
+  // O(history + dividends) — sliding the dividend pointers right
+  // / left across the iteration keeps the running TTM cash sum
+  // current without re-scanning.
+  const TTM_MS = 365 * 24 * 60 * 60 * 1000;
+  const sortedDivs = allDividends; // already sorted ascending by t
+  let divRightIdx = 0;
+  let divLeftIdx = 0;
+  let runningTtmCash = 0;
+  let yieldAccumulator = 0;
+  let ttmCashAccumulator = 0;
+  let yieldSamples = 0;
+  for (const pt of history) {
+    while (divRightIdx < sortedDivs.length && sortedDivs[divRightIdx].t <= pt.t) {
+      runningTtmCash += sortedDivs[divRightIdx].amount;
+      divRightIdx++;
+    }
+    while (
+      divLeftIdx < divRightIdx &&
+      sortedDivs[divLeftIdx].t <= pt.t - TTM_MS
+    ) {
+      runningTtmCash -= sortedDivs[divLeftIdx].amount;
+      divLeftIdx++;
+    }
+    if (pt.p > 0) {
+      yieldAccumulator += runningTtmCash / pt.p;
+      ttmCashAccumulator += runningTtmCash;
+      yieldSamples++;
+    }
+  }
+  const dividendYield = yieldSamples > 0 ? yieldAccumulator / yieldSamples : 0;
+  const ttmDividendsPerShare =
+    yieldSamples > 0 ? ttmCashAccumulator / yieldSamples : 0;
 
   return {
     years,

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { computeCalendarYearStats } from "./TickerLookup";
+import { computeCalendarYearStats, computeStats } from "./TickerLookup";
 
 /**
  * Build a synthetic daily-history series across `years`, with the
@@ -203,3 +203,147 @@ describe("computeCalendarYearStats", () => {
     expect(years).toContain(2018);
   });
 });
+
+/**
+ * Build a TickerData fixture from a synthetic price + dividend
+ * series. computeStats reads `history` (range-filtered) and
+ * `dividends` (range-filtered) from the data object; we set both
+ * to the same series so the "selected window" IS the whole
+ * series, and pass an `allDividends` override on the calls where
+ * we want to model a TTM lookback that reaches PRIOR to the
+ * window.
+ */
+function tickerData(
+  history: Array<{ t: number; p: number }>,
+  dividends: Array<{ t: number; amount: number }>,
+) {
+  return {
+    currentPrice: history[history.length - 1]?.p ?? null,
+    history,
+    dividends,
+    splits: [],
+    lastPoint: history[history.length - 1] ?? { t: 0, p: 0 },
+  };
+}
+
+describe("computeStats — dividend yield (avg TTM across window)", () => {
+  it("flat price + steady dividends: avg TTM yield equals annual divs / flat price", () => {
+    // Three full years 2019-2021 at price 100, $1 dividend each
+    // June 15. From any day in years 2-3 the TTM cash is exactly
+    // $1 → yield 1%. Year 1 ramps up from 0 (Jan-May) to $1
+    // (Jun-Dec) so the avg across all three years is a mix of
+    // <1% and 1%. The 2020-2021-only window pins the steady-
+    // state case cleanly.
+    const history = buildDailyHistory(
+      Date.UTC(2020, 0, 2),
+      Date.UTC(2021, 11, 30),
+      100,
+      100,
+    );
+    const allDividends = [
+      { t: Date.UTC(2019, 5, 15), amount: 1 },
+      { t: Date.UTC(2020, 5, 15), amount: 1 },
+      { t: Date.UTC(2021, 5, 15), amount: 1 },
+    ];
+    const stats = computeStats(
+      tickerData(history, allDividends),
+      allDividends,
+    );
+    expect(stats.dividendYield).toBeCloseTo(0.01, 3);
+    expect(stats.ttmDividendsPerShare).toBeCloseTo(1.0, 1);
+  });
+
+  it("ramping price + flat dividends: avg yield sits BETWEEN open-yield and end-yield", () => {
+    // Price ramps 100 → 200 across 2021. $2/yr in dividends
+    // (steady-state by start of year because of priors). At the
+    // window's open price ~100 the yield is ~2%; at the end
+    // price 200 it's ~1%. The avg across the linearly-rising
+    // window should be in between (and closer to the geometric
+    // middle since the yield is the reciprocal of a linear
+    // sequence).
+    const history = buildDailyHistory(
+      Date.UTC(2021, 0, 2),
+      Date.UTC(2021, 11, 30),
+      100,
+      200,
+    );
+    const allDividends = [
+      { t: Date.UTC(2020, 2, 15), amount: 0.5 },
+      { t: Date.UTC(2020, 5, 15), amount: 0.5 },
+      { t: Date.UTC(2020, 8, 15), amount: 0.5 },
+      { t: Date.UTC(2020, 11, 15), amount: 0.5 },
+      { t: Date.UTC(2021, 2, 15), amount: 0.5 },
+      { t: Date.UTC(2021, 5, 15), amount: 0.5 },
+      { t: Date.UTC(2021, 8, 15), amount: 0.5 },
+      { t: Date.UTC(2021, 11, 15), amount: 0.5 },
+    ];
+    const stats = computeStats(
+      tickerData(history, allDividends),
+      allDividends,
+    );
+    // Boundary check: between end-of-window yield (1%) and
+    // open-of-window yield (2%). Not annualizing or geometric-
+    // meaning, just the arithmetic mean of daily TTM yields.
+    expect(stats.dividendYield!).toBeGreaterThan(0.01);
+    expect(stats.dividendYield!).toBeLessThan(0.02);
+  });
+
+  it("zero dividends across the entire window → yield is 0", () => {
+    const history = buildDailyHistory(
+      Date.UTC(2020, 0, 2),
+      Date.UTC(2020, 11, 30),
+      100,
+      120,
+    );
+    const stats = computeStats(tickerData(history, []), []);
+    expect(stats.dividendYield).toBe(0);
+    // The return shape converts a zero TTM cash sum to null so
+    // the UI sub-label can fall through to "no dividends across
+    // range" instead of printing "$0.00/share".
+    expect(stats.ttmDividendsPerShare).toBeNull();
+  });
+
+  it("uses the FULL dividend list (not just window-filtered) for the trailing 12m lookback", () => {
+    // A 1-month window in mid-2021. The TTM lookback from any
+    // day in that window reaches back into 2020 dividends —
+    // which sit OUTSIDE the window. The function must include
+    // them via allDividends.
+    const windowHistory = buildDailyHistory(
+      Date.UTC(2021, 5, 1),
+      Date.UTC(2021, 5, 30),
+      100,
+      100,
+    );
+    const allDividends = [
+      { t: Date.UTC(2020, 8, 15), amount: 1 },
+      { t: Date.UTC(2020, 11, 15), amount: 1 },
+      { t: Date.UTC(2021, 2, 15), amount: 1 },
+    ];
+    // The window's own `dividends` field is empty (no divs
+    // landed in June 2021), but allDividends carries the
+    // trailing context.
+    const stats = computeStats(
+      tickerData(windowHistory, []),
+      allDividends,
+    );
+    // Three $1 divs within the trailing-12m of every June 2021
+    // day → yield ≈ 3%, avg TTM cash ≈ $3.
+    expect(stats.dividendYield).toBeCloseTo(0.03, 3);
+    expect(stats.ttmDividendsPerShare).toBeCloseTo(3, 1);
+  });
+});
+
+function buildDailyHistory(
+  startMs: number,
+  endMs: number,
+  startPrice: number,
+  endPrice: number,
+): Array<{ t: number; p: number }> {
+  const out: Array<{ t: number; p: number }> = [];
+  const STEP_MS = 86_400_000; // daily
+  for (let t = startMs; t <= endMs; t += STEP_MS) {
+    const f = (t - startMs) / (endMs - startMs);
+    out.push({ t, p: startPrice + f * (endPrice - startPrice) });
+  }
+  return out;
+}
