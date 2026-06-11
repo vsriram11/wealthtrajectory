@@ -262,8 +262,8 @@ function TickerView({
   // divides by the price AT THE ENDPOINT, and for some windows
   // that price isn't otherwise needed.
   const stats = useMemo(
-    () => computeStats(rangedData, data.dividends, data.history),
-    [rangedData, data.dividends, data.history],
+    () => computeStats(rangedData, data.dividends),
+    [rangedData, data.dividends],
   );
   // Inception detection: the static cache window starts Dec 1
   // 2005; if the ticker's first datapoint is later than that, the
@@ -365,7 +365,7 @@ function TickerView({
 
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
         <StatCard
-          label="Dividend yield (TTM)"
+          label="Dividend yield (avg TTM)"
           value={
             stats.dividendYield != null
               ? `${(stats.dividendYield * 100).toFixed(2)}%`
@@ -373,8 +373,8 @@ function TickerView({
           }
           sub={
             stats.ttmDividendsPerShare != null
-              ? `${formatPrice(stats.ttmDividendsPerShare)}/share`
-              : "no dividends in trailing year"
+              ? `${formatPrice(stats.ttmDividendsPerShare)}/share avg trailing 12m`
+              : "no dividends across range"
           }
         />
         <StatCard
@@ -456,6 +456,14 @@ function TickerView({
           </ul>
         </details>
       )}
+
+      {/* Calendar-year table — uses the FULL history + dividends
+          regardless of the range selection above. Per user
+          request: "regardless of the selected date range, includes
+          a calendar year dividend yield, price return (nominal +
+          real), total return (nominal + real)." Stable reference
+          table for scanning year-by-year behavior. */}
+      <CalendarYearTable history={data.history} dividends={data.dividends} />
     </div>
   );
 }
@@ -492,6 +500,104 @@ function StatCard({
       <div className="mt-0.5 text-[10px] text-text-dim">{sub}</div>
     </div>
   );
+}
+
+function CalendarYearTable({
+  history,
+  dividends,
+}: {
+  history: ReadonlyArray<{ t: number; p: number }>;
+  dividends: ReadonlyArray<{ t: number; amount: number }>;
+}) {
+  const rows = useMemo(
+    () => computeCalendarYearStats(history, dividends),
+    [history, dividends],
+  );
+  if (rows.length === 0) return null;
+  // Newest year on top — matches how users scan stock data
+  // dashboards (latest first; older years scroll into view).
+  const display = [...rows].reverse();
+  return (
+    <section className="rounded-lg border border-border bg-bg-elevated">
+      <header className="border-b border-border px-3 py-2">
+        <h3 className="text-[11px] uppercase tracking-wider text-text-dim">
+          Calendar year returns
+        </h3>
+        <p className="mt-0.5 text-[10px] leading-snug text-text-dim">
+          Independent of the range selector above. Yields use three
+          denominators — opening (year-start price), average (mean
+          daily close), trailing (year-end price; matches Yahoo /
+          Morningstar). The most recent year is YTD when the data
+          series ends before December 31.
+        </p>
+      </header>
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[680px] text-[11px]">
+          <thead className="text-[10px] uppercase tracking-wider text-text-dim">
+            <tr className="border-b border-border">
+              <th className="px-3 py-2 text-left font-medium">Year</th>
+              <th className="px-2 py-2 text-right font-medium">
+                Yield <span className="text-text-dim">(open)</span>
+              </th>
+              <th className="px-2 py-2 text-right font-medium">
+                Yield <span className="text-text-dim">(avg)</span>
+              </th>
+              <th className="px-2 py-2 text-right font-medium">
+                Yield <span className="text-text-dim">(trail)</span>
+              </th>
+              <th className="px-2 py-2 text-right font-medium">Price (nom)</th>
+              <th className="px-2 py-2 text-right font-medium">Price (real)</th>
+              <th className="px-2 py-2 text-right font-medium">Total (nom)</th>
+              <th className="px-2 py-2 text-right font-medium">Total (real)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {display.map((row) => (
+              <tr
+                key={row.year}
+                className="border-b border-border/60 last:border-0"
+              >
+                <td className="px-3 py-1.5 text-left font-medium text-text">
+                  {row.year}
+                  {row.partial && (
+                    <span className="ml-1 text-[9px] uppercase text-text-dim">
+                      YTD
+                    </span>
+                  )}
+                </td>
+                <td className="num px-2 py-1.5 text-right text-text">
+                  {fmtPct(row.dividendYieldOpening)}
+                </td>
+                <td className="num px-2 py-1.5 text-right text-text-muted">
+                  {fmtPct(row.dividendYieldAverage)}
+                </td>
+                <td className="num px-2 py-1.5 text-right text-text-muted">
+                  {fmtPct(row.dividendYieldTrailing)}
+                </td>
+                <td className="num px-2 py-1.5 text-right text-text">
+                  {fmtPct(row.priceReturnNominal)}
+                </td>
+                <td className="num px-2 py-1.5 text-right text-text-muted">
+                  {fmtPct(row.priceReturnReal)}
+                </td>
+                <td className="num px-2 py-1.5 text-right text-text">
+                  {fmtPct(row.totalReturnNominal)}
+                </td>
+                <td className="num px-2 py-1.5 text-right text-text-muted">
+                  {fmtPct(row.totalReturnReal)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
+function fmtPct(v: number | null): string {
+  if (v == null || !Number.isFinite(v)) return "—";
+  return `${(v * 100).toFixed(2)}%`;
 }
 
 function PriceChart({
@@ -750,12 +856,11 @@ type Stats = {
   ttmDividendsPerShare: number | null;
 };
 
-function computeStats(
+export function computeStats(
   data: TickerData,
   allDividends: ReadonlyArray<{ t: number; amount: number }> = data.dividends,
-  fullHistory: ReadonlyArray<{ t: number; p: number }> = data.history,
 ): Stats {
-  const { history, dividends, currentPrice } = data;
+  const { history, dividends } = data;
   const first = history[0];
   const last = history[history.length - 1];
   const years = Math.max(
@@ -800,35 +905,60 @@ function computeStats(
       ? Math.pow(priceMultiple / cumulativeInflation, 1 / years) - 1
       : null;
 
-  // TTM dividend yield: trailing 12 months from the RANGE
-  // ENDPOINT (per user request — "ttm to be from endpoint of that
-  // date range"). The 12-month window may sit ENTIRELY before the
-  // range start (e.g. range = "1M") so we look at the full
-  // dividend list, not just range-filtered, for TTM aggregation.
-  // The yield divides by the price AT THE ENDPOINT (last.p) so a
-  // historical-endpoint range reflects that day's yield, not
-  // today's yield against a stale TTM payout sum.
-  const ttmCutoff = last.t - 365 * 24 * 60 * 60 * 1000;
-  const ttmDividendsPerShare = allDividends
-    .filter((d) => d.t > ttmCutoff && d.t <= last.t)
-    .reduce((acc, d) => acc + d.amount, 0);
-  // Endpoint price: if the range ends at the live "today",
-  // use the freshest live currentPrice; otherwise use the
-  // historical close on the endpoint date. This is exactly
-  // what the user sees in the chart's right-edge bar.
-  const endIsLive =
-    fullHistory.length > 0 &&
-    last.t >= fullHistory[fullHistory.length - 1].t;
-  const endpointPrice =
-    endIsLive && currentPrice != null && currentPrice > 0
-      ? currentPrice
-      : last.p;
-  const dividendYield =
-    endpointPrice > 0 && ttmDividendsPerShare > 0
-      ? ttmDividendsPerShare / endpointPrice
-      : ttmDividendsPerShare > 0
-        ? null
-        : 0;
+  // Dividend yield (avg trailing-12m across the selected window).
+  // At each trading day t inside the range-filtered `history`,
+  // the rolling TTM yield is:
+  //   ttm_divs(t) = Σ {div.amount : t-365d < div.t ≤ t}
+  //   ttm_yield(t) = ttm_divs(t) / price(t)
+  // We then take the arithmetic mean of ttm_yield(t) across every
+  // day in the window. Answers: "what was the typical yield this
+  // ticker offered while you were holding it during this window?"
+  //
+  // Why this convention vs. the endpoint-only TTM the card used to
+  // show: a single endpoint snapshot doesn't reflect what the
+  // holder actually experienced — e.g. a range covering a yield
+  // collapse (price 2x, divs flat) would print a low number that
+  // wasn't representative of most of the holding period. Averaging
+  // across the window smooths that and matches how research tools
+  // typically aggregate.
+  //
+  // Uses a two-pointer sliding window over the FULL (unfiltered)
+  // dividend list — the trailing 365d from any day in the window
+  // may reach into history that sits OUTSIDE the window, so the
+  // full list is the right source.
+  //
+  // O(history + dividends) — sliding the dividend pointers right
+  // / left across the iteration keeps the running TTM cash sum
+  // current without re-scanning.
+  const TTM_MS = 365 * 24 * 60 * 60 * 1000;
+  const sortedDivs = allDividends; // already sorted ascending by t
+  let divRightIdx = 0;
+  let divLeftIdx = 0;
+  let runningTtmCash = 0;
+  let yieldAccumulator = 0;
+  let ttmCashAccumulator = 0;
+  let yieldSamples = 0;
+  for (const pt of history) {
+    while (divRightIdx < sortedDivs.length && sortedDivs[divRightIdx].t <= pt.t) {
+      runningTtmCash += sortedDivs[divRightIdx].amount;
+      divRightIdx++;
+    }
+    while (
+      divLeftIdx < divRightIdx &&
+      sortedDivs[divLeftIdx].t <= pt.t - TTM_MS
+    ) {
+      runningTtmCash -= sortedDivs[divLeftIdx].amount;
+      divLeftIdx++;
+    }
+    if (pt.p > 0) {
+      yieldAccumulator += runningTtmCash / pt.p;
+      ttmCashAccumulator += runningTtmCash;
+      yieldSamples++;
+    }
+  }
+  const dividendYield = yieldSamples > 0 ? yieldAccumulator / yieldSamples : 0;
+  const ttmDividendsPerShare =
+    yieldSamples > 0 ? ttmCashAccumulator / yieldSamples : 0;
 
   return {
     years,
@@ -840,6 +970,184 @@ function computeStats(
     dividendYield,
     ttmDividendsPerShare: ttmDividendsPerShare > 0 ? ttmDividendsPerShare : null,
   };
+}
+
+/**
+ * One row of the calendar-year metrics table. Returned per
+ * complete year covered by the ticker's history, plus a YTD row
+ * when the most recent year is incomplete.
+ *
+ * Conventions for partial / YTD rows: the period is the available
+ * window inside that year (Jan 1 → last data point, or first data
+ * point → Dec 31 for a ticker whose inception falls mid-year).
+ * Returns are period returns, NOT annualized — the row's label is
+ * "YTD" so the user knows it's a partial-year figure.
+ */
+export type CalendarYearRow = {
+  /** Calendar year. */
+  year: number;
+  /** True when the row covers only part of the year (inception or YTD). */
+  partial: boolean;
+  /**
+   * Yield using the year's OPENING price as denominator.
+   * "If I had bought one share on the first trading day of YYYY,
+   * what fraction of my purchase price did I get back in cash
+   * dividends during that year?" Numerator and denominator share
+   * the same as-of anchor, so this number lines up cleanly with
+   * the year's price return.
+   */
+  dividendYieldOpening: number | null;
+  /**
+   * Yield using the AVERAGE close across the year as denominator.
+   * Smooths out the impact of a particularly volatile open or close
+   * — useful when the year had a sharp rally or drawdown that
+   * makes the open/end yields feel unrepresentative.
+   */
+  dividendYieldAverage: number | null;
+  /**
+   * Yield using the year's CLOSING price as denominator. This is
+   * the convention most data providers (Yahoo, Morningstar) print
+   * as "dividend yield" — they always divide trailing-12-month
+   * cash divs by the current price.
+   */
+  dividendYieldTrailing: number | null;
+  /** (endPrice / startPrice) - 1. */
+  priceReturnNominal: number | null;
+  /** Nominal price return deflated by realized US CPI over the period. */
+  priceReturnReal: number | null;
+  /** Price return + dividend reinvestment at ex-date close. */
+  totalReturnNominal: number | null;
+  /** Nominal total return deflated by realized US CPI over the period. */
+  totalReturnReal: number | null;
+};
+
+/**
+ * Compute per-calendar-year price + total-return + dividend yield
+ * rows from a ticker's full daily history and dividend stream.
+ *
+ * Pure / inputs-only — exported for unit testing without rendering
+ * the React component. Uses lib/data/cpiHistory.ts for the
+ * inflation deflator so real returns line up with the rest of the
+ * app's real-vs-nominal math.
+ *
+ * Why this exists in addition to the range-driven stat cards:
+ * the user wanted "calendar year" metrics that DON'T change when
+ * the range chip selection changes — a stable reference table
+ * the user can scan to see how the ticker behaved across years
+ * without flipping ranges.
+ */
+export function computeCalendarYearStats(
+  history: ReadonlyArray<{ t: number; p: number }>,
+  dividends: ReadonlyArray<{ t: number; amount: number }>,
+): CalendarYearRow[] {
+  if (history.length < 2) return [];
+
+  const firstYear = new Date(history[0].t).getUTCFullYear();
+  const lastYear = new Date(history[history.length - 1].t).getUTCFullYear();
+
+  // Bucket history points + dividends by calendar year once, in a
+  // single pass — avoids an O(years × points) re-walk per row.
+  const histByYear = new Map<number, Array<{ t: number; p: number }>>();
+  for (const pt of history) {
+    const y = new Date(pt.t).getUTCFullYear();
+    let bucket = histByYear.get(y);
+    if (!bucket) {
+      bucket = [];
+      histByYear.set(y, bucket);
+    }
+    bucket.push(pt);
+  }
+  const divsByYear = new Map<number, Array<{ t: number; amount: number }>>();
+  for (const d of dividends) {
+    const y = new Date(d.t).getUTCFullYear();
+    let bucket = divsByYear.get(y);
+    if (!bucket) {
+      bucket = [];
+      divsByYear.set(y, bucket);
+    }
+    bucket.push(d);
+  }
+
+  const rows: CalendarYearRow[] = [];
+  for (let year = firstYear; year <= lastYear; year++) {
+    const yearHistory = histByYear.get(year);
+    if (!yearHistory || yearHistory.length < 2) continue;
+    const start = yearHistory[0];
+    const end = yearHistory[yearHistory.length - 1];
+    // A row is "partial" when either endpoint is interior to the
+    // calendar year — i.e., the ticker started after Jan 1 or
+    // the data series ends before Dec 31 (the YTD case for the
+    // most recent year).
+    const yearStartMs = Date.UTC(year, 0, 1);
+    const yearEndCutoffMs = Date.UTC(year + 1, 0, 1);
+    const FEW_DAYS_MS = 7 * 86_400_000;
+    const partial =
+      start.t - yearStartMs > FEW_DAYS_MS ||
+      yearEndCutoffMs - end.t > FEW_DAYS_MS;
+
+    const priceMultiple = start.p > 0 ? end.p / start.p : null;
+    const priceReturnNominal =
+      priceMultiple != null ? priceMultiple - 1 : null;
+
+    // Total return: reinvest each dividend in the year at the
+    // close on or just after its ex-date (matches the in-range
+    // total-return convention). Share multiplier ≥ 1.
+    let shareMultiplier = 1;
+    const yearDivs = divsByYear.get(year) ?? [];
+    for (const d of yearDivs) {
+      const priceOnEx = priceAtOrAfter(yearHistory, d.t);
+      if (priceOnEx == null || priceOnEx <= 0) continue;
+      shareMultiplier *= 1 + d.amount / priceOnEx;
+    }
+    const totalReturnMultiple =
+      priceMultiple != null ? priceMultiple * shareMultiplier : null;
+    const totalReturnNominal =
+      totalReturnMultiple != null ? totalReturnMultiple - 1 : null;
+
+    // Three dividend-yield conventions, all reported. Each tells
+    // a slightly different story:
+    //   - Opening: yield to a buy-at-open holder; lines up with
+    //     the year's price return (same as-of anchor on top + bottom).
+    //   - Average: smooths out a sharp rally or drawdown within
+    //     the year — divides by the mean daily close.
+    //   - Trailing: matches what Yahoo / Morningstar publish as
+    //     "yield" (TTM divs ÷ current price), so this column lets
+    //     the user cross-check against external sources.
+    const cashTotal = yearDivs.reduce((s, d) => s + d.amount, 0);
+    const meanClose =
+      yearHistory.reduce((s, pt) => s + pt.p, 0) / yearHistory.length;
+    const dividendYieldOpening = start.p > 0 ? cashTotal / start.p : null;
+    const dividendYieldAverage = meanClose > 0 ? cashTotal / meanClose : null;
+    const dividendYieldTrailing = end.p > 0 ? cashTotal / end.p : null;
+
+    // Real returns: divide the cumulative wealth multiple by the
+    // cumulative CPI factor for the period, then subtract 1.
+    // Inflation factor can be null for years outside the CPI
+    // series; surface as null rather than fall through to the
+    // nominal figure.
+    const inflFactor = inflationFactor(start.t, end.t);
+    const priceReturnReal =
+      priceMultiple != null && inflFactor != null && inflFactor > 0
+        ? priceMultiple / inflFactor - 1
+        : null;
+    const totalReturnReal =
+      totalReturnMultiple != null && inflFactor != null && inflFactor > 0
+        ? totalReturnMultiple / inflFactor - 1
+        : null;
+
+    rows.push({
+      year,
+      partial,
+      dividendYieldOpening,
+      dividendYieldAverage,
+      dividendYieldTrailing,
+      priceReturnNominal,
+      priceReturnReal,
+      totalReturnNominal,
+      totalReturnReal,
+    });
+  }
+  return rows;
 }
 
 /**
